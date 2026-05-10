@@ -19,9 +19,6 @@ VisionPort/hlsdk-portable/
 Lambda1VR/
 Spatialcraft/
 
-# Stale local scratch
-Lambda_VisionPro copy/
-
 # MoltenVK xcframework binary (download via setup script)
 LambdaVision/Vendor/MoltenVK.xcframework/
 
