@@ -1,15 +1,24 @@
+diff --git a/3rdparty/library_suffix b/3rdparty/library_suffix
+--- a/3rdparty/library_suffix
++++ b/3rdparty/library_suffix
+@@ -1 +1 @@
+-Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa
++Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa-dirty
+diff --git a/3rdparty/mainui b/3rdparty/mainui
+--- a/3rdparty/mainui
++++ b/3rdparty/mainui
+@@ -1 +1 @@
+-Subproject commit a4ec67f28037583617c05222e54e04777f677041
++Subproject commit a4ec67f28037583617c05222e54e04777f677041-dirty
 diff --git a/engine/common/filesystem_engine.c b/engine/common/filesystem_engine.c
-index 3bda62d..e8535de 100644
+index 3bda62d..07bcb8e 100644
 --- a/engine/common/filesystem_engine.c
 +++ b/engine/common/filesystem_engine.c
-@@ -216,6 +216,28 @@ static void FS_UnloadProgs( void )
+@@ -216,6 +216,25 @@ static void FS_UnloadProgs( void )
  #define FILESYSTEM_STDIO_DLL "filesystem_stdio." OS_LIB_EXT
  #endif
  
-+#if defined(__APPLE__)
-+#include <TargetConditionals.h>
-+#endif
-+#if defined(__APPLE__) && defined(TARGET_OS_VISION) && TARGET_OS_VISION
++#if XASH_VISIONOS
 +// visionOS forbids dlopen()'ing dylibs from outside the bundle. Filesystem
 +// is statically linked into the engine; bind GetFSAPI / CreateInterface
 +// directly instead of going through COM_LoadLibrary.
@@ -31,11 +40,11 @@ index 3bda62d..e8535de 100644
  static qboolean FS_LoadProgs( void )
  {
  	const char *name = FILESYSTEM_STDIO_DLL;
-@@ -253,6 +275,7 @@ static qboolean FS_LoadProgs( void )
+@@ -253,6 +272,7 @@ static qboolean FS_LoadProgs( void )
  	Con_DPrintf( "%s: filesystem_stdio successfully loaded\n", __func__ );
  	return true;
  }
-+#endif // __APPLE__ && TARGET_OS_VISION
++#endif // XASH_VISIONOS
  
  static qboolean FS_DetermineRootDirectory( char *out, size_t size )
  {
@@ -98,6 +107,51 @@ index ebb7fe0..f9dd283 100644
  	return 0;
  }
  
+diff --git a/engine/common/system.c b/engine/common/system.c
+index ec64677..be7f43f 100644
+--- a/engine/common/system.c
++++ b/engine/common/system.c
+@@ -534,7 +534,7 @@ qboolean Sys_CanRestart( void )
+ {
+ #if XASH_NSWITCH || XASH_PSVITA
+ 	return true;
+-#elif XASH_IOS
++#elif XASH_IOS || XASH_VISIONOS
+ 	return false;
+ #else
+ 	int exelen = wai_getExecutablePath( NULL, 0, NULL );
+diff --git a/engine/platform/posix/sys_posix.c b/engine/platform/posix/sys_posix.c
+index 72bafc2..973d9bd 100644
+--- a/engine/platform/posix/sys_posix.c
++++ b/engine/platform/posix/sys_posix.c
+@@ -22,7 +22,7 @@ GNU General Public License for more details.
+ #include "platform/platform.h"
+ #include "menu_int.h"
+ 
+-#if !XASH_ANDROID && !XASH_NSWITCH && !XASH_PSVITA
++#if !XASH_ANDROID && !XASH_NSWITCH && !XASH_PSVITA && !XASH_VISIONOS
+ void Platform_ShellExecute( const char *path, const char *parms )
+ {
+ 	const char *argv[] = { OPEN_COMMAND, path, NULL };
+@@ -37,7 +37,17 @@ void Platform_ShellExecute( const char *path, const char *parms )
+ 		exit( 1 );
+ 	}
+ }
+-#endif // !XASH_ANDROID && !XASH_NSWITCH && !XASH_PSVITA
++#endif // !XASH_ANDROID && !XASH_NSWITCH && !XASH_PSVITA && !XASH_VISIONOS
++
++#if XASH_VISIONOS
++// visionOS sandbox forbids fork()/execvp(). The host app is responsible
++// for routing "open URL" intents through UIApplication if/when needed;
++// from the engine's perspective this is a no-op.
++void Platform_ShellExecute( const char *path, const char *parms )
++{
++	(void)path; (void)parms;
++}
++#endif // XASH_VISIONOS
+ 
+ void Posix_Daemonize( void )
+ {
 diff --git a/filesystem/filesystem.c b/filesystem/filesystem.c
 index 302548a..399a05a 100644
 --- a/filesystem/filesystem.c
