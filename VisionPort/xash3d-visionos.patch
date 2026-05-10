@@ -1,87 +1,3 @@
-diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
-index 5733329..73de016 100644
---- a/scripts/waifulib/xcompile.py
-+++ b/scripts/waifulib/xcompile.py
-@@ -75,6 +75,33 @@ class iOS:
- 	def cxx(self):
- 		return 'clang++'
- 
-+class visionOS:
-+	ctx = None
-+	sdkpath = None
-+	target = None
-+
-+	def __init__(self, ctx, issim):
-+		self.ctx = ctx
-+		sdk = 'xrsimulator' if issim else 'xros'
-+		self.sdkpath = ctx.cmd_and_log('xcrun --show-sdk-path --sdk %s' % sdk).strip()
-+		# clang takes the OS version as part of the triple for visionOS
-+		self.target = '--target=arm64-apple-xros2.0'
-+		if issim: self.target += '-simulator'
-+
-+	def cflags(self, cxx = False):
-+		cflags = [ '-isysroot' + self.sdkpath, self.target ]
-+		return cflags
-+
-+	def linkflags(self):
-+		linkflags = [ '-isysroot' + self.sdkpath, self.target ]
-+		return linkflags
-+
-+	def cc(self):
-+		return 'clang'
-+
-+	def cxx(self):
-+		return 'clang++'
-+
- # This class does support ONLY r10e and r19c/r20 NDK
- class Android:
- 	ctx            = None # waf context
-@@ -644,10 +671,14 @@ def options(opt):
- 		help='enable building for Emscripten')
- 	xc.add_option('--psp', action='store', dest='PSP_OPTS', default=None,
- 		help='enable building for PlayStation Portable, format: --psp=<module type>,<fw version>,<render type>, example: --psp=prx,660,HW')
--	xc.add_option('--ios', action='store_true', dest='IOS', default=False, 
-+	xc.add_option('--ios', action='store_true', dest='IOS', default=False,
- 		help='enable building for iOS [default: %(default)s]')
--	xc.add_option('--ios-simulator', action='store_true', dest='IOSSIM', default=False, 
-+	xc.add_option('--ios-simulator', action='store_true', dest='IOSSIM', default=False,
- 		help='enable building for iOS Simulator [default: %(default)s]')
-+	xc.add_option('--xros', action='store_true', dest='XROS', default=False,
-+		help='enable building for visionOS [default: %(default)s]')
-+	xc.add_option('--xros-simulator', action='store_true', dest='XROSSIM', default=False,
-+		help='enable building for visionOS Simulator [default: %(default)s]')
- 
- def configure(conf):
- 	if 'CROSS_COMPILE' in conf.environ:
-@@ -799,12 +830,27 @@ def configure(conf):
- 
- 		conf.environ['CC'] = ios.cc()
- 		conf.environ['CXX'] = ios.cxx()
--		
-+
- 		conf.env.CFLAGS += ios.cflags()
- 		conf.env.CXXFLAGS += ios.cflags()
- 		conf.env.LINKFLAGS += ios.linkflags()
- 		conf.env.IOS = 1
- 
-+	elif conf.options.XROS or conf.options.XROSSIM:
-+		issim = True if conf.options.XROSSIM else False
-+
-+		conf.xros = xros = visionOS(conf, issim)
-+
-+		conf.environ['CC'] = xros.cc()
-+		conf.environ['CXX'] = xros.cxx()
-+
-+		conf.env.CFLAGS += xros.cflags()
-+		conf.env.CXXFLAGS += xros.cflags()
-+		conf.env.LINKFLAGS += xros.linkflags()
-+		conf.env.XROS = 1
-+		# Don't set IOS=1 — that pulls in the SDL2 UIKit launcher.
-+		# visionOS will get its own CompositorServices launcher.
-+
- 	conf.env.MAGX = conf.options.MAGX
- 	conf.env.MSVC_WINE = conf.options.MSVC_WINE
- 	conf.env.SAILFISH = conf.options.SAILFISH
 diff --git a/engine/common/filesystem_engine.c b/engine/common/filesystem_engine.c
 index 3bda62d..e8535de 100644
 --- a/engine/common/filesystem_engine.c
@@ -182,6 +98,31 @@ index ebb7fe0..f9dd283 100644
  	return 0;
  }
  
+diff --git a/filesystem/filesystem.c b/filesystem/filesystem.c
+index 302548a..399a05a 100644
+--- a/filesystem/filesystem.c
++++ b/filesystem/filesystem.c
+@@ -1601,6 +1601,7 @@ static void *Sys_GetNativeObjectStub( const char *object )
+ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qboolean *has_game_dir )
+ {
+ 	stringlist_t dirs;
++	char buf[MAX_SYSPATH];
+ 	int i;
+ 
+ 	stringlistinit( &dirs );
+@@ -1609,7 +1610,11 @@ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qb
+ 
+ 	for( i = 0; i < dirs.numstrings; i++ )
+ 	{
+-		if( !FS_SysFolderExists( dirs.strings[i] ))
++		// listdirectory returns leaf names; prepend path so the existence
++		// check works when path != cwd (e.g. -rodir pointing into the
++		// app bundle on visionOS).
++		Q_snprintf( buf, sizeof( buf ), "%s/%s", path, dirs.strings[i] );
++		if( !FS_SysFolderExists( buf ))
+ 			continue;
+ 
+ 		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
 index 5733329..73de016 100644
 --- a/scripts/waifulib/xcompile.py
