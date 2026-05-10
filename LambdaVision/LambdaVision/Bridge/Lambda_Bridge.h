@@ -61,9 +61,14 @@ void *lambda_vulkan_clear_iosurface(int width, int height,
 // or first call: lazily reallocates the slot.
 //
 // slot ∈ [0, 3), eye ∈ [0, 2). Returns NULL on failure.
+//
+// Renders: clear (r,g,b,1) background + a rotating colored test triangle
+// (rotation driven by `time` radians) using a real Vulkan graphics pipeline
+// with dynamic rendering. Visible animation == per-frame rasterizer running.
 const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
                                             int width, int height,
-                                            float r, float g, float b);
+                                            float r, float g, float b,
+                                            float time);
 
 // Releases all pooled per-eye resources. Safe before destroy_device.
 void lambda_vulkan_release_pool(void);

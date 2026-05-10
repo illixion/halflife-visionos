@@ -8,6 +8,7 @@
 #include <vulkan/vulkan_metal.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include "shaders/tri_shaders.h"
 // MoltenVK exposes the standard ICD entrypoints; we link statically against
 // libMoltenVK.a, so the core Vulkan symbols resolve at link time.
 
@@ -93,11 +94,16 @@ static VkPhysicalDevice g_phys     = VK_NULL_HANDLE;
 static VkQueue          g_gfxQueue = VK_NULL_HANDLE;
 static uint32_t         g_gfxFamily = 0;
 static VkCommandPool    g_cmdPool  = VK_NULL_HANDLE;
-static bool             g_hasMetalObjects = false;
+static bool             g_hasMetalObjects   = false;
+static bool             g_hasDynamicRender  = false;
+static VkPipelineLayout g_triPipelineLayout = VK_NULL_HANDLE;
+static VkPipeline       g_triPipeline       = VK_NULL_HANDLE;
 static PFN_vkDestroyInstance     g_pfnDestroyInstance     = NULL;
 static PFN_vkDestroyDevice       g_pfnDestroyDevice       = NULL;
 static PFN_vkGetDeviceProcAddr   g_pfnGetDeviceProcAddr   = NULL;
 static PFN_vkDestroyCommandPool  g_pfnDestroyCommandPool  = NULL;
+static PFN_vkCmdBeginRenderingKHR g_pfnCmdBeginRendering  = NULL;
+static PFN_vkCmdEndRenderingKHR   g_pfnCmdEndRendering    = NULL;
 
 #define LOAD_INST(name) \
     PFN_##name pfn_##name = (PFN_##name)vkGetInstanceProcAddr(instance, #name)
@@ -178,6 +184,7 @@ int lambda_vulkan_create_device(char *status_out, int status_cap) {
     }
 
     bool hasMetalObjects = false;
+    bool hasDynamicRender = false;
     {
         uint32_t extCount = 0;
         pfn_vkEnumerateDeviceExtensionProperties(phys, NULL, &extCount, NULL);
@@ -186,10 +193,10 @@ int lambda_vulkan_create_device(char *status_out, int status_cap) {
             if (exts) {
                 pfn_vkEnumerateDeviceExtensionProperties(phys, NULL, &extCount, exts);
                 for (uint32_t i = 0; i < extCount; ++i) {
-                    if (strcmp(exts[i].extensionName, "VK_EXT_metal_objects") == 0) {
+                    if (strcmp(exts[i].extensionName, "VK_EXT_metal_objects") == 0)
                         hasMetalObjects = true;
-                        break;
-                    }
+                    if (strcmp(exts[i].extensionName, "VK_KHR_dynamic_rendering") == 0)
+                        hasDynamicRender = true;
                 }
                 free(exts);
             }
@@ -203,12 +210,18 @@ int lambda_vulkan_create_device(char *status_out, int status_cap) {
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
 
-    const char *enabledExts[1];
+    const char *enabledExts[2];
     uint32_t enabledExtCount = 0;
-    if (hasMetalObjects) enabledExts[enabledExtCount++] = "VK_EXT_metal_objects";
+    if (hasMetalObjects)  enabledExts[enabledExtCount++] = "VK_EXT_metal_objects";
+    if (hasDynamicRender) enabledExts[enabledExtCount++] = "VK_KHR_dynamic_rendering";
+
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynFeat = {0};
+    dynFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+    dynFeat.dynamicRendering = VK_TRUE;
 
     VkDeviceCreateInfo dci = {0};
     dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    if (hasDynamicRender) dci.pNext = &dynFeat;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = enabledExtCount;
@@ -247,9 +260,14 @@ int lambda_vulkan_create_device(char *status_out, int status_cap) {
     g_gfxQueue = q;
     g_gfxFamily = gfxFamily;
     g_cmdPool  = pool;
-    g_hasMetalObjects = hasMetalObjects;
+    g_hasMetalObjects  = hasMetalObjects;
+    g_hasDynamicRender = hasDynamicRender;
     g_pfnGetDeviceProcAddr  = pfnGetDevAddr;
     g_pfnDestroyCommandPool = pfnDestroyPool;
+    if (hasDynamicRender) {
+        g_pfnCmdBeginRendering = (PFN_vkCmdBeginRenderingKHR)pfnGetDevAddr(device, "vkCmdBeginRenderingKHR");
+        g_pfnCmdEndRendering   = (PFN_vkCmdEndRenderingKHR)pfnGetDevAddr(device, "vkCmdEndRenderingKHR");
+    }
 
     if (status_out && status_cap > 0) {
         snprintf(status_out, (size_t)status_cap,
@@ -481,6 +499,7 @@ void *lambda_vulkan_clear_iosurface(int width, int height,
 typedef struct {
     IOSurfaceRef    surface;
     VkImage         image;
+    VkImageView     view;
     VkDeviceMemory  memory;
     VkCommandBuffer cmd;
     int             width;
@@ -492,10 +511,12 @@ static EyeSlot g_pool[POOL_SLOTS][POOL_EYES];
 static void destroy_eye_slot(EyeSlot *e) {
     DEVFN(vkFreeCommandBuffers);
     DEVFN(vkDestroyImage);
+    DEVFN(vkDestroyImageView);
     DEVFN(vkFreeMemory);
     if (e->cmd && g_cmdPool) {
         pfn_vkFreeCommandBuffers(g_device, g_cmdPool, 1, &e->cmd);
     }
+    if (e->view) pfn_vkDestroyImageView(g_device, e->view, NULL);
     if (e->image) pfn_vkDestroyImage(g_device, e->image, NULL);
     if (e->memory) pfn_vkFreeMemory(g_device, e->memory, NULL);
     if (e->surface) CFRelease(e->surface);
@@ -581,8 +602,32 @@ static bool alloc_eye_slot(EyeSlot *e, int w, int h) {
         return false;
     }
 
+    DEVFN(vkCreateImageView);
+    DEVFN(vkDestroyImage);
+    DEVFN(vkFreeMemory);
+    VkImageViewCreateInfo ivci = {0};
+    ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ivci.image = image;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    ivci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    ivci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    ivci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    ivci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ivci.subresourceRange.levelCount = 1;
+    ivci.subresourceRange.layerCount = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    if (pfn_vkCreateImageView(g_device, &ivci, NULL, &view) != VK_SUCCESS) {
+        pfn_vkFreeMemory(g_device, memory, NULL);
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return false;
+    }
+
     e->surface = surface;
     e->image = image;
+    e->view = view;
     e->memory = memory;
     e->cmd = cb;
     e->width = w;
@@ -590,11 +635,134 @@ static bool alloc_eye_slot(EyeSlot *e, int w, int h) {
     return true;
 }
 
+static bool ensure_tri_pipeline(void) {
+    if (g_triPipeline != VK_NULL_HANDLE) return true;
+    if (!g_hasDynamicRender) return false;
+
+    DEVFN(vkCreateShaderModule);
+    DEVFN(vkDestroyShaderModule);
+    DEVFN(vkCreatePipelineLayout);
+    DEVFN(vkCreateGraphicsPipelines);
+
+    VkShaderModuleCreateInfo vsmCi = {0};
+    vsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vsmCi.codeSize = tri_vert_spv_len;
+    vsmCi.pCode = (const uint32_t *)tri_vert_spv;
+
+    VkShaderModule vsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &vsmCi, NULL, &vsm) != VK_SUCCESS) return false;
+
+    VkShaderModuleCreateInfo fsmCi = {0};
+    fsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    fsmCi.codeSize = tri_frag_spv_len;
+    fsmCi.pCode = (const uint32_t *)tri_frag_spv;
+
+    VkShaderModule fsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &fsmCi, NULL, &fsm) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPushConstantRange pcRange = {0};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(float);
+
+    VkPipelineLayoutCreateInfo plCi = {0};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    if (pfn_vkCreatePipelineLayout(g_device, &plCi, NULL, &g_triPipelineLayout) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2] = {0};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsm;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fsm;
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi = {0};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {0};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp = {0};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs = {0};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms = {0};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAtt = {0};
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo cb = {0};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1;
+    cb.pAttachments = &blendAtt;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = {0};
+    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = 2;
+    dyn.pDynamicStates = dynStates;
+
+    VkFormat colorFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkPipelineRenderingCreateInfoKHR prCi = {0};
+    prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    prCi.colorAttachmentCount = 1;
+    prCi.pColorAttachmentFormats = &colorFmt;
+
+    VkGraphicsPipelineCreateInfo gpCi = {0};
+    gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gpCi.pNext = &prCi;
+    gpCi.stageCount = 2;
+    gpCi.pStages = stages;
+    gpCi.pVertexInputState = &vi;
+    gpCi.pInputAssemblyState = &ia;
+    gpCi.pViewportState = &vp;
+    gpCi.pRasterizationState = &rs;
+    gpCi.pMultisampleState = &ms;
+    gpCi.pColorBlendState = &cb;
+    gpCi.pDynamicState = &dyn;
+    gpCi.layout = g_triPipelineLayout;
+    gpCi.renderPass = VK_NULL_HANDLE;  // dynamic rendering
+
+    VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_triPipeline);
+
+    pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+    pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+
+    return pres == VK_SUCCESS;
+}
+
 const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
                                             int width, int height,
-                                            float r, float g, float b) {
+                                            float r, float g, float b,
+                                            float time) {
     if (!g_device || !g_cmdPool || !g_hasMetalObjects) return NULL;
+    if (!g_hasDynamicRender) return NULL;
     if (slot < 0 || slot >= POOL_SLOTS || eye < 0 || eye >= POOL_EYES) return NULL;
+    if (!ensure_tri_pipeline()) return NULL;
 
     EyeSlot *e = &g_pool[slot][eye];
     if (e->surface && (e->width != width || e->height != height)) {
@@ -607,7 +775,11 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
     DEVFN(vkBeginCommandBuffer);
     DEVFN(vkEndCommandBuffer);
     DEVFN(vkCmdPipelineBarrier);
-    DEVFN(vkCmdClearColorImage);
+    DEVFN(vkCmdBindPipeline);
+    DEVFN(vkCmdSetViewport);
+    DEVFN(vkCmdSetScissor);
+    DEVFN(vkCmdPushConstants);
+    DEVFN(vkCmdDraw);
     DEVFN(vkResetCommandBuffer);
     DEVFN(vkQueueSubmit);
     DEVFN(vkQueueWaitIdle);
@@ -624,32 +796,69 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
     range.levelCount = 1;
     range.layerCount = 1;
 
-    VkImageMemoryBarrier toDst = {0};
-    toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toDst.image = e->image;
-    toDst.subresourceRange = range;
-    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    // UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
+    VkImageMemoryBarrier toAtt = {0};
+    toAtt.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toAtt.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toAtt.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAtt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.image = e->image;
+    toAtt.subresourceRange = range;
+    toAtt.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     pfn_vkCmdPipelineBarrier(e->cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, NULL, 0, NULL, 1, &toDst);
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, NULL, 0, NULL, 1, &toAtt);
 
-    VkClearColorValue clear = {0};
-    clear.float32[0] = r; clear.float32[1] = g;
-    clear.float32[2] = b; clear.float32[3] = 1.0f;
-    pfn_vkCmdClearColorImage(e->cmd, e->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             &clear, 1, &range);
+    // Begin dynamic-rendering pass with clear (r,g,b,1).
+    VkRenderingAttachmentInfoKHR colorAtt = {0};
+    colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+    colorAtt.imageView = e->view;
+    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAtt.clearValue.color.float32[0] = r;
+    colorAtt.clearValue.color.float32[1] = g;
+    colorAtt.clearValue.color.float32[2] = b;
+    colorAtt.clearValue.color.float32[3] = 1.0f;
 
-    VkImageMemoryBarrier toGen = toDst;
-    toGen.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    VkRenderingInfoKHR ri = {0};
+    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+    ri.renderArea.offset.x = 0;
+    ri.renderArea.offset.y = 0;
+    ri.renderArea.extent.width = (uint32_t)width;
+    ri.renderArea.extent.height = (uint32_t)height;
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &colorAtt;
+    g_pfnCmdBeginRendering(e->cmd, &ri);
+
+    VkViewport vpRect = {0};
+    vpRect.x = 0; vpRect.y = 0;
+    vpRect.width = (float)width; vpRect.height = (float)height;
+    vpRect.minDepth = 0.0f; vpRect.maxDepth = 1.0f;
+    pfn_vkCmdSetViewport(e->cmd, 0, 1, &vpRect);
+
+    VkRect2D scissor = {0};
+    scissor.extent.width = (uint32_t)width;
+    scissor.extent.height = (uint32_t)height;
+    pfn_vkCmdSetScissor(e->cmd, 0, 1, &scissor);
+
+    pfn_vkCmdBindPipeline(e->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_triPipeline);
+    pfn_vkCmdPushConstants(e->cmd, g_triPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                           0, sizeof(float), &time);
+    pfn_vkCmdDraw(e->cmd, 3, 1, 0, 0);
+
+    g_pfnCmdEndRendering(e->cmd);
+
+    // COLOR_ATTACHMENT_OPTIMAL → GENERAL (so Metal can sample on the way out)
+    VkImageMemoryBarrier toGen = toAtt;
+    toGen.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    toGen.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGen.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     toGen.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     pfn_vkCmdPipelineBarrier(e->cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         0, 0, NULL, 0, NULL, 1, &toGen);
 
     pfn_vkEndCommandBuffer(e->cmd);
@@ -670,5 +879,13 @@ void lambda_vulkan_release_pool(void) {
         for (int e = 0; e < POOL_EYES; ++e) {
             destroy_eye_slot(&g_pool[s][e]);
         }
+    }
+    if (g_triPipeline || g_triPipelineLayout) {
+        DEVFN(vkDestroyPipeline);
+        DEVFN(vkDestroyPipelineLayout);
+        if (g_triPipeline) pfn_vkDestroyPipeline(g_device, g_triPipeline, NULL);
+        if (g_triPipelineLayout) pfn_vkDestroyPipelineLayout(g_device, g_triPipelineLayout, NULL);
+        g_triPipeline = VK_NULL_HANDLE;
+        g_triPipelineLayout = VK_NULL_HANDLE;
     }
 }

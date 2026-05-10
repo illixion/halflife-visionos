@@ -246,7 +246,17 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = "-lc++ -framework Metal -framework IOSurface -framework QuartzCore -force_load $(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a";
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-framework",
+					Metal,
+					"-framework",
+					IOSurface,
+					"-framework",
+					QuartzCore,
+					"-force_load",
+					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -278,7 +288,17 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_LDFLAGS = "-lc++ -framework Metal -framework IOSurface -framework QuartzCore -force_load $(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a";
+				OTHER_LDFLAGS = (
+					"-lc++",
+					"-framework",
+					Metal,
+					"-framework",
+					IOSurface,
+					"-framework",
+					QuartzCore,
+					"-force_load",
+					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

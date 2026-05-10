@@ -288,7 +288,7 @@ actor Renderer {
         if rc != 0 { throw VulkanColorMapError.deviceInit(rc) }
 
         let n = Int32(vulkanColorMapSize)
-        guard let surfacePtr = lambda_vulkan_render_eye_pooled(0, 0, n, n, 0.10, 0.60, 0.95) else {
+        guard let surfacePtr = lambda_vulkan_render_eye_pooled(0, 0, n, n, 0.05, 0.05, 0.10, 0.0) else {
             throw VulkanColorMapError.clearFailed("pooled render returned NULL")
         }
         let surface = Unmanaged<IOSurfaceRef>.fromOpaque(
@@ -417,12 +417,10 @@ actor Renderer {
         // IOSurface in-place with an animated color. The cube samples it via
         // the existing render pipeline — visible animation == proof that the
         // bridge submitted, the GPU executed, and Metal saw the new contents.
-        let phase = Float(frameIndex) * 0.04
-        let r = 0.5 + 0.5 * sin(phase)
-        let g = 0.5 + 0.5 * sin(phase * 0.7 + 1.3)
-        let b = 0.5 + 0.5 * sin(phase * 0.5 + 2.6)
+        let t = Float(frameIndex) * 0.04
+        let bg = 0.05 + 0.05 * sin(t)
         let n = Int32(Self.vulkanColorMapSize)
-        _ = lambda_vulkan_render_eye_pooled(0, 0, n, n, r, g, b)
+        _ = lambda_vulkan_render_eye_pooled(0, 0, n, n, bg, bg, bg + 0.05, t)
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
 
