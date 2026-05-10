@@ -889,3 +889,81 @@ void lambda_vulkan_release_pool(void) {
         g_triPipelineLayout = VK_NULL_HANDLE;
     }
 }
+
+// =====================================================================
+// Phase 2c: xash3d-fwgs engine wiring.
+// =====================================================================
+//
+// Engine entrypoints exposed by our patched Host_Main (libxash.a):
+//   Host_DoInit  — init body of the original Host_Main minus its loop
+//   Host_DoFrame — one iteration (one COM_Frame call)
+//   Host_Shutdown
+extern int Host_DoInit(int argc, char **argv, const char *progname,
+                       int bChangeGame, void (*pChangeGame)(const char *));
+extern int Host_DoFrame(void);
+extern void Host_Shutdown(void);
+
+#include <unistd.h>
+#include <sys/stat.h>
+
+static int g_engine_inited = 0;
+static char *g_engine_argv_storage[32];
+static char  g_engine_argv0[16];
+
+int lambda_engine_init(const char *writable_dir,
+                       int extra_argc, const char *const *extra_argv,
+                       char *status_out, int status_cap) {
+    if (status_out && status_cap > 0) status_out[0] = '\0';
+    if (g_engine_inited) {
+        if (status_out) snprintf(status_out, status_cap, "engine already initialized");
+        return 0;
+    }
+    if (!writable_dir || !*writable_dir) {
+        if (status_out) snprintf(status_out, status_cap, "writable_dir required");
+        return -1;
+    }
+
+    // Engine wants getcwd() to point at the data root, OR XASH3D_BASEDIR env.
+    // Set both — belt and suspenders.
+    mkdir(writable_dir, 0755);
+    setenv("XASH3D_BASEDIR", writable_dir, 1);
+    if (chdir(writable_dir) != 0) {
+        if (status_out) snprintf(status_out, status_cap, "chdir(%s) failed", writable_dir);
+        return -2;
+    }
+
+    // Build argv[]. argv[0] is the binary name; engine inspects it.
+    snprintf(g_engine_argv0, sizeof(g_engine_argv0), "xash");
+    int argc = 0;
+    g_engine_argv_storage[argc++] = g_engine_argv0;
+
+    int cap = (int)(sizeof(g_engine_argv_storage)/sizeof(g_engine_argv_storage[0])) - 2;
+    if (extra_argc > cap) extra_argc = cap;
+    for (int i = 0; i < extra_argc; ++i) {
+        g_engine_argv_storage[argc++] = (char *)extra_argv[i];
+    }
+    g_engine_argv_storage[argc] = NULL;
+
+    int rc = Host_DoInit(argc, g_engine_argv_storage, "valve",
+                         /*bChangeGame=*/0, /*pChangeGame=*/NULL);
+    if (rc != 0) {
+        if (status_out) snprintf(status_out, status_cap, "Host_DoInit returned %d", rc);
+        return -3;
+    }
+
+    g_engine_inited = 1;
+    if (status_out) snprintf(status_out, status_cap,
+                             "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
+    return 0;
+}
+
+int lambda_engine_frame(void) {
+    if (!g_engine_inited) return -1;
+    return Host_DoFrame();
+}
+
+void lambda_engine_shutdown(void) {
+    if (!g_engine_inited) return;
+    Host_Shutdown();
+    g_engine_inited = 0;
+}

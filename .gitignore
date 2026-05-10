@@ -24,3 +24,6 @@ LambdaVision/Vendor/MoltenVK.xcframework/
 
 # Half-Life game assets (proprietary, not redistributable; user-supplied)
 HalfLifeAssets/
+
+# Built artifacts from build_xash_libxash.sh
+LambdaVision/Vendor/libxash/

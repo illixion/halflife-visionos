@@ -256,6 +256,7 @@
 					QuartzCore,
 					"-force_load",
 					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
+					"$(SRCROOT)/Vendor/libxash/libxash.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -298,6 +299,7 @@
 					QuartzCore,
 					"-force_load",
 					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
+					"$(SRCROOT)/Vendor/libxash/libxash.a",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
 				PRODUCT_NAME = "$(TARGET_NAME)";

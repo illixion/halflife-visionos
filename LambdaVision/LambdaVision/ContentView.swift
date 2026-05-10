@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var vulkanStatus: String = "—"
     @State private var deviceStatus: String = "—"
     @State private var iosurfaceStatus: String = "—"
+    @State private var engineStatus: String = "—"
 
     var body: some View {
         VStack(spacing: 16) {
@@ -29,6 +30,7 @@ struct ContentView: View {
                 Text("Vulkan / MoltenVK: \(vulkanStatus)")
                 Text("VkDevice: \(deviceStatus)")
                 Text("IOSurface clear: \(iosurfaceStatus)")
+                Text("Engine: \(engineStatus)")
             }
             .font(.system(.body, design: .monospaced))
 
@@ -77,6 +79,27 @@ struct ContentView: View {
         }
 
         // Device + queue stay alive; immersive Renderer reuses them.
+
+        // Engine boot smoke test: console + filesystem only, no rendering yet.
+        let appSupport = (try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
+        let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
+        let extra = ["-dev", "2", "-console", "-noip", "-game", "valve"]
+        let cArgs = extra.map { strdup($0) }
+        defer { cArgs.forEach { free($0) } }
+        var engineBuf = [CChar](repeating: 0, count: 384)
+        let erc = basedir.withCString { dir in
+            cArgs.withUnsafeBufferPointer { argv -> Int32 in
+                let argvPtrs = argv.baseAddress?.withMemoryRebound(
+                    to: UnsafePointer<CChar>?.self, capacity: argv.count) { $0 }
+                return engineBuf.withUnsafeMutableBufferPointer { buf in
+                    lambda_engine_init(dir, Int32(extra.count), argvPtrs,
+                                       buf.baseAddress, Int32(buf.count))
+                }
+            }
+        }
+        engineStatus = "rc=\(erc) \(String(cString: engineBuf))"
     }
 }
 

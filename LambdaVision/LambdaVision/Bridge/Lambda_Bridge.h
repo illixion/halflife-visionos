@@ -73,6 +73,27 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
 // Releases all pooled per-eye resources. Safe before destroy_device.
 void lambda_vulkan_release_pool(void);
 
+// Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
+// + a while loop calling COM_Frame; we patched it into a frame-driven
+// surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can
+// drive it from CompositorServices. These wrappers add argv assembly,
+// sandbox setup, and shielded re-entry.
+//
+// lambda_engine_init: writable_dir is a path under the app sandbox the
+//   engine can read+write (becomes XASH3D_BASEDIR + cwd). extra_argv is
+//   appended after argv[0]="xash"; pass NULL/0 for default. Returns 0
+//   on success, <0 on failure (status_out gets a one-line reason).
+int lambda_engine_init(const char *writable_dir,
+                       int extra_argc, const char *const *extra_argv,
+                       char *status_out, int status_cap);
+
+// Drives one engine frame (one COM_Frame call). Returns 0 normally,
+// -1 if init wasn't called or engine has crashed.
+int lambda_engine_frame(void);
+
+// Tears engine down. Idempotent.
+void lambda_engine_shutdown(void);
+
 #ifdef __cplusplus
 }
 #endif
