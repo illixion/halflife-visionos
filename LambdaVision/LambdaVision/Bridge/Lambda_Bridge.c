@@ -1,9 +1,13 @@
 #include "Lambda_Bridge.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_metal.h>
+#include <IOSurface/IOSurfaceRef.h>
+#include <CoreFoundation/CoreFoundation.h>
 // MoltenVK exposes the standard ICD entrypoints; we link statically against
 // libMoltenVK.a, so the core Vulkan symbols resolve at link time.
 
@@ -81,4 +85,590 @@ int lambda_vulkan_smoke_test(char *name_out, int name_cap) {
 
     pfnDestroy(instance, NULL);
     return (int)count;
+}
+
+static VkInstance       g_instance = VK_NULL_HANDLE;
+static VkDevice         g_device   = VK_NULL_HANDLE;
+static VkPhysicalDevice g_phys     = VK_NULL_HANDLE;
+static VkQueue          g_gfxQueue = VK_NULL_HANDLE;
+static uint32_t         g_gfxFamily = 0;
+static VkCommandPool    g_cmdPool  = VK_NULL_HANDLE;
+static bool             g_hasMetalObjects = false;
+static PFN_vkDestroyInstance     g_pfnDestroyInstance     = NULL;
+static PFN_vkDestroyDevice       g_pfnDestroyDevice       = NULL;
+static PFN_vkGetDeviceProcAddr   g_pfnGetDeviceProcAddr   = NULL;
+static PFN_vkDestroyCommandPool  g_pfnDestroyCommandPool  = NULL;
+
+#define LOAD_INST(name) \
+    PFN_##name pfn_##name = (PFN_##name)vkGetInstanceProcAddr(instance, #name)
+
+int lambda_vulkan_create_device(char *status_out, int status_cap) {
+    if (status_out && status_cap > 0) status_out[0] = '\0';
+    if (g_device != VK_NULL_HANDLE) {
+        if (status_out && status_cap > 0) {
+            snprintf(status_out, (size_t)status_cap, "already initialized (metal_objects=%s)",
+                     g_hasMetalObjects ? "yes" : "no");
+        }
+        return 0;
+    }
+
+    PFN_vkCreateInstance pfnCreateInstance =
+        (PFN_vkCreateInstance)vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance");
+    if (!pfnCreateInstance) return -1;
+
+    VkApplicationInfo appInfo = {0};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "LambdaVision";
+    appInfo.pEngineName = "Xash3D";
+    appInfo.apiVersion = VK_API_VERSION_1_2;
+
+    VkInstanceCreateInfo ici = {0};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &appInfo;
+
+    VkInstance instance = VK_NULL_HANDLE;
+    if (pfnCreateInstance(&ici, NULL, &instance) != VK_SUCCESS) return -1;
+
+    LOAD_INST(vkEnumeratePhysicalDevices);
+    LOAD_INST(vkGetPhysicalDeviceProperties);
+    LOAD_INST(vkGetPhysicalDeviceQueueFamilyProperties);
+    LOAD_INST(vkEnumerateDeviceExtensionProperties);
+    LOAD_INST(vkCreateDevice);
+    LOAD_INST(vkGetDeviceQueue);
+    LOAD_INST(vkDestroyInstance);
+    LOAD_INST(vkDestroyDevice);
+
+    g_pfnDestroyInstance = pfn_vkDestroyInstance;
+    g_pfnDestroyDevice   = pfn_vkDestroyDevice;
+
+    uint32_t devCount = 0;
+    pfn_vkEnumeratePhysicalDevices(instance, &devCount, NULL);
+    if (devCount == 0) {
+        pfn_vkDestroyInstance(instance, NULL);
+        return -2;
+    }
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    {
+        VkPhysicalDevice devs[8];
+        if (devCount > 8) devCount = 8;
+        pfn_vkEnumeratePhysicalDevices(instance, &devCount, devs);
+        phys = devs[0];
+    }
+
+    VkPhysicalDeviceProperties props;
+    pfn_vkGetPhysicalDeviceProperties(phys, &props);
+
+    uint32_t qfCount = 0;
+    pfn_vkGetPhysicalDeviceQueueFamilyProperties(phys, &qfCount, NULL);
+    if (qfCount == 0) {
+        pfn_vkDestroyInstance(instance, NULL);
+        return -3;
+    }
+    VkQueueFamilyProperties qfs[16];
+    if (qfCount > 16) qfCount = 16;
+    pfn_vkGetPhysicalDeviceQueueFamilyProperties(phys, &qfCount, qfs);
+
+    uint32_t gfxFamily = UINT32_MAX;
+    for (uint32_t i = 0; i < qfCount; ++i) {
+        if (qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfxFamily = i; break; }
+    }
+    if (gfxFamily == UINT32_MAX) {
+        pfn_vkDestroyInstance(instance, NULL);
+        return -3;
+    }
+
+    bool hasMetalObjects = false;
+    {
+        uint32_t extCount = 0;
+        pfn_vkEnumerateDeviceExtensionProperties(phys, NULL, &extCount, NULL);
+        if (extCount > 0) {
+            VkExtensionProperties *exts = (VkExtensionProperties *)calloc(extCount, sizeof(*exts));
+            if (exts) {
+                pfn_vkEnumerateDeviceExtensionProperties(phys, NULL, &extCount, exts);
+                for (uint32_t i = 0; i < extCount; ++i) {
+                    if (strcmp(exts[i].extensionName, "VK_EXT_metal_objects") == 0) {
+                        hasMetalObjects = true;
+                        break;
+                    }
+                }
+                free(exts);
+            }
+        }
+    }
+
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {0};
+    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    qci.queueFamilyIndex = gfxFamily;
+    qci.queueCount = 1;
+    qci.pQueuePriorities = &prio;
+
+    const char *enabledExts[1];
+    uint32_t enabledExtCount = 0;
+    if (hasMetalObjects) enabledExts[enabledExtCount++] = "VK_EXT_metal_objects";
+
+    VkDeviceCreateInfo dci = {0};
+    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.queueCreateInfoCount = 1;
+    dci.pQueueCreateInfos = &qci;
+    dci.enabledExtensionCount = enabledExtCount;
+    dci.ppEnabledExtensionNames = enabledExts;
+
+    VkDevice device = VK_NULL_HANDLE;
+    if (pfn_vkCreateDevice(phys, &dci, NULL, &device) != VK_SUCCESS) {
+        pfn_vkDestroyInstance(instance, NULL);
+        return -4;
+    }
+
+    VkQueue q = VK_NULL_HANDLE;
+    pfn_vkGetDeviceQueue(device, gfxFamily, 0, &q);
+
+    PFN_vkGetDeviceProcAddr pfnGetDevAddr =
+        (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr(instance, "vkGetDeviceProcAddr");
+    PFN_vkCreateCommandPool pfnCreatePool =
+        (PFN_vkCreateCommandPool)pfnGetDevAddr(device, "vkCreateCommandPool");
+    PFN_vkDestroyCommandPool pfnDestroyPool =
+        (PFN_vkDestroyCommandPool)pfnGetDevAddr(device, "vkDestroyCommandPool");
+
+    VkCommandPoolCreateInfo cpci = {0};
+    cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    cpci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cpci.queueFamilyIndex = gfxFamily;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (pfnCreatePool(device, &cpci, NULL, &pool) != VK_SUCCESS) {
+        pfn_vkDestroyDevice(device, NULL);
+        pfn_vkDestroyInstance(instance, NULL);
+        return -4;
+    }
+
+    g_instance = instance;
+    g_device   = device;
+    g_phys     = phys;
+    g_gfxQueue = q;
+    g_gfxFamily = gfxFamily;
+    g_cmdPool  = pool;
+    g_hasMetalObjects = hasMetalObjects;
+    g_pfnGetDeviceProcAddr  = pfnGetDevAddr;
+    g_pfnDestroyCommandPool = pfnDestroyPool;
+
+    if (status_out && status_cap > 0) {
+        snprintf(status_out, (size_t)status_cap,
+                 "%s api %u.%u.%u, gfx qfam=%u, metal_objects=%s",
+                 props.deviceName,
+                 VK_VERSION_MAJOR(props.apiVersion),
+                 VK_VERSION_MINOR(props.apiVersion),
+                 VK_VERSION_PATCH(props.apiVersion),
+                 gfxFamily,
+                 hasMetalObjects ? "yes" : "no");
+    }
+    return 0;
+}
+
+void lambda_vulkan_destroy_device(void) {
+    if (g_cmdPool && g_device && g_pfnDestroyCommandPool) {
+        g_pfnDestroyCommandPool(g_device, g_cmdPool, NULL);
+    }
+    if (g_device && g_pfnDestroyDevice) {
+        g_pfnDestroyDevice(g_device, NULL);
+    }
+    if (g_instance && g_pfnDestroyInstance) {
+        g_pfnDestroyInstance(g_instance, NULL);
+    }
+    g_cmdPool = VK_NULL_HANDLE;
+    g_device = VK_NULL_HANDLE;
+    g_instance = VK_NULL_HANDLE;
+    g_phys = VK_NULL_HANDLE;
+    g_gfxQueue = VK_NULL_HANDLE;
+    g_pfnGetDeviceProcAddr = NULL;
+    g_pfnDestroyCommandPool = NULL;
+    g_hasMetalObjects = false;
+}
+
+#define DEVFN(name) PFN_##name pfn_##name = (PFN_##name)g_pfnGetDeviceProcAddr(g_device, #name)
+
+// fourcc: 'BGRA' (32BGRA, 4 bpp) or 'RGhA' (64RGBAHalf, 8 bpp).
+static IOSurfaceRef create_iosurface_fmt(int w, int h, uint32_t fourcc, int bytesPerElement) {
+    const size_t bpr = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, (size_t)w * (size_t)bytesPerElement);
+    const size_t totalBytes = IOSurfaceAlignProperty(kIOSurfaceAllocSize, bpr * (size_t)h);
+
+    CFMutableDictionaryRef props = CFDictionaryCreateMutable(
+        NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+#define SET_INT(key, val) do { \
+    int v = (int)(val); CFNumberRef n = CFNumberCreate(NULL, kCFNumberIntType, &v); \
+    CFDictionarySetValue(props, key, n); CFRelease(n); \
+} while (0)
+    SET_INT(kIOSurfaceWidth, w);
+    SET_INT(kIOSurfaceHeight, h);
+    SET_INT(kIOSurfaceBytesPerElement, bytesPerElement);
+    SET_INT(kIOSurfaceBytesPerRow, (int)bpr);
+    SET_INT(kIOSurfaceAllocSize, (int)totalBytes);
+    SET_INT(kIOSurfacePixelFormat, (int)fourcc);
+#undef SET_INT
+    IOSurfaceRef s = IOSurfaceCreate(props);
+    CFRelease(props);
+    return s;
+}
+
+static IOSurfaceRef create_bgra8_iosurface(int w, int h) {
+    return create_iosurface_fmt(w, h, 'BGRA', 4);
+}
+
+static IOSurfaceRef create_rgba16f_iosurface(int w, int h) {
+    return create_iosurface_fmt(w, h, 'RGhA', 8);  // kCVPixelFormatType_64RGBAHalf
+}
+
+void *lambda_vulkan_clear_iosurface(int width, int height,
+                                    float r, float g, float b,
+                                    char *status_out, int status_cap) {
+    if (status_out && status_cap > 0) status_out[0] = '\0';
+    if (!g_device || !g_cmdPool || !g_pfnGetDeviceProcAddr) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "device not initialized");
+        return NULL;
+    }
+    if (!g_hasMetalObjects) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "VK_EXT_metal_objects unavailable");
+        return NULL;
+    }
+
+    IOSurfaceRef surface = create_bgra8_iosurface(width, height);
+    if (!surface) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "IOSurfaceCreate failed");
+        return NULL;
+    }
+
+    DEVFN(vkCreateImage);
+    DEVFN(vkDestroyImage);
+    DEVFN(vkGetImageMemoryRequirements);
+    DEVFN(vkAllocateMemory);
+    DEVFN(vkFreeMemory);
+    DEVFN(vkBindImageMemory);
+    DEVFN(vkAllocateCommandBuffers);
+    DEVFN(vkFreeCommandBuffers);
+    DEVFN(vkBeginCommandBuffer);
+    DEVFN(vkEndCommandBuffer);
+    DEVFN(vkCmdPipelineBarrier);
+    DEVFN(vkCmdClearColorImage);
+    DEVFN(vkQueueSubmit);
+    DEVFN(vkQueueWaitIdle);
+
+    VkImportMetalIOSurfaceInfoEXT importInfo = {0};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT;
+    importInfo.ioSurface = surface;
+
+    VkImageCreateInfo ici = {0};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.pNext = &importInfo;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_B8G8R8A8_UNORM;
+    ici.extent.width = (uint32_t)width;
+    ici.extent.height = (uint32_t)height;
+    ici.extent.depth = 1;
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImage image = VK_NULL_HANDLE;
+    if (pfn_vkCreateImage(g_device, &ici, NULL, &image) != VK_SUCCESS) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "vkCreateImage failed");
+        CFRelease(surface);
+        return NULL;
+    }
+
+    VkMemoryRequirements memReq;
+    pfn_vkGetImageMemoryRequirements(g_device, image, &memReq);
+
+    VkMemoryAllocateInfo mai = {0};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = memReq.size ? memReq.size : 1;
+    mai.memoryTypeIndex = 0;  // MoltenVK ignores for IOSurface-backed images
+
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (pfn_vkAllocateMemory(g_device, &mai, NULL, &memory) != VK_SUCCESS) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "vkAllocateMemory failed");
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return NULL;
+    }
+    if (pfn_vkBindImageMemory(g_device, image, memory, 0) != VK_SUCCESS) {
+        if (status_out) snprintf(status_out, (size_t)status_cap, "vkBindImageMemory failed");
+        pfn_vkFreeMemory(g_device, memory, NULL);
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return NULL;
+    }
+
+    VkCommandBufferAllocateInfo cbai = {0};
+    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool = g_cmdPool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    pfn_vkAllocateCommandBuffers(g_device, &cbai, &cb);
+
+    VkCommandBufferBeginInfo bi = {0};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfn_vkBeginCommandBuffer(cb, &bi);
+
+    VkImageSubresourceRange range = {0};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+
+    VkImageMemoryBarrier toDst = {0};
+    toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = image;
+    toDst.subresourceRange = range;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pfn_vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toDst);
+
+    VkClearColorValue clear = {0};
+    clear.float32[0] = r; clear.float32[1] = g;
+    clear.float32[2] = b; clear.float32[3] = 1.0f;
+    pfn_vkCmdClearColorImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clear, 1, &range);
+
+    VkImageMemoryBarrier toGen = toDst;
+    toGen.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGen.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGen.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    pfn_vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toGen);
+
+    pfn_vkEndCommandBuffer(cb);
+
+    VkSubmitInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    VkResult subRes = pfn_vkQueueSubmit(g_gfxQueue, 1, &si, VK_NULL_HANDLE);
+    VkResult waitRes = (subRes == VK_SUCCESS) ? pfn_vkQueueWaitIdle(g_gfxQueue) : subRes;
+
+    pfn_vkFreeCommandBuffers(g_device, g_cmdPool, 1, &cb);
+    pfn_vkFreeMemory(g_device, memory, NULL);
+    pfn_vkDestroyImage(g_device, image, NULL);
+
+    if (subRes != VK_SUCCESS || waitRes != VK_SUCCESS) {
+        if (status_out) snprintf(status_out, (size_t)status_cap,
+                                 "submit=%d wait=%d", subRes, waitRes);
+        CFRelease(surface);
+        return NULL;
+    }
+
+    if (status_out) snprintf(status_out, (size_t)status_cap,
+                             "ok %dx%d (rgba=%.2f,%.2f,%.2f,1)",
+                             width, height, r, g, b);
+    return (void *)surface;  // caller releases with CFRelease
+}
+
+#define POOL_SLOTS 3
+#define POOL_EYES 2
+
+typedef struct {
+    IOSurfaceRef    surface;
+    VkImage         image;
+    VkDeviceMemory  memory;
+    VkCommandBuffer cmd;
+    int             width;
+    int             height;
+} EyeSlot;
+
+static EyeSlot g_pool[POOL_SLOTS][POOL_EYES];
+
+static void destroy_eye_slot(EyeSlot *e) {
+    DEVFN(vkFreeCommandBuffers);
+    DEVFN(vkDestroyImage);
+    DEVFN(vkFreeMemory);
+    if (e->cmd && g_cmdPool) {
+        pfn_vkFreeCommandBuffers(g_device, g_cmdPool, 1, &e->cmd);
+    }
+    if (e->image) pfn_vkDestroyImage(g_device, e->image, NULL);
+    if (e->memory) pfn_vkFreeMemory(g_device, e->memory, NULL);
+    if (e->surface) CFRelease(e->surface);
+    memset(e, 0, sizeof(*e));
+}
+
+static bool alloc_eye_slot(EyeSlot *e, int w, int h) {
+    DEVFN(vkCreateImage);
+    DEVFN(vkGetImageMemoryRequirements);
+    DEVFN(vkAllocateMemory);
+    DEVFN(vkBindImageMemory);
+    DEVFN(vkAllocateCommandBuffers);
+
+    // Use 64-bit RGBA-half format to match the visionOS CompositorServices
+    // drawable color texture (rgba16Float), so MTL copy works without
+    // format/stride mismatches.
+    IOSurfaceRef surface = create_rgba16f_iosurface(w, h);
+    if (!surface) return false;
+
+    VkImportMetalIOSurfaceInfoEXT importInfo = {0};
+    importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_METAL_IO_SURFACE_INFO_EXT;
+    importInfo.ioSurface = surface;
+
+    VkImageCreateInfo ici = {0};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.pNext = &importInfo;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    ici.extent.width = (uint32_t)w;
+    ici.extent.height = (uint32_t)h;
+    ici.extent.depth = 1;
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkImage image = VK_NULL_HANDLE;
+    if (pfn_vkCreateImage(g_device, &ici, NULL, &image) != VK_SUCCESS) {
+        CFRelease(surface);
+        return false;
+    }
+
+    VkMemoryRequirements memReq;
+    pfn_vkGetImageMemoryRequirements(g_device, image, &memReq);
+    VkMemoryAllocateInfo mai = {0};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = memReq.size ? memReq.size : 1;
+    mai.memoryTypeIndex = 0;
+
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (pfn_vkAllocateMemory(g_device, &mai, NULL, &memory) != VK_SUCCESS) {
+        DEVFN(vkDestroyImage);
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return false;
+    }
+    if (pfn_vkBindImageMemory(g_device, image, memory, 0) != VK_SUCCESS) {
+        DEVFN(vkDestroyImage);
+        DEVFN(vkFreeMemory);
+        pfn_vkFreeMemory(g_device, memory, NULL);
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo cbai = {0};
+    cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbai.commandPool = g_cmdPool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (pfn_vkAllocateCommandBuffers(g_device, &cbai, &cb) != VK_SUCCESS) {
+        DEVFN(vkDestroyImage);
+        DEVFN(vkFreeMemory);
+        pfn_vkFreeMemory(g_device, memory, NULL);
+        pfn_vkDestroyImage(g_device, image, NULL);
+        CFRelease(surface);
+        return false;
+    }
+
+    e->surface = surface;
+    e->image = image;
+    e->memory = memory;
+    e->cmd = cb;
+    e->width = w;
+    e->height = h;
+    return true;
+}
+
+const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
+                                            int width, int height,
+                                            float r, float g, float b) {
+    if (!g_device || !g_cmdPool || !g_hasMetalObjects) return NULL;
+    if (slot < 0 || slot >= POOL_SLOTS || eye < 0 || eye >= POOL_EYES) return NULL;
+
+    EyeSlot *e = &g_pool[slot][eye];
+    if (e->surface && (e->width != width || e->height != height)) {
+        destroy_eye_slot(e);
+    }
+    if (!e->surface) {
+        if (!alloc_eye_slot(e, width, height)) return NULL;
+    }
+
+    DEVFN(vkBeginCommandBuffer);
+    DEVFN(vkEndCommandBuffer);
+    DEVFN(vkCmdPipelineBarrier);
+    DEVFN(vkCmdClearColorImage);
+    DEVFN(vkResetCommandBuffer);
+    DEVFN(vkQueueSubmit);
+    DEVFN(vkQueueWaitIdle);
+
+    pfn_vkResetCommandBuffer(e->cmd, 0);
+
+    VkCommandBufferBeginInfo bi = {0};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfn_vkBeginCommandBuffer(e->cmd, &bi);
+
+    VkImageSubresourceRange range = {0};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+
+    VkImageMemoryBarrier toDst = {0};
+    toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = e->image;
+    toDst.subresourceRange = range;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pfn_vkCmdPipelineBarrier(e->cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toDst);
+
+    VkClearColorValue clear = {0};
+    clear.float32[0] = r; clear.float32[1] = g;
+    clear.float32[2] = b; clear.float32[3] = 1.0f;
+    pfn_vkCmdClearColorImage(e->cmd, e->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clear, 1, &range);
+
+    VkImageMemoryBarrier toGen = toDst;
+    toGen.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGen.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGen.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    pfn_vkCmdPipelineBarrier(e->cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toGen);
+
+    pfn_vkEndCommandBuffer(e->cmd);
+
+    VkSubmitInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &e->cmd;
+    if (pfn_vkQueueSubmit(g_gfxQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) return NULL;
+    if (pfn_vkQueueWaitIdle(g_gfxQueue) != VK_SUCCESS) return NULL;
+
+    return (const void *)e->surface;
+}
+
+void lambda_vulkan_release_pool(void) {
+    if (!g_device) return;
+    for (int s = 0; s < POOL_SLOTS; ++s) {
+        for (int e = 0; e < POOL_EYES; ++e) {
+            destroy_eye_slot(&g_pool[s][e]);
+        }
+    }
 }

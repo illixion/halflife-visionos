@@ -148,9 +148,9 @@ actor Renderer {
         }
 
         do {
-            colorMap = try Self.loadTexture(device: device, textureName: "ColorMap")
+            colorMap = try Self.makeVulkanColorMap(device: device)
         } catch {
-            fatalError("Unable to load texture. Error info: \(error)")
+            fatalError("Unable to build Vulkan colorMap. Error info: \(error)")
         }
 
         #if !targetEnvironment(simulator)
@@ -268,6 +268,46 @@ actor Renderer {
         return try MTKMesh(mesh: mdlMesh, device: device)
     }
 
+    enum VulkanColorMapError: Error {
+        case deviceInit(Int32)
+        case clearFailed(String)
+        case wrapFailed
+    }
+
+    static let vulkanColorMapSize = 512
+
+    /// Phase 2 step 2/3: produce a colorMap whose pixels are rendered by
+    /// Vulkan into an IOSurface (rgba16Float), imported by Metal. Uses the
+    /// pooled bridge API at (slot=0, eye=0) so render() can re-render the
+    /// same IOSurface in-place each frame.
+    static func makeVulkanColorMap(device: MTLDevice) throws -> MTLTexture {
+        var devStatus = [CChar](repeating: 0, count: 384)
+        let rc = devStatus.withUnsafeMutableBufferPointer { buf in
+            lambda_vulkan_create_device(buf.baseAddress, Int32(buf.count))
+        }
+        if rc != 0 { throw VulkanColorMapError.deviceInit(rc) }
+
+        let n = Int32(vulkanColorMapSize)
+        guard let surfacePtr = lambda_vulkan_render_eye_pooled(0, 0, n, n, 0.10, 0.60, 0.95) else {
+            throw VulkanColorMapError.clearFailed("pooled render returned NULL")
+        }
+        let surface = Unmanaged<IOSurfaceRef>.fromOpaque(
+            UnsafeMutableRawPointer(mutating: surfacePtr)
+        ).takeUnretainedValue()
+        print("[LambdaVision] Vulkan colorMap: pooled (slot=0, eye=0) \(vulkanColorMapSize)x\(vulkanColorMapSize)")
+
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float, width: vulkanColorMapSize, height: vulkanColorMapSize, mipmapped: false)
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+
+        guard let tex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
+            throw VulkanColorMapError.wrapFailed
+        }
+        tex.label = "VulkanIOSurfaceColorMap"
+        return tex
+    }
+
     static func loadTexture(device: MTLDevice,
                             textureName: String) throws -> MTLTexture {
         /// Load texture data with optimal parameters for sampling
@@ -373,6 +413,17 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
+        // Phase 2 step 3: per-frame Vulkan submission. Re-render the colorMap
+        // IOSurface in-place with an animated color. The cube samples it via
+        // the existing render pipeline — visible animation == proof that the
+        // bridge submitted, the GPU executed, and Metal saw the new contents.
+        let phase = Float(frameIndex) * 0.04
+        let r = 0.5 + 0.5 * sin(phase)
+        let g = 0.5 + 0.5 * sin(phase * 0.7 + 1.3)
+        let b = 0.5 + 0.5 * sin(phase * 0.5 + 2.6)
+        let n = Int32(Self.vulkanColorMapSize)
+        _ = lambda_vulkan_render_eye_pooled(0, 0, n, n, r, g, b)
+
         let renderPassDescriptor = MTL4RenderPassDescriptor()
 
         if device.supportsMSAA {
@@ -418,25 +469,18 @@ actor Renderer {
         commandBuffer.beginCommandBuffer(allocator: commandAllocator)
         commandBuffer.useResidencySet(residencySet)
 
-        /// Final pass rendering code here
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             fatalError("Failed to create render encoder")
         }
 
         renderEncoder.label = "Primary Render Encoder"
-
-        renderEncoder.pushDebugGroup("Draw Box")
-
+        renderEncoder.pushDebugGroup("Draw Box (Vulkan-textured)")
         renderEncoder.setCullMode(.back)
-
         renderEncoder.setFrontFacing(.counterClockwise)
-
         renderEncoder.setRenderPipelineState(pipelineState)
-
         renderEncoder.setDepthStencilState(depthState)
 
         let viewports = drawable.views.map { $0.textureMap.viewport }
-
         renderEncoder.setViewports(viewports)
 
         if drawable.views.count > 1 {
@@ -450,18 +494,19 @@ actor Renderer {
         renderEncoder.setArgumentTable(self.vertexArgumentTable, stages: .vertex)
         renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
 
-        self.vertexArgumentTable.setAddress(dynamicUniformBuffer.gpuAddress + UInt64(uniformBufferOffset), index: BufferIndex.uniforms.rawValue)
-
-        self.vertexArgumentTable.setAddress(drawableTarget.viewProjectionBuffer.gpuAddress + UInt64(drawableTarget.viewProjectionBufferOffset), index: BufferIndex.viewProjection.rawValue)
+        self.vertexArgumentTable.setAddress(dynamicUniformBuffer.gpuAddress + UInt64(uniformBufferOffset),
+                                            index: BufferIndex.uniforms.rawValue)
+        self.vertexArgumentTable.setAddress(drawableTarget.viewProjectionBuffer.gpuAddress + UInt64(drawableTarget.viewProjectionBufferOffset),
+                                            index: BufferIndex.viewProjection.rawValue)
 
         for (index, element) in mesh.vertexDescriptor.layouts.enumerated() {
             guard let layout = element as? MDLVertexBufferLayout else {
                 fatalError("unsupported layout")
             }
-
             if layout.stride != 0 {
                 let buffer = mesh.vertexBuffers[index]
-                self.vertexArgumentTable.setAddress(buffer.buffer.gpuAddress + UInt64(buffer.offset), index: index)
+                self.vertexArgumentTable.setAddress(buffer.buffer.gpuAddress + UInt64(buffer.offset),
+                                                    index: index)
             }
         }
 
@@ -476,7 +521,6 @@ actor Renderer {
         }
 
         renderEncoder.popDebugGroup()
-
         renderEncoder.endEncoding()
 
         commandBuffer.endCommandBuffer()

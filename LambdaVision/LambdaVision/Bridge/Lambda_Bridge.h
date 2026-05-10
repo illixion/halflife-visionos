@@ -22,6 +22,52 @@ int lambda_bridge_smoke_test(void);
 //   -3: zero devices found
 int lambda_vulkan_smoke_test(char *name_out, int name_cap);
 
+// Phase 2 step 1: create VkInstance + VkDevice + graphics queue against the
+// first physical device. Probes VK_EXT_metal_objects availability (needed for
+// the zero-copy CompositorServices interop path).
+//
+// Writes a human-readable status line into status_out (device name, API
+// version, graphics queue family index, metal_objects yes/no).
+//
+// Returns:
+//   0  on success
+//  -1  vkCreateInstance failed
+//  -2  no physical devices
+//  -3  no graphics-capable queue family
+//  -4  vkCreateDevice failed
+int lambda_vulkan_create_device(char *status_out, int status_cap);
+
+// Tears down the device + instance created by lambda_vulkan_create_device.
+// Safe to call if create wasn't called (no-op).
+void lambda_vulkan_destroy_device(void);
+
+// Phase 2 step 2 smoke: allocates an IOSurface (BGRA8, w x h), imports it as a
+// VkImage via VK_EXT_metal_objects, clears it to (r,g,b,1.0) on the graphics
+// queue, blocks until idle. Returns the IOSurface as `void*` (an IOSurfaceRef
+// retained for the caller; release with CFRelease).
+//
+// Returns NULL on failure; status_out gets a human-readable result either way.
+//
+// Requires lambda_vulkan_create_device() to have succeeded *and* metal_objects
+// to be enabled on the device.
+void *lambda_vulkan_clear_iosurface(int width, int height,
+                                    float r, float g, float b,
+                                    char *status_out, int status_cap);
+
+// Phase 2 step 3: pooled per-eye Vulkan render. Bridge owns IOSurface +
+// VkImage + memory + command buffer per (slot, eye). On (slot, eye, w, h)
+// match: re-records cmd buffer with new clear color, submits, waits idle,
+// returns IOSurface (unretained — bridge owns lifecycle). On dimension change
+// or first call: lazily reallocates the slot.
+//
+// slot ∈ [0, 3), eye ∈ [0, 2). Returns NULL on failure.
+const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
+                                            int width, int height,
+                                            float r, float g, float b);
+
+// Releases all pooled per-eye resources. Safe before destroy_device.
+void lambda_vulkan_release_pool(void);
+
 #ifdef __cplusplus
 }
 #endif
