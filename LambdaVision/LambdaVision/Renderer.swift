@@ -413,6 +413,12 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
+        // Phase 2c: tick the xash3d-fwgs engine once per frame. Init was
+        // performed by ContentView before the immersive space appeared;
+        // here we just drive Host_DoFrame. -1 == not initialized (engine
+        // was never booted, or already shut down).
+        _ = lambda_engine_frame()
+
         // Phase 2 step 3: per-frame Vulkan submission. Re-render the colorMap
         // IOSurface in-place with an animated color. The cube samples it via
         // the existing render pipeline — visible animation == proof that the
