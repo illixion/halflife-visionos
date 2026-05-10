@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
 rm -rf build
-python3 ./waf configure --xros -d --disable-gl
+python3 ./waf configure --xros --disable-gl --disable-soft --enable-vklite
 # Final `xash` exec link is expected to fail (filesystem is normally a
 # runtime-loaded dylib). We harvest .o files; ignore the link failure.
 python3 ./waf build || true
@@ -24,7 +24,9 @@ SDK="$(xcrun --show-sdk-path --sdk xros)"
 # whole-archive linked via -force_load).
 mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
   ! -path "*build/filesystem/*" \
-  ! -name 'launcher.c.*.o' | sort)
+  ! -name 'launcher.c.*.o' \
+  ! -path "*build/game_launch/*" \
+  ! -path "*build/ref/common/ref_context.c.*.o" | sort)
 
 # Pre-link filesystem (filesystem_stdio) into one .o with overlap symbols
 # hidden. Engine reaches FS via GetFSAPI/CreateInterface (extern in
@@ -73,7 +75,13 @@ python3 ./waf build
 # build; .2.o is cl_dll's. We don't link cl_dll yet, so skipping .2.o
 # avoids both duplicate symbols and the cl_dll-only externs (vJumpOrigin,
 # iJumpSpectator) that would otherwise leak in.
-mapfile -t HLSDK_RAW_OBJS < <(find "$PWD/build/dlls" "$PWD/build/game_shared" "$PWD/build/pm_shared" -type f -name '*.1.o' | sort)
+mapfile -t HLSDK_RAW_OBJS < <(find "$PWD/build/dlls" "$PWD/build/game_shared" "$PWD/build/pm_shared" -type f -name '*.1.o' \
+  ! -name 'vcs_info.c.*.o' | sort)
+# vcs_info.c is intentionally kept raw (NOT in either prelink) so its
+# globals (_g_VCSInfo_Commit / _g_VCSInfo_Branch) stay externally visible —
+# both server's and cl_dll's Initialize() reference them via the prelinks'
+# undefined-import slots, and resolve at app-link time to this single .o.
+HLSDK_VCS_OBJ="$PWD/build/game_shared/vcs_info.c.1.o"
 
 # Hide HLSDK's pm_math/util internals that collide with engine globals
 # under -force_load. Currently only _VectorAngles overlaps; if more turn
@@ -85,7 +93,44 @@ HLSDK_OBJ="$HERE/hlsdk-portable/build/hlsdk.combined.o"
 xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
   -unexported_symbols_list "$HLSDK_UNEXPORTS" \
   -o "$HLSDK_OBJ" "${HLSDK_RAW_OBJS[@]}"
-HLSDK_OBJS=("$HLSDK_OBJ")
+HLSDK_OBJS=("$HLSDK_OBJ" "$HLSDK_VCS_OBJ")
+
+# --- hlsdk-portable client (cl_dll) ---
+# Engine's CL_LoadProgs dlsyms HUD_VidInit / HUD_Init / Initialize / etc. from
+# the client.dll. visionOS forbids dlopen, so prelink cl_dll's .2.o files into
+# one .o with ONLY the C-style HUD_*/CAM_*/CL_*/IN_*/V_*/KB_*/Demo_* exports
+# visible. C++ class method symbols (Z-mangled) overlap with server side and
+# stay hidden — engine never resolves them via cl_dll anyway.
+HLSDK_CL_RAW_OBJS=( $(find "$HERE/hlsdk-portable/build/cl_dll" "$HERE/hlsdk-portable/build/game_shared" "$HERE/hlsdk-portable/build/pm_shared" "$HERE/hlsdk-portable/build/dlls" -type f -name '*.2.o' \
+  ! -name 'vcs_info.c.*.o' | sort) )
+HLSDK_CL_EXPORTS="$HERE/hlsdk-portable/build/cl_exports.list"
+nm -gU "$HERE/hlsdk-portable/build/cl_dll/client_arm64.dylib" \
+  | awk '/ T / {print $NF}' | grep -v '^__Z' \
+  | grep -vE '^_IN_(ActivateMouse|DeactivateMouse|MouseEvent)$' > "$HLSDK_CL_EXPORTS"
+
+# IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent collide three ways:
+# (a) engine's input.c defines them (used by SDL hosts we don't compile,
+#     and by in_keys.c which DOES need them callable),
+# (b) cl_dll's input.cpp defines them as the HLSDK-side mouse handlers
+#     (callable only after Initialize() — early calls deref NULL),
+# (c) cl_game.c dlsyms them from RTLD_DEFAULT for cdll_exports.
+# We rename the engine-side trio out of the way and supply no-op stubs from
+# Lambda_Bridge.c (linked into the app exec). cl_dll's stay hidden in the
+# combined .o. in_keys.c's intra-engine calls now resolve to the bridge
+# stubs (safe early), and dlsym finds the bridge stubs (non-NULL → satisfies
+# cdll_exports mandatory check). HLSDK's own client mouse path is inert in
+# Stage A.
+ENGINE_INPUT_OBJ="$HERE/xash3d-fwgs/build/engine/client/input/input.c.2.o"
+/opt/homebrew/opt/llvm/bin/llvm-objcopy \
+  --redefine-sym _IN_ActivateMouse=_xash_engine_IN_ActivateMouse \
+  --redefine-sym _IN_DeactivateMouse=_xash_engine_IN_DeactivateMouse \
+  --redefine-sym _IN_MouseEvent=_xash_engine_IN_MouseEvent \
+  "$ENGINE_INPUT_OBJ" "$ENGINE_INPUT_OBJ"
+HLSDK_CL_OBJ="$HERE/hlsdk-portable/build/cl_dll.combined.o"
+xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+  -exported_symbols_list "$HLSDK_CL_EXPORTS" \
+  -o "$HLSDK_CL_OBJ" "${HLSDK_CL_RAW_OBJS[@]}"
+HLSDK_OBJS+=("$HLSDK_CL_OBJ")
 
 OUT="$HERE/../LambdaVision/Vendor/libxash"
 mkdir -p "$OUT"

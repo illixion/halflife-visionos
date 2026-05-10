@@ -910,6 +910,22 @@ static int g_engine_inited = 0;
 static char *g_engine_argv_storage[32];
 static char  g_engine_argv0[16];
 
+// IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent are renamed in the
+// engine prelink (build_xash_libxash.sh) and hidden in the cl_dll prelink.
+// We supply the canonical no-op symbols here so that:
+//   - intra-engine callers (in_keys.c) resolve safely on visionOS,
+//   - dlsym(RTLD_DEFAULT, "IN_*") in cl_game.c finds non-NULL pointers to
+//     satisfy the cdll_exports[] mandatory check (cl_dll's mouse path is
+//     not wired up yet — Phase 3 will replace these with real handlers).
+__attribute__((used, visibility("default")))
+void IN_ActivateMouse(void) {}
+
+__attribute__((used, visibility("default")))
+void IN_DeactivateMouse(void) {}
+
+__attribute__((used, visibility("default")))
+void IN_MouseEvent(int mstate, int down) { (void)mstate; (void)down; }
+
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
                        char *status_out, int status_cap) {

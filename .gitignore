@@ -28,3 +28,5 @@ HalfLifeAssets/
 # Built artifacts from build_xash_libxash.sh
 LambdaVision/Vendor/libxash/
 .xcodebuildmcp/
+VisionPort/lambda_hlsdk_stubs.o
+log.txt
