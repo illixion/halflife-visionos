@@ -85,7 +85,11 @@ struct ContentView: View {
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
-        let extra = ["-dev", "2", "-console", "-noip", "-game", "valve"]
+        // Read-only game data is bundled into the .app at build time
+        // (see "Bundle HalfLifeAssets" build phase). Engine reads PAKs from
+        // -rodir, writes configs/saves to basedir.
+        let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
+        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve"]
         let cArgs = extra.map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
         var engineBuf = [CChar](repeating: 0, count: 384)

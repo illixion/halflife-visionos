@@ -71,9 +71,14 @@ This grabs ~507 MB across 5 depots:
 (Build ID **5433873**, captured 2026-05-10. Valve does occasionally re-mint
 the legacy build; manifests may shift.)
 
-The folder we care about is `HalfLifeAssets/valve/` — that's the directory
-the engine and Lambda VisionPro's importer will accept on first launch. It
-is NOT redistributable; ignore it from git (already in `.gitignore`).
+The folder we care about is `HalfLifeAssets/valve/`. The Xcode build's
+"Bundle HalfLifeAssets" Run Script phase rsyncs this directory into
+`LambdaVision.app/GameData/valve/` at build time, and the engine is
+launched with `-rodir <bundle>/GameData -game valve`. There is no app-side
+asset import flow — drop the folder there and rebuild. (No App Store
+target; this ships via Xcode + GitHub only, so bundling is fine.)
+
+The folder is NOT redistributable; it's already gitignored.
 
 ### Why pre-anniversary specifically
 
