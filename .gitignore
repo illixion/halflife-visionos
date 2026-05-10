@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Claude Code session-local state
+.claude/settings.local.json
+
+# Xcode build / user state
+**/build/
+**/DerivedData/
+**/*.xcuserstate
+**/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+
+# Vendored upstream clones (rebuild via setup script)
+VisionPort/xash3d-fwgs/
+VisionPort/hlsdk-portable/
+
+# Reference projects (their own repos)
+Lambda1VR/
+Spatialcraft/
+
+# Stale local scratch
+Lambda_VisionPro copy/
+
+# MoltenVK xcframework binary (download via setup script)
+LambdaVision/Vendor/MoltenVK.xcframework/
