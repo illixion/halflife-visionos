@@ -89,7 +89,12 @@ struct ContentView: View {
         // (see "Bundle HalfLifeAssets" build phase). Engine reads PAKs from
         // -rodir, writes configs/saves to basedir.
         let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
-        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve"]
+        // +map auto-loads a map before the main menu would otherwise show, so
+        // we exercise GL_RenderFrame end-to-end instead of staring at MainUI.
+        // c0a0 is the HL1 intro tram ride — small, no monsters yet, single
+        // brushmodel-heavy room ideal for first-light BSP rendering.
+        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
+                     "+map", "c0a0"]
         let cArgs = extra.map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
         var engineBuf = [CChar](repeating: 0, count: 384)
