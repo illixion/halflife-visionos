@@ -60,6 +60,41 @@ index 7cd9c1f..504f056 100644
  	#else // !XASH_MOBILE_PLATFORM
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
+diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
+index d4628f3..8abe446 100644
+--- a/engine/client/cl_view.c
++++ b/engine/client/cl_view.c
+@@ -22,6 +22,11 @@ GNU General Public License for more details.
+ #include "input.h" // touch
+ #include "platform/platform.h" // GL_UpdateSwapInterval
+ 
++// Stereo eye offset (signed half-IPD along view-right). The visionOS bridge
++// flips its sign between the two per-eye render passes; mono callers leave
++// it at 0. Public-by-extern; declared inline at the use site in V_RenderView.
++float cl_stereo_eye_offset = 0.0f;
++
+ /*
+ ===============
+ V_CalcViewRect
+@@ -419,6 +424,18 @@ void V_RenderView( void )
+ 			ref.dllFuncs.R_ClearScreen();
+ 		}
+ 
++		// Stereo: shift the camera along the view-right axis by the
++		// caller-supplied half-IPD. Set externally by the visionOS
++		// bridge between the two per-eye render passes; defaults to 0
++		// (no shift) when running mono.
++		extern float cl_stereo_eye_offset;
++		if( cl_stereo_eye_offset != 0.0f )
++		{
++			vec3_t fwd, right, up;
++			AngleVectors( rvp.viewangles, fwd, right, up );
++			VectorMA( rvp.vieworigin, cl_stereo_eye_offset, right, rvp.vieworigin );
++		}
++
+ 		GL_RenderFrame( &rvp );
+ 		S_UpdateFrame( &rvp );
+ 		viewnum++;
 diff --git a/engine/client/dll_int/ref_common.c b/engine/client/dll_int/ref_common.c
 index 9776665..eb89e31 100644
 --- a/engine/client/dll_int/ref_common.c

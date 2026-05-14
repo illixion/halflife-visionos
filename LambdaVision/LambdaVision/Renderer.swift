@@ -70,7 +70,8 @@ actor Renderer {
     let dynamicUniformBuffer: MTLBuffer
     let pipelineState: MTLRenderPipelineState
     let depthState: MTLDepthStencilState
-    let colorMap: MTLTexture
+    let colorMap: MTLTexture        // 2-layer array (layer 0 = left eye, 1 = right)
+    let colorMapLayerViews: [MTLTexture] // per-slice 2D views handed to ANGLE
     private var engineInited = false
 
     let endFrameEvent: MTLSharedEvent
@@ -152,6 +153,19 @@ actor Renderer {
             colorMap = try Self.makeVulkanColorMap(device: device)
         } catch {
             fatalError("Unable to build Vulkan colorMap. Error info: \(error)")
+        }
+
+        // 2D slice views (one per eye) over the 2D-array colorMap. ANGLE/Metal
+        // interop wraps these as plain 2D MTLTextures so the existing
+        // EGL_METAL_TEXTURE_ANGLE path keeps working unchanged. Writes through
+        // a view land in the underlying array slice, which the display shader
+        // samples via texture2d_array.
+        let cm = colorMap
+        colorMapLayerViews = (0..<2).map { slice in
+            cm.makeTextureView(pixelFormat: cm.pixelFormat,
+                               textureType: .type2D,
+                               levels: 0..<1,
+                               slices: slice..<(slice + 1))!
         }
 
         #if !targetEnvironment(simulator)
@@ -315,9 +329,14 @@ actor Renderer {
         // Swift-allocated MTLTexture each frame; the existing Metal pipeline
         // samples it just like before. Same scaffolding, GL is now the only
         // pixel producer for the colorMap.
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: vulkanColorMapSize, height: vulkanColorMapSize, mipmapped: false)
-        desc.usage = [.renderTarget, .shaderRead]
+        let desc = MTLTextureDescriptor()
+        desc.textureType = .type2DArray
+        desc.pixelFormat = .bgra8Unorm
+        desc.width = vulkanColorMapSize
+        desc.height = vulkanColorMapSize
+        desc.arrayLength = 2
+        desc.mipmapLevelCount = 1
+        desc.usage = [.renderTarget, .shaderRead, .pixelFormatView]
         desc.storageMode = .private
 
         guard let tex = device.makeTexture(descriptor: desc) else {
@@ -404,6 +423,21 @@ actor Renderer {
         self.uniforms[0].modelMatrix = translate * tilt
     }
 
+    private func copyEyeSlice(from src: Int, to dst: Int) {
+        commandBuffer.beginCommandBuffer(allocator: commandAllocators[uniformBufferIndex])
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        enc.copy(sourceTexture: colorMap, sourceSlice: src, sourceLevel: 0,
+                 sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                 sourceSize: MTLSize(width: colorMap.width,
+                                     height: colorMap.height, depth: 1),
+                 destinationTexture: colorMap,
+                 destinationSlice: dst, destinationLevel: 0,
+                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        enc.endEncoding()
+        commandBuffer.endCommandBuffer()
+        commandQueue.commit([commandBuffer])
+    }
+
     func renderFrame() {
         /// Per frame updates hare
 
@@ -437,12 +471,22 @@ actor Renderer {
         // different moments in time — visible as per-eye divergent
         // transients (e.g. HUD glyphs, particles).
         ensureEngineInitialized()
-        let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
-        let frameRc = lambda_gl_worker_render_frame(
-            colorMapPtr, Int32(colorMap.width), Int32(colorMap.height),
-            0.1, 0.1, 0.1)
-        if frameRc != 0 {
-            print("[LambdaVision] GL worker render rc=\(frameRc)")
+        // Step 2 of stereo: engine ticks once for the left eye (slice 0)
+        // with a negative IPD/2 offset; we then re-run only the renderer
+        // for the right eye (slice 1) with a positive offset. Half-Life
+        // world units are roughly inches, so ~1.25 unit per eye ≈ 6.4 cm
+        // interpupillary distance.
+        let halfIPD: Float = 1.25
+        for eye in 0..<2 {
+            let off: Float = (eye == 0) ? -halfIPD : halfIPD
+            let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
+            let rc = lambda_gl_worker_render_eye(
+                Int32(eye), off,
+                eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                0.1, 0.1, 0.1)
+            if rc != 0 {
+                print("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
+            }
         }
 
         for drawable in drawables {

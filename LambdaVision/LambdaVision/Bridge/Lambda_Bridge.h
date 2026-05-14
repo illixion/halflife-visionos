@@ -212,6 +212,15 @@ int lambda_gl_worker_engine_init(const char *writable_dir,
 int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
                                   float r, float g, float b);
 
+// Stereo render. eye_index=0 ticks the simulation and renders the left eye
+// (same as lambda_gl_worker_render_frame, but with a stereo offset).
+// eye_index=1 re-runs only the renderer (no sim tick) with the supplied
+// offset, producing the right-eye image. eye_offset is in xash world units
+// applied along the view-right axis (positive = camera moves right).
+int lambda_gl_worker_render_eye(int eye_index, float eye_offset,
+                                void *mtl_texture, int width, int height,
+                                float r, float g, float b);
+
 // Posts an engine console command (Cbuf_AddText) onto the worker thread.
 // Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.
 int lambda_gl_worker_cmd(const char *cmd);

@@ -2307,6 +2307,19 @@ int lambda_engine_frame(void) {
     return Host_DoFrame();
 }
 
+// Re-render the current world state without ticking the sim. Used by the
+// stereo path: Host_DoFrame produces eye 0, then we rebind the FBO to the
+// other slice and call this to produce eye 1 from the same simulation tick.
+extern void V_RenderView( void );
+extern float cl_stereo_eye_offset;
+void lambda_engine_render_view_only(void) {
+    if (!g_engine_inited) return;
+    V_RenderView();
+}
+void lambda_engine_set_stereo_offset(float off) {
+    cl_stereo_eye_offset = off;
+}
+
 void lambda_engine_shutdown(void) {
     if (!g_engine_inited) return;
     Host_Shutdown();
@@ -2738,13 +2751,14 @@ int lambda_gl_end_frame(void) {
     if (g_gl_disp == EGL_NO_DISPLAY) return -1;
     if (g_frame_fbo == 0)            return 0; // begin was never called
 
-    typedef EGLBoolean (*PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)(EGLDisplay);
-    static PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC pegl_wait = NULL;
-    if (!pegl_wait)
-        pegl_wait = (PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)
-            eglGetProcAddress("eglWaitUntilWorkScheduledANGLE");
-    if (pegl_wait) pegl_wait(g_gl_disp);
-    else           glFinish();
+    // Force a real GPU fence: ANGLE renders on its OWN internal MTLCommand-
+    // Queue, while CompositorServices' encoder runs on a separate queue
+    // (layerRenderer.commandQueue). eglWaitUntilWorkScheduledANGLE only
+    // schedules ANGLE's work and returns immediately — when the consumer
+    // queue reads the shared MTLTexture, it can race and pick up the
+    // previous frame's contents. glFinish blocks until the GPU has
+    // actually completed the writes.
+    glFinish();
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;
@@ -2815,6 +2829,7 @@ typedef enum {
     WORK_SETUP,
     WORK_INIT,
     WORK_FRAME,
+    WORK_FRAME_EYE2,
     WORK_CMD,
 } gl_work_kind_t;
 
@@ -2857,6 +2872,8 @@ static int        g_w_w = 0, g_w_h = 0;
 static float      g_w_r = 0, g_w_g = 0, g_w_b = 0;
 // cmd
 static char       g_w_cmd[256];
+// stereo offset for the current/upcoming render
+static float      g_w_eye_offset = 0.0f;
 
 static void *gl_worker_main(void *arg) {
     (void)arg;
@@ -2887,7 +2904,25 @@ static void *gl_worker_main(void *arg) {
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
             if (br == 0) {
+                lambda_engine_set_stereo_offset(g_w_eye_offset);
                 lambda_engine_frame();
+                lambda_engine_set_stereo_offset(0.0f);
+                er = lambda_gl_end_frame();
+            }
+            g_w_result = (br != 0) ? br : er;
+            break;
+        }
+        case WORK_FRAME_EYE2: {
+            // Second eye: rebind FBO to the other slice and re-run only the
+            // renderer (no sim tick). cl_stereo_eye_offset shifts the camera
+            // along view-right inside V_RenderView.
+            int br = lambda_gl_begin_frame_into_mtl_texture(
+                g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
+            int er = 0;
+            if (br == 0) {
+                lambda_engine_set_stereo_offset(g_w_eye_offset);
+                lambda_engine_render_view_only();
+                lambda_engine_set_stereo_offset(0.0f);
                 er = lambda_gl_end_frame();
             }
             g_w_result = (br != 0) ? br : er;
@@ -2963,7 +2998,20 @@ int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
     pthread_mutex_lock(&g_w_api_mtx);
     g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
     g_w_r = r; g_w_g = g; g_w_b = b;
+    g_w_eye_offset = 0.0f;
     int rc = worker_post_and_wait(WORK_FRAME);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return rc;
+}
+
+int lambda_gl_worker_render_eye(int eye_index, float eye_offset,
+                                void *mtl_texture, int width, int height,
+                                float r, float g, float b) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
+    g_w_r = r; g_w_g = g; g_w_b = b;
+    g_w_eye_offset = eye_offset;
+    int rc = worker_post_and_wait(eye_index == 0 ? WORK_FRAME : WORK_FRAME_EYE2);
     pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
 }

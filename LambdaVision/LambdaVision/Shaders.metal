@@ -25,6 +25,7 @@ typedef struct
 {
     float4 position [[position]];
     float2 texCoord;
+    ushort eye;
 } ColorInOut;
 
 vertex ColorInOut vertexShader(Vertex in [[stage_in]],
@@ -37,21 +38,20 @@ vertex ColorInOut vertexShader(Vertex in [[stage_in]],
     float4 position = float4(in.position, 1.0);
     out.position = viewProjectionArray.viewProjectionMatrix[amp_id] * uniforms.modelMatrix * position;
     out.texCoord = in.texCoord;
+    out.eye = amp_id;
 
     return out;
 }
 
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
-                               texture2d<half> colorMap     [[ texture(TextureIndexColor) ]])
+                               texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
                                    min_filter::linear);
 
-    // Flip V: ANGLE writes with GL bottom-left origin into the MTLTexture
-    // but Metal samples top-left. Easier than re-projecting the engine.
     float2 uv = float2(in.texCoord.x, 1.0 - in.texCoord.y);
-    half4 colorSample   = colorMap.sample(colorSampler, uv);
+    half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
 
     return float4(colorSample);
 }
