@@ -2319,13 +2319,16 @@ void lambda_engine_shutdown(void) {
 #include <GLES2/gl2.h>
 
 int lambda_gl_smoke_test(char *status_out, int status_cap) {
-    const EGLint disp_attribs[] = {
+    // eglGetPlatformDisplay (EGL 1.5) takes EGLAttrib (intptr-sized), unlike
+    // eglChooseConfig which takes EGLint. Mixing them is a clang warning
+    // under -Werror=incompatible-pointer-types.
+    const EGLAttrib disp_attribs[] = {
         EGL_PLATFORM_ANGLE_TYPE_ANGLE,
         EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
         EGL_NONE
     };
     EGLDisplay disp = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE,
-                                            EGL_DEFAULT_DISPLAY,
+                                            (void *)EGL_DEFAULT_DISPLAY,
                                             disp_attribs);
     if (disp == EGL_NO_DISPLAY) {
         snprintf(status_out, status_cap,
@@ -2340,6 +2343,11 @@ int lambda_gl_smoke_test(char *status_out, int status_cap) {
         return -2;
     }
 
+    // Probe how many configs ANGLE Metal exposes total — diagnostic for
+    // visionOS where the surface model is non-standard.
+    EGLint total_cfgs = 0;
+    eglGetConfigs(disp, NULL, 0, &total_cfgs);
+
     const EGLint cfg_attribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
@@ -2352,10 +2360,31 @@ int lambda_gl_smoke_test(char *status_out, int status_cap) {
     EGLConfig cfg = NULL;
     EGLint num_cfgs = 0;
     if (!eglChooseConfig(disp, cfg_attribs, &cfg, 1, &num_cfgs) || num_cfgs < 1) {
-        snprintf(status_out, status_cap,
-                 "eglChooseConfig → %d configs (err=0x%x)", num_cfgs, eglGetError());
-        eglTerminate(disp);
-        return -3;
+        // ANGLE Metal may not enumerate ES2+pbuffer configs by default —
+        // try ES3 with no surface-type filter.
+        const EGLint loose_attribs[] = {
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+            EGL_NONE
+        };
+        if (!eglChooseConfig(disp, loose_attribs, &cfg, 1, &num_cfgs) || num_cfgs < 1) {
+            // Last resort: pick the very first config eglGetConfigs returns,
+            // whatever it is.
+            if (total_cfgs > 0) {
+                EGLConfig probe[1] = { NULL };
+                EGLint got = 0;
+                if (eglGetConfigs(disp, probe, 1, &got) && got >= 1) {
+                    cfg = probe[0];
+                    num_cfgs = got;
+                }
+            }
+            if (num_cfgs < 1) {
+                snprintf(status_out, status_cap,
+                         "eglChooseConfig: 0 matches (total=%d, err=0x%x)",
+                         total_cfgs, eglGetError());
+                eglTerminate(disp);
+                return -3;
+            }
+        }
     }
 
     const EGLint ctx_attribs[] = {
