@@ -2245,10 +2245,13 @@ void IN_DeactivateMouse(void) {}
 __attribute__((used, visibility("default")))
 void IN_MouseEvent(int mstate, int down) { (void)mstate; (void)down; }
 
-// (Removed dead-strip anchor for GetRefAPI — currently undefined because
-// gl2_shim doesn't compile under XASH_GL_STATIC, leaving glBegin et al
-// unresolved. Will re-anchor once the shim is wired in. See git log for
-// the working investigation.)
+// Engine reaches the renderer's GetRefAPI via dlsym(RTLD_DEFAULT) at
+// runtime (xash's COM_LoadLibrary returns RTLD_DEFAULT on visionOS).
+// Without a reference here, ld dead-strips the symbol from the final
+// exec and the dlsym lookup returns NULL → "Can't initialize renderer".
+extern int GetRefAPI( int version, void *funcs, void *engfuncs, void *globals );
+__attribute__((used, visibility("default")))
+static void *const _anchor_GetRefAPI = (void *)GetRefAPI;
 
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
@@ -2507,6 +2510,9 @@ int lambda_gl_setup(char *status_out, int status_cap) {
         }
     }
 
+    // ES 3.0 is what ANGLE/Metal supports on visionOS. gl2_shim's default
+    // shader version (310) is patched to 300 in the visionOS port so its
+    // GLSL ES output matches the context.
     const EGLint ctx_attribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 3,
         EGL_NONE
@@ -2545,6 +2551,11 @@ int lambda_gl_setup(char *status_out, int status_cap) {
         g_gl_surf = EGL_NO_SURFACE;
         return -6;
     }
+
+    // DO NOT release the context here. ANGLE/Metal on visionOS leaves the
+    // context in a non-functional state after release+rebind, even on the
+    // same thread (glGetString → null, glCreateShader → 0). The GL worker
+    // thread that called this owns the binding for the process lifetime.
 
     snprintf(status_out, status_cap, "EGL %d.%d / context ES%d.%d ready",
              major, minor, 3, 0);
@@ -2657,6 +2668,8 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            float r, float g, float b) {
     if (g_gl_disp == EGL_NO_DISPLAY) return -1;
     if (!mtl_texture)                return -2;
+    // Worker thread holds the context current for the process lifetime;
+    // no rebind needed here.
 
     const EGLAttrib img_attribs[] = { EGL_NONE };
     g_frame_image = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT,
@@ -2713,4 +2726,136 @@ int lambda_gl_end_frame(void) {
     glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
     eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
     return 0;
+}
+
+// ---- GL worker thread -----------------------------------------------------
+//
+// ANGLE's Metal backend on visionOS doesn't tolerate cross-thread context
+// migration: eglMakeCurrent on a second thread succeeds, but the actual GL
+// machinery stays bound to the original thread, so glGetString and every
+// downstream call (glCreateShader → 0) silently fails. Swift's Task
+// executor on a DispatchQueue moves between OS threads across suspension
+// points, which makes the engine init thread different from the setup
+// thread. The fix is a dedicated pthread that owns the EGL context for
+// the process lifetime; all GL + engine work runs on it via a synchronous
+// work-queue posted from any Swift thread.
+
+#include <pthread.h>
+
+typedef enum {
+    WORK_NONE = 0,
+    WORK_SETUP,
+    WORK_INIT,
+    WORK_FRAME,
+} gl_work_kind_t;
+
+static pthread_t       g_w_thread;
+static pthread_mutex_t g_w_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_w_post = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  g_w_done = PTHREAD_COND_INITIALIZER;
+static gl_work_kind_t  g_w_kind = WORK_NONE;
+static int             g_w_started = 0;
+
+// Per-kind payloads (only one in flight at a time, so a flat union is fine).
+static char       g_w_status[384];
+static int        g_w_status_cap = sizeof(g_w_status);
+static int        g_w_result = 0;
+// init
+static char       g_w_init_basedir[1024];
+static int        g_w_init_argc = 0;
+#define W_MAX_ARGV 64
+static char       g_w_init_argv_storage[W_MAX_ARGV][128];
+static const char *g_w_init_argv[W_MAX_ARGV];
+// frame
+static void      *g_w_mtl = NULL;
+static int        g_w_w = 0, g_w_h = 0;
+static float      g_w_r = 0, g_w_g = 0, g_w_b = 0;
+
+static void *gl_worker_main(void *arg) {
+    (void)arg;
+    pthread_setname_np("LambdaVision.gl-worker");
+    pthread_mutex_lock(&g_w_mtx);
+    for (;;) {
+        while (g_w_kind == WORK_NONE)
+            pthread_cond_wait(&g_w_post, &g_w_mtx);
+        gl_work_kind_t kind = g_w_kind;
+        pthread_mutex_unlock(&g_w_mtx);
+
+        switch (kind) {
+        case WORK_SETUP:
+            // lambda_gl_setup leaves the EGL context current on the
+            // calling thread (us). Don't release; ANGLE/Metal can't
+            // recover from rebind on visionOS.
+            g_w_result = lambda_gl_setup(g_w_status, g_w_status_cap);
+            break;
+        case WORK_INIT:
+            g_w_result = lambda_engine_init(g_w_init_basedir,
+                                            g_w_init_argc,
+                                            g_w_init_argv,
+                                            g_w_status, g_w_status_cap);
+            break;
+        case WORK_FRAME: {
+            int br = lambda_gl_begin_frame_into_mtl_texture(
+                g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
+            int er = 0;
+            if (br == 0) {
+                lambda_engine_frame();
+                er = lambda_gl_end_frame();
+            }
+            g_w_result = (br != 0) ? br : er;
+            break;
+        }
+        default: g_w_result = -1; break;
+        }
+
+        pthread_mutex_lock(&g_w_mtx);
+        g_w_kind = WORK_NONE;
+        pthread_cond_signal(&g_w_done);
+    }
+    return NULL;
+}
+
+static int worker_post_and_wait(gl_work_kind_t kind) {
+    pthread_mutex_lock(&g_w_mtx);
+    g_w_kind = kind;
+    pthread_cond_signal(&g_w_post);
+    while (g_w_kind != WORK_NONE)
+        pthread_cond_wait(&g_w_done, &g_w_mtx);
+    int rc = g_w_result;
+    pthread_mutex_unlock(&g_w_mtx);
+    return rc;
+}
+
+int lambda_gl_worker_setup(char *status_out, int status_cap) {
+    if (!g_w_started) {
+        g_w_started = 1;
+        pthread_create(&g_w_thread, NULL, gl_worker_main, NULL);
+    }
+    int rc = worker_post_and_wait(WORK_SETUP);
+    if (status_out && status_cap > 0)
+        snprintf(status_out, status_cap, "%s", g_w_status);
+    return rc;
+}
+
+int lambda_gl_worker_engine_init(const char *basedir,
+                                 int argc, const char *const *argv,
+                                 char *status_out, int status_cap) {
+    snprintf(g_w_init_basedir, sizeof(g_w_init_basedir), "%s", basedir);
+    g_w_init_argc = argc < W_MAX_ARGV ? argc : W_MAX_ARGV;
+    for (int i = 0; i < g_w_init_argc; i++) {
+        snprintf(g_w_init_argv_storage[i], sizeof(g_w_init_argv_storage[i]),
+                 "%s", argv[i] ? argv[i] : "");
+        g_w_init_argv[i] = g_w_init_argv_storage[i];
+    }
+    int rc = worker_post_and_wait(WORK_INIT);
+    if (status_out && status_cap > 0)
+        snprintf(status_out, status_cap, "%s", g_w_status);
+    return rc;
+}
+
+int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
+                                  float r, float g, float b) {
+    g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
+    g_w_r = r; g_w_g = g; g_w_b = b;
+    return worker_post_and_wait(WORK_FRAME);
 }

@@ -1,15 +1,3 @@
-diff --git a/3rdparty/library_suffix b/3rdparty/library_suffix
---- a/3rdparty/library_suffix
-+++ b/3rdparty/library_suffix
-@@ -1 +1 @@
--Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa
-+Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa-dirty
-diff --git a/3rdparty/mainui b/3rdparty/mainui
---- a/3rdparty/mainui
-+++ b/3rdparty/mainui
-@@ -1 +1 @@
--Subproject commit a4ec67f28037583617c05222e54e04777f677041
-+Subproject commit a4ec67f28037583617c05222e54e04777f677041-dirty
 diff --git a/common/backends.h b/common/backends.h
 index e0cc14b..527bdc4 100644
 --- a/common/backends.h
@@ -169,6 +157,24 @@ index ebb7fe0..f9dd283 100644
  	return 0;
  }
  
+diff --git a/engine/common/sys_con.c b/engine/common/sys_con.c
+index 1688f98..081758d 100644
+--- a/engine/common/sys_con.c
++++ b/engine/common/sys_con.c
+@@ -261,6 +261,13 @@ static void Sys_PrintStdout( const char *logtime, size_t logtime_len, const char
+ 	IOS_Log( buf );
+ #endif // TARGET_OS_IOS
+ 
++#if XASH_VISIONOS
++	// visionOS has no IOS_Log hook; route to stderr so Xcode console
++	// (and our log.txt capture) sees engine prints including shader
++	// compile errors via Con_Reportf.
++	fprintf( stderr, "%s %s", logtime, buf );
++#endif
++
+ #if XASH_NSWITCH && NSWITCH_DEBUG
+ 	// just spew it to stderr normally in debug mode
+ 	fprintf( stderr, "%s %s", logtime, buf );
 diff --git a/engine/common/system.c b/engine/common/system.c
 index ec64677..be7f43f 100644
 --- a/engine/common/system.c
@@ -248,10 +254,26 @@ index 72bafc2..973d9bd 100644
  void Posix_Daemonize( void )
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-index 9624e29..3417f4e 100644
+index 9624e29..d853c61 100644
 --- a/engine/platform/visionos/vid_visionos.c
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -18,8 +18,11 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
+@@ -9,17 +9,35 @@ entry points platform.h doesn't already inline-stub for non-SDL builds.
+ 
+ #include "platform/platform.h"
+ #include "client.h"
++#include "ref_common.h"
++#include <dlfcn.h>
+ 
+ #if XASH_VIDEO == VIDEO_VISIONOS
+ 
++// ANGLE's EGL is statically linked into the app exec. Declared here to
++// avoid pulling EGL/egl.h (and its system-header dependencies) into the
++// engine's include path.
++extern void *eglGetProcAddress( const char *procname );
++
+ // ---- Video / VID -----------------------------------------------------------
+ 
+ qboolean R_Init_Video( ref_graphic_apis_t type )
  {
  	(void)type;
  	host.renderinfo_changed = false;
@@ -262,9 +284,39 @@ index 9624e29..3417f4e 100644
 +	// per-eye targets land.
 +	refState.width  = 512;
 +	refState.height = 512;
++	// SDL platforms call GL_InitExtensions() here after creating a real
++	// GL context. We rely on the LambdaVision app to have already made
++	// an ANGLE EGL context current before lambda_engine_init runs, so
++	// the renderer's pgl* function pointers can resolve via dlsym/eglGet-
++	// ProcAddress now. Skipping this leaves them all NULL → crash in
++	// GL_SetDefaults's first pglFinish().
++	if( ref.dllFuncs.GL_InitExtensions )
++		ref.dllFuncs.GL_InitExtensions();
  	return true;
  }
  
+@@ -57,8 +75,19 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
+ 
+ void *GL_GetProcAddress( const char *name )
+ {
+-	(void)name;
+-	return NULL;
++	// ref_gles3compat resolves every pgl* via this hook. PREFER ANGLE's
++	// eglGetProcAddress over dlsym(RTLD_DEFAULT). When linked with
++	// libANGLE.a via -force_load, the GLES entry points (glGetString,
++	// glCreateShader, ...) appear in the dyld symbol table BUT through
++	// public-API wrappers that are inert until ANGLE-internal state is
++	// fully set up. eglGetProcAddress returns the real dispatch-table
++	// entry, which works as soon as a context is current. Symptom of
++	// using dlsym: pglGetString returns NULL even though the direct
++	// (link-time) glGetString call works on the same context+thread.
++	if( !name ) return NULL;
++	void *fn = eglGetProcAddress( name );
++	if( !fn ) fn = dlsym( RTLD_DEFAULT, name );
++	return fn;
+ }
+ 
+ int GL_SetAttribute( int attr, int val )
 diff --git a/engine/wscript b/engine/wscript
 index 5b5e3a6..c882802 100644
 --- a/engine/wscript
@@ -314,8 +366,26 @@ index 302548a..399a05a 100644
  			continue;
  
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
+diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
+index 3fa5df3..395283b 100644
+--- a/ref/gl/gl2_shim/gl2_shim.c
++++ b/ref/gl/gl2_shim/gl2_shim.c
+@@ -577,7 +577,13 @@ int GL2_ShimInit( void )
+ 	if( gEngfuncs.Sys_CheckParm( "-noincremental" ))
+ 		gl2wrap_config.incremental = gl2wrap_config.buf_storage = false;
+ 
++#if XASH_VISIONOS
++	// ANGLE/Metal on visionOS exposes ES 3.0, which compiles GLSL ES 3.00
++	// but not 3.10 (`layout(location=N)` requires ES 3.1+).
++	gl2wrap_config.version = 300;
++#else
+ 	gl2wrap_config.version = 310;
++#endif
+ 	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
+ 		gl2wrap_config.version = 100;
+ 	if( gl2wrap_config.buf_storage )
 diff --git a/ref/gl/wscript b/ref/gl/wscript
-index f085da6..b3c8506 100644
+index f085da6..9a9f280 100644
 --- a/ref/gl/wscript
 +++ b/ref/gl/wscript
 @@ -18,7 +18,9 @@ def options(opt):
@@ -329,15 +399,6 @@ index f085da6..b3c8506 100644
  		conf.check(lib='GL')
  
  	if conf.env.DEST_OS2 == 'android':
-@@ -59,7 +61,7 @@ def build(bld):
- 		'ref_gles3compat': {
- 			'enable':  bld.env.GLES3COMPAT,
- 			'libs':    [],
--			'defines': ['XASH_GLES3COMPAT=1'],
-+			'defines': ['XASH_GLES3COMPAT=1'] + (['XASH_GL_STATIC=1'] if bld.env.XROS else []),
- 		},
- 	}
- 
 @@ -67,9 +69,13 @@ def build(bld):
  		if not v['enable']:
  			continue
@@ -1091,7 +1152,7 @@ index 5733329..73de016 100644
  	conf.env.MSVC_WINE = conf.options.MSVC_WINE
  	conf.env.SAILFISH = conf.options.SAILFISH
 diff --git a/wscript b/wscript
-index 49d1d3a..02b9001 100644
+index 49d1d3a..707c611 100644
 --- a/wscript
 +++ b/wscript
 @@ -95,6 +95,7 @@ def register_define(self, conf):
@@ -1110,7 +1171,7 @@ index 49d1d3a..02b9001 100644
  ]
  
  def options(opt):
-@@ -267,6 +269,15 @@ def configure(conf):
+@@ -267,6 +269,14 @@ def configure(conf):
  		conf.options.BUILD_BUNDLED_DEPS = True
  		conf.options.GLES3COMPAT      = True
  		conf.options.GL               = False
@@ -1122,7 +1183,6 @@ index 49d1d3a..02b9001 100644
 +		conf.options.BUILD_BUNDLED_DEPS = True
 +		conf.options.GL               = False
 +		conf.options.GLES3COMPAT      = True
-+		conf.options.GL_STATIC        = True
  
  	# psvita needs -fPIC set manually and static builds are incompatible with -fPIC
  	enforce_pic = conf.env.DEST_OS != 'psvita' and not conf.env.STATIC_LINKING

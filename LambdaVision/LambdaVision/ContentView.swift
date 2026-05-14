@@ -80,35 +80,10 @@ struct ContentView: View {
 
         // Device + queue stay alive; immersive Renderer reuses them.
 
-        // Engine boot smoke test: console + filesystem only, no rendering yet.
-        let appSupport = (try? FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
-        let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
-        // Read-only game data is bundled into the .app at build time
-        // (see "Bundle HalfLifeAssets" build phase). Engine reads PAKs from
-        // -rodir, writes configs/saves to basedir.
-        let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
-        // +map auto-loads a map before the main menu would otherwise show, so
-        // we exercise GL_RenderFrame end-to-end instead of staring at MainUI.
-        // c0a0 is the HL1 intro tram ride — small, no monsters yet, single
-        // brushmodel-heavy room ideal for first-light BSP rendering.
-        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
-                     "+map", "c0a0"]
-        let cArgs = extra.map { strdup($0) }
-        defer { cArgs.forEach { free($0) } }
-        var engineBuf = [CChar](repeating: 0, count: 384)
-        let erc = basedir.withCString { dir in
-            cArgs.withUnsafeBufferPointer { argv -> Int32 in
-                let argvPtrs = argv.baseAddress?.withMemoryRebound(
-                    to: UnsafePointer<CChar>?.self, capacity: argv.count) { $0 }
-                return engineBuf.withUnsafeMutableBufferPointer { buf in
-                    lambda_engine_init(dir, Int32(extra.count), argvPtrs,
-                                       buf.baseAddress, Int32(buf.count))
-                }
-            }
-        }
-        engineStatus = "rc=\(erc) \(String(cString: engineBuf))"
+        // Engine init is deferred to the render thread (Renderer.swift) so
+        // that R_Init's GLES calls run on the same thread holding the EGL
+        // context. Status updates back to UI happen via the same path.
+        engineStatus = "deferred to render thread"
     }
 }
 

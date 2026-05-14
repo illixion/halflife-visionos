@@ -199,6 +199,19 @@ int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
 // Tears down the long-lived context/display. Idempotent.
 void lambda_gl_teardown(void);
 
+// ---- GL worker thread ----
+// ANGLE/Metal on visionOS doesn't support cross-thread context migration
+// even when eglMakeCurrent succeeds. These wrappers run the GL setup +
+// engine init + per-frame work on a single dedicated pthread that owns
+// the EGL context for the process lifetime. Call from any Swift thread;
+// each function blocks until the worker finishes the requested work.
+int lambda_gl_worker_setup(char *status_out, int status_cap);
+int lambda_gl_worker_engine_init(const char *writable_dir,
+                                 int extra_argc, const char *const *extra_argv,
+                                 char *status_out, int status_cap);
+int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
+                                  float r, float g, float b);
+
 // Per-frame begin/end. Wraps mtl_texture as the GL FBO color attachment,
 // binds it, clears to (r,g,b,1). Any GL calls between begin and end go
 // through ANGLE → Metal and land in mtl_texture. end_frame() finalises

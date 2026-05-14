@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
 rm -rf build
-python3 ./waf configure --xros --disable-gl --disable-soft --enable-gles3compat --enable-static-gl
+python3 ./waf configure --xros --disable-gl --disable-soft --enable-gles3compat
 # Final `xash` exec link is expected to fail (filesystem is normally a
 # runtime-loaded dylib). We harvest .o files; ignore the link failure.
 python3 ./waf build || true
@@ -26,21 +26,16 @@ mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
   ! -path "*build/filesystem/*" \
   ! -name 'launcher.c.*.o' \
   ! -path "*build/game_launch/*" \
-  ! -path "*build/ref/common/ref_context.c.*.o" \
+  ! -path "*build/ref/common/*" \
   ! -path "*build/ref/gl/*" | sort)
 
-# Pre-link ref_gl objects + ref/common/ref_context.c (where GetRefAPI lives
-# for renderers that don't supply their own — vklite did, ref_gl uses the
-# common one) into one .o with renderer entry-points (R_Init, R_Shutdown,
-# Tri*, etc.) hidden. Those names collide with the engine's ref_common
-# dispatch wrappers + the engine's own allocator stubs when whole-archive
-# linked. GetRefAPI stays exported — engine reaches it via
-# dlsym(RTLD_DEFAULT) at runtime, like vklite did.
-GL_RAW_OBJS=( $(find "$PWD/build/ref/gl" -type f -name '*.o' | sort) )
-# NOTE: ref/common/ref_context.c.1.o (which contains GetRefAPI) is *not*
-# included until gl2_shim compiles correctly under XASH_GL_STATIC.
-# Including it now would expose unresolved glBegin/glActiveTextureARB/...
-# references at the app link.
+# Pre-link ref/gl + ALL ref/common into one combined.o. ref/common defines
+# the renderer-side cvar pointers (DEFINE_ENGINE_SHARED_CVAR_LIST) and
+# the GL renderer's ref_light/ref_image/ref_math share that translation
+# unit. Keeping them together lets ld -r resolve their cross-references
+# internally before we redefine-sym the names that collide with engine-
+# side cvar_t structs.
+GL_RAW_OBJS=( $(find "$PWD/build/ref/gl" "$PWD/build/ref/common" -type f -name '*.o' | sort) )
 GL_UNEXPORTS="$PWD/build/ref/gl/unexports.list"
 cat > "$GL_UNEXPORTS" <<'EOF'
 _R_Init
@@ -63,6 +58,25 @@ GL_OBJ="$PWD/build/ref/gl/ref_gl.combined.o"
 xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
   -unexported_symbols_list "$GL_UNEXPORTS" \
   -o "$GL_OBJ" "${GL_RAW_OBJS[@]}"
+# `ld -r -unexported_symbols_list` only LOCALIZES the listed symbols; it
+# does NOT hide tentative/common defs that share names with engine-side
+# globals. Rename the renderer-side shared-cvar pointer copies — the
+# engine defines `cvar_t r_showtextures` (a 32-byte struct), the renderer
+# defines `cvar_t *r_showtextures = NULL` (an 8-byte pointer). Both are
+# external at the static link, collide as duplicates. Renaming the
+# renderer side preserves intra-prelink references (ref_light.c reads
+# `r_showtextures->value` inside the same combined.o) while letting the
+# engine's struct win at the final image. GetRefAPI stays exported so
+# dlsym(RTLD_DEFAULT) can find it.
+/opt/homebrew/opt/llvm/bin/llvm-objcopy \
+  --globalize-symbol=_GetRefAPI \
+  --redefine-sym _r_showtextures=_refgl_r_showtextures \
+  --redefine-sym _r_decals=_refgl_r_decals \
+  --redefine-sym _r_showhull=_refgl_r_showhull \
+  --redefine-sym _gl_clear=_refgl_gl_clear \
+  --redefine-sym _gl_vsync=_refgl_gl_vsync \
+  --redefine-sym _host_allow_materials=_refgl_host_allow_materials \
+  "$GL_OBJ" "$GL_OBJ"
 XASH_OBJS+=("$GL_OBJ")
 
 # Pre-link filesystem (filesystem_stdio) into one .o with overlap symbols

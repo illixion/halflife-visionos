@@ -71,6 +71,7 @@ actor Renderer {
     let pipelineState: MTLRenderPipelineState
     let depthState: MTLDepthStencilState
     let colorMap: MTLTexture
+    private var engineInited = false
 
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
@@ -284,36 +285,20 @@ actor Renderer {
     /// pooled bridge API at (slot=0, eye=0) so render() can re-render the
     /// same IOSurface in-place each frame.
     static func makeVulkanColorMap(device: MTLDevice) throws -> MTLTexture {
-        var glStatus = [CChar](repeating: 0, count: 384)
-        let glRc = glStatus.withUnsafeMutableBufferPointer { buf in
-            lambda_gl_smoke_test(buf.baseAddress, Int32(buf.count))
-        }
-        print("[LambdaVision] ANGLE smoke test rc=\(glRc): \(String(cString: glStatus))")
+        // Smoke test removed: its eglTerminate appears to poison ANGLE's
+        // process-global state on visionOS, breaking the subsequent
+        // persistent context. The persistent setup below is itself a
+        // sufficient probe.
 
-        // Persistent GL context + GL→Metal interop probe. Allocates a
-        // 256x256 BGRA8 render-target MTLTexture, hands it to ANGLE which
-        // clears it to magenta via an EGL_METAL_TEXTURE_ANGLE-wrapped FBO.
-        // Success means we can render into any MTLTexture that Compositor-
-        // Services hands us, which is the whole basis for the ref/gl path.
-        var setupStatus = [CChar](repeating: 0, count: 256)
-        let setupRc = setupStatus.withUnsafeMutableBufferPointer { buf in
-            lambda_gl_setup(buf.baseAddress, Int32(buf.count))
+        // ANGLE/Metal on visionOS can't migrate the EGL context across
+        // OS threads, and Swift's task executor moves us between threads.
+        // Spin up a dedicated worker pthread that owns the context for
+        // the rest of the process and serves all GL work synchronously.
+        var workerStatus = [CChar](repeating: 0, count: 384)
+        let workerRc = workerStatus.withUnsafeMutableBufferPointer { buf in
+            lambda_gl_worker_setup(buf.baseAddress, Int32(buf.count))
         }
-        print("[LambdaVision] lambda_gl_setup rc=\(setupRc): \(String(cString: setupStatus))")
-
-        let probeDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: 256, height: 256, mipmapped: false)
-        probeDesc.usage = [.renderTarget, .shaderRead]
-        probeDesc.storageMode = .private
-        if let probeTex = device.makeTexture(descriptor: probeDesc) {
-            let ptr = Unmanaged.passUnretained(probeTex).toOpaque()
-            var clearStatus = [CChar](repeating: 0, count: 256)
-            let clearRc = clearStatus.withUnsafeMutableBufferPointer { buf in
-                lambda_gl_clear_mtl_texture(ptr, 256, 256, 1.0, 0.0, 1.0,
-                                            buf.baseAddress, Int32(buf.count))
-            }
-            print("[LambdaVision] lambda_gl_clear_mtl_texture rc=\(clearRc): \(String(cString: clearStatus))")
-        }
+        print("[LambdaVision] gl-worker setup rc=\(workerRc): \(String(cString: workerStatus))")
 
         var devStatus = [CChar](repeating: 0, count: 384)
         let rc = devStatus.withUnsafeMutableBufferPointer { buf in
@@ -353,6 +338,33 @@ actor Renderer {
                                             scaleFactor: 1.0,
                                             bundle: nil,
                                             options: textureLoaderOptions)
+    }
+
+    private func ensureEngineInitialized() {
+        guard !engineInited else { return }
+        engineInited = true
+        let appSupport = (try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
+        let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
+        let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
+        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
+                     "+map", "c0a0"]
+        let cArgs = extra.map { strdup($0) }
+        defer { cArgs.forEach { free($0) } }
+        var buf = [CChar](repeating: 0, count: 384)
+        // Runs on the GL worker thread that owns the EGL context.
+        let rc = basedir.withCString { dir -> Int32 in
+            cArgs.withUnsafeBufferPointer { argv -> Int32 in
+                let argvPtrs = argv.baseAddress?.withMemoryRebound(
+                    to: UnsafePointer<CChar>?.self, capacity: argv.count) { $0 }
+                return buf.withUnsafeMutableBufferPointer { b in
+                    lambda_gl_worker_engine_init(dir, Int32(extra.count), argvPtrs,
+                                                 b.baseAddress, Int32(b.count))
+                }
+            }
+        }
+        print("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
     }
 
     private func updateDynamicBufferState(frameIndex: UInt64) {
@@ -439,28 +451,16 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
-        // Option A: per-frame GL render into the colorMap MTLTexture via
-        // ANGLE. Animated channels prove the render path is live (not just
-        // a static one-shot clear). Replaces the prior vklite-driven Vulkan
-        // refill of the same colorMap slot. Engine tick still runs so game
-        // logic advances even though its renderer isn't wired through here
-        // yet (that's option B).
-        let t = Float(drawable.frameTiming.presentationTime.timeInterval)
-        let cr = 0.5 + 0.5 * sin(t * 0.7)
-        let cg = 0.5 + 0.5 * sin(t * 1.1 + 2.0)
-        let cb = 0.5 + 0.5 * sin(t * 1.7 + 4.0)
-        // Option B: bind colorMap as the GL FBO, tick the engine. Any GL
-        // calls the engine's ref_gles3compat renderer issues land in
-        // colorMap via ANGLE. Background clear color animates so we can
-        // tell the begin call ran even if the engine doesn't draw anything.
+        // ref_gles3compat draws into colorMap via ANGLE on the GL worker
+        // thread (the only thread allowed to touch the EGL context).
+        // Dark-grey clear so we can see if the engine drew nothing.
+        ensureEngineInitialized()
         let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
-        let beginRc = lambda_gl_begin_frame_into_mtl_texture(
+        let frameRc = lambda_gl_worker_render_frame(
             colorMapPtr, Int32(colorMap.width), Int32(colorMap.height),
-            cr, cg, cb)
-        _ = lambda_engine_frame()
-        let endRc = lambda_gl_end_frame()
-        if beginRc != 0 || endRc != 0 {
-            print("[LambdaVision] GL frame begin=\(beginRc) end=\(endRc)")
+            0.1, 0.1, 0.1)
+        if frameRc != 0 {
+            print("[LambdaVision] GL worker render rc=\(frameRc)")
         }
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
