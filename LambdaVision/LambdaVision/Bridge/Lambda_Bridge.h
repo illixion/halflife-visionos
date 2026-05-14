@@ -94,6 +94,13 @@ int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
 // the IOSurface (bridge-owned). NULL on failure or if no frame is active.
 const void *lambda_bridge_end_frame(void);
 
+// Stage C2: record one solid-color quad into the active frame. Coords are
+// in the engine's 2D pixel space (origin top-left, +x right, +y down) and
+// get converted to NDC against the active slot's width/height. Color is
+// 0..255 per channel. No-op if no frame is active.
+void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
+                                    uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

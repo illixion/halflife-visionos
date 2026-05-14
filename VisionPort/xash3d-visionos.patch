@@ -249,10 +249,10 @@ index 72bafc2..973d9bd 100644
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
 new file mode 100644
-index 0000000..9624e29
+index 0000000..3417f4e
 --- /dev/null
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,132 @@
 +/*
 +vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
 +
@@ -273,8 +273,11 @@ index 0000000..9624e29
 +{
 +	(void)type;
 +	host.renderinfo_changed = false;
-+	refState.width  = 1920;
-+	refState.height = 1080;
++	// Match ref_vklite's VKLITE_COLORMAP_SIZE so 2D pixel coords map 1:1
++	// to the pooled IOSurface. Resolution can grow once cp_view-driven
++	// per-eye targets land.
++	refState.width  = 512;
++	refState.height = 512;
 +	return true;
 +}
 +
@@ -433,10 +436,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..ee5968c
+index 0000000..1c8ab40
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,472 @@
+@@ -0,0 +1,484 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -483,6 +486,9 @@ index 0000000..ee5968c
 +extern int        lambda_bridge_begin_frame( int slot, int eye, int width, int height,
 +                                              float r, float g, float b );
 +extern const void *lambda_bridge_end_frame( void );
++extern void        lambda_bridge_record_fill_rgba( float x, float y, float w, float h,
++                                                   unsigned char r, unsigned char g,
++                                                   unsigned char b, unsigned char a );
 +
 +static unsigned int g_vklite_frame_counter = 0;
 +
@@ -611,7 +617,16 @@ index 0000000..ee5968c
 +
 +static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
 +{
-+	;
++	(void)rendermode;
++	lambda_bridge_record_fill_rgba( x, y, w, h, r, g, b, a );
++}
++
++static void R_VKLite_Set2DMode( qboolean enable )
++{
++	// No state tracked yet — the bridge's pipeline + viewport is set every
++	// frame in begin_frame. Stage C3 may need real state when textured
++	// quads land.
++	(void)enable;
 +}
 +
 +static int  WorldToScreen( const vec3_t world, vec3_t screen )
@@ -826,7 +841,7 @@ index 0000000..ee5968c
 +	.GL_ProcessTexture          = GL_ProcessTexture,
 +	.R_SetupSky                 = R_SetupSky,
 +
-+	.R_Set2DMode      = R_SimpleStubBool,
++	.R_Set2DMode      = R_VKLite_Set2DMode,
 +	.R_DrawStretchPic = R_DrawStretchPic,
 +	.FillRGBA         = FillRGBA,
 +	.WorldToScreen    = WorldToScreen,

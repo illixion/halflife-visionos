@@ -98,6 +98,11 @@ static bool             g_hasMetalObjects   = false;
 static bool             g_hasDynamicRender  = false;
 static VkPipelineLayout g_triPipelineLayout = VK_NULL_HANDLE;
 static VkPipeline       g_triPipeline       = VK_NULL_HANDLE;
+static VkPipelineLayout g_quadPipelineLayout = VK_NULL_HANDLE;
+static VkPipeline       g_quadPipeline       = VK_NULL_HANDLE;
+static int      g_active_slot   = -1;
+static int      g_active_eye    = -1;
+static VkCommandBuffer g_active_cmd = VK_NULL_HANDLE;
 static PFN_vkDestroyInstance     g_pfnDestroyInstance     = NULL;
 static PFN_vkDestroyDevice       g_pfnDestroyDevice       = NULL;
 static PFN_vkGetDeviceProcAddr   g_pfnGetDeviceProcAddr   = NULL;
@@ -755,6 +760,150 @@ static bool ensure_tri_pipeline(void) {
     return pres == VK_SUCCESS;
 }
 
+static bool ensure_quad_pipeline(void) {
+    if (g_quadPipeline != VK_NULL_HANDLE) return true;
+    if (!g_hasDynamicRender) return false;
+
+    DEVFN(vkCreateShaderModule);
+    DEVFN(vkDestroyShaderModule);
+    DEVFN(vkCreatePipelineLayout);
+    DEVFN(vkCreateGraphicsPipelines);
+
+    VkShaderModuleCreateInfo vsmCi = {0};
+    vsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vsmCi.codeSize = quad_vert_spv_len;
+    vsmCi.pCode = (const uint32_t *)quad_vert_spv;
+    VkShaderModule vsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &vsmCi, NULL, &vsm) != VK_SUCCESS) return false;
+
+    VkShaderModuleCreateInfo fsmCi = {0};
+    fsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    fsmCi.codeSize = quad_frag_spv_len;
+    fsmCi.pCode = (const uint32_t *)quad_frag_spv;
+    VkShaderModule fsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &fsmCi, NULL, &fsm) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPushConstantRange pcRange = {0};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(float) * 8; // vec4 rect + vec4 color
+
+    VkPipelineLayoutCreateInfo plCi = {0};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    if (pfn_vkCreatePipelineLayout(g_device, &plCi, NULL, &g_quadPipelineLayout) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2] = {0};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsm; stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fsm; stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vi = {0};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {0};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp = {0};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs = {0};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms = {0};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Alpha blend so subsequent quads can layer; xash often draws translucent overlays.
+    VkPipelineColorBlendAttachmentState blendAtt = {0};
+    blendAtt.blendEnable = VK_TRUE;
+    blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAtt.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blendAtt.alphaBlendOp = VK_BLEND_OP_ADD;
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo cb = {0};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1; cb.pAttachments = &blendAtt;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = {0};
+    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+    VkFormat colorFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkPipelineRenderingCreateInfoKHR prCi = {0};
+    prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    prCi.colorAttachmentCount = 1;
+    prCi.pColorAttachmentFormats = &colorFmt;
+
+    VkGraphicsPipelineCreateInfo gpCi = {0};
+    gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gpCi.pNext = &prCi;
+    gpCi.stageCount = 2; gpCi.pStages = stages;
+    gpCi.pVertexInputState = &vi;
+    gpCi.pInputAssemblyState = &ia;
+    gpCi.pViewportState = &vp;
+    gpCi.pRasterizationState = &rs;
+    gpCi.pMultisampleState = &ms;
+    gpCi.pColorBlendState = &cb;
+    gpCi.pDynamicState = &dyn;
+    gpCi.layout = g_quadPipelineLayout;
+
+    VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_quadPipeline);
+    pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+    pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+    return pres == VK_SUCCESS;
+}
+
+void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
+                                    uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    if (g_active_slot < 0) return;
+    if (!ensure_quad_pipeline()) return;
+
+    EyeSlot *e = &g_pool[g_active_slot][g_active_eye];
+    float sw = (float)e->width, sh = (float)e->height;
+    // Pixel -> NDC. Xash 2D origin is top-left, +y down. NDC y is +down in
+    // Vulkan with default viewport, so we DON'T flip y here.
+    float x0 = (x / sw) * 2.0f - 1.0f;
+    float y0 = (y / sh) * 2.0f - 1.0f;
+    float x1 = ((x + w) / sw) * 2.0f - 1.0f;
+    float y1 = ((y + h) / sh) * 2.0f - 1.0f;
+
+    float pc[8] = { x0, y0, x1, y1,
+                    r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f };
+
+    DEVFN(vkCmdBindPipeline);
+    DEVFN(vkCmdPushConstants);
+    DEVFN(vkCmdDraw);
+
+    pfn_vkCmdBindPipeline(g_active_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_quadPipeline);
+    pfn_vkCmdPushConstants(g_active_cmd, g_quadPipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), pc);
+    pfn_vkCmdDraw(g_active_cmd, 6, 1, 0, 0);
+}
+
 const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
                                             int width, int height,
                                             float r, float g, float b,
@@ -879,10 +1028,6 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
 // records draws via future bridge fns between these two. Until those
 // fns exist, the frame is just a clear.
 // =====================================================================
-
-static int      g_active_slot   = -1;
-static int      g_active_eye    = -1;
-static VkCommandBuffer g_active_cmd = VK_NULL_HANDLE;
 
 int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
                               float r, float g, float b) {
@@ -1023,13 +1168,17 @@ void lambda_vulkan_release_pool(void) {
             destroy_eye_slot(&g_pool[s][e]);
         }
     }
-    if (g_triPipeline || g_triPipelineLayout) {
+    if (g_triPipeline || g_triPipelineLayout || g_quadPipeline || g_quadPipelineLayout) {
         DEVFN(vkDestroyPipeline);
         DEVFN(vkDestroyPipelineLayout);
         if (g_triPipeline) pfn_vkDestroyPipeline(g_device, g_triPipeline, NULL);
         if (g_triPipelineLayout) pfn_vkDestroyPipelineLayout(g_device, g_triPipelineLayout, NULL);
+        if (g_quadPipeline) pfn_vkDestroyPipeline(g_device, g_quadPipeline, NULL);
+        if (g_quadPipelineLayout) pfn_vkDestroyPipelineLayout(g_device, g_quadPipelineLayout, NULL);
         g_triPipeline = VK_NULL_HANDLE;
         g_triPipelineLayout = VK_NULL_HANDLE;
+        g_quadPipeline = VK_NULL_HANDLE;
+        g_quadPipelineLayout = VK_NULL_HANDLE;
     }
 }
 
