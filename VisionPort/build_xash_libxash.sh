@@ -29,17 +29,27 @@ mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
   ! -path "*build/ref/common/ref_context.c.*.o" \
   ! -path "*build/ref/gl/*" | sort)
 
-# Pre-link ref_gl objects (the GLES3COMPAT renderer + gl2_shim) into one .o
-# with renderer entry-points (R_Init, R_Shutdown, Tri*, etc.) hidden. Those
-# names collide with the engine's ref_common dispatch wrappers when whole-
-# archive linked. GetRefAPI stays exported — engine reaches it via
+# Pre-link ref_gl objects + ref/common/ref_context.c (where GetRefAPI lives
+# for renderers that don't supply their own — vklite did, ref_gl uses the
+# common one) into one .o with renderer entry-points (R_Init, R_Shutdown,
+# Tri*, etc.) hidden. Those names collide with the engine's ref_common
+# dispatch wrappers + the engine's own allocator stubs when whole-archive
+# linked. GetRefAPI stays exported — engine reaches it via
 # dlsym(RTLD_DEFAULT) at runtime, like vklite did.
 GL_RAW_OBJS=( $(find "$PWD/build/ref/gl" -type f -name '*.o' | sort) )
+# NOTE: ref/common/ref_context.c.1.o (which contains GetRefAPI) is *not*
+# included until gl2_shim compiles correctly under XASH_GL_STATIC.
+# Including it now would expose unresolved glBegin/glActiveTextureARB/...
+# references at the app link.
 GL_UNEXPORTS="$PWD/build/ref/gl/unexports.list"
 cat > "$GL_UNEXPORTS" <<'EOF'
 _R_Init
 _R_Shutdown
 _GL_GetProcAddress
+_GL_InitRandomTable
+__Mem_Alloc
+__Mem_Free
+__Mem_Realloc
 _TriBrightness
 _TriColor4f
 _TriColor4ub

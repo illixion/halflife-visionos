@@ -449,15 +449,19 @@ actor Renderer {
         let cr = 0.5 + 0.5 * sin(t * 0.7)
         let cg = 0.5 + 0.5 * sin(t * 1.1 + 2.0)
         let cb = 0.5 + 0.5 * sin(t * 1.7 + 4.0)
+        // Option B: bind colorMap as the GL FBO, tick the engine. Any GL
+        // calls the engine's ref_gles3compat renderer issues land in
+        // colorMap via ANGLE. Background clear color animates so we can
+        // tell the begin call ran even if the engine doesn't draw anything.
         let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
-        var glClearStatus = [CChar](repeating: 0, count: 128)
-        _ = glClearStatus.withUnsafeMutableBufferPointer { buf in
-            lambda_gl_clear_mtl_texture(colorMapPtr,
-                                        Int32(colorMap.width), Int32(colorMap.height),
-                                        cr, cg, cb,
-                                        buf.baseAddress, Int32(buf.count))
-        }
+        let beginRc = lambda_gl_begin_frame_into_mtl_texture(
+            colorMapPtr, Int32(colorMap.width), Int32(colorMap.height),
+            cr, cg, cb)
         _ = lambda_engine_frame()
+        let endRc = lambda_gl_end_frame()
+        if beginRc != 0 || endRc != 0 {
+            print("[LambdaVision] GL frame begin=\(beginRc) end=\(endRc)")
+        }
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
 

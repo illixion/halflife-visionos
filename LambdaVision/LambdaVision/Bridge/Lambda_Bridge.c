@@ -2245,6 +2245,11 @@ void IN_DeactivateMouse(void) {}
 __attribute__((used, visibility("default")))
 void IN_MouseEvent(int mstate, int down) { (void)mstate; (void)down; }
 
+// (Removed dead-strip anchor for GetRefAPI — currently undefined because
+// gl2_shim doesn't compile under XASH_GL_STATIC, leaving glBegin et al
+// unresolved. Will re-anchor once the shim is wired in. See git log for
+// the working investigation.)
+
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
                        char *status_out, int status_cap) {
@@ -2638,5 +2643,74 @@ int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
 
     snprintf(status_out, status_cap, "cleared %dx%d to (%.2f,%.2f,%.2f)",
              width, height, r, g, b);
+    return 0;
+}
+
+// Per-frame state — kept across begin/end so engine code in between can
+// just issue GL calls.
+static GLuint    g_frame_fbo   = 0;
+static GLuint    g_frame_rbo   = 0;
+static EGLImage  g_frame_image = EGL_NO_IMAGE;
+
+int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
+                                           int width, int height,
+                                           float r, float g, float b) {
+    if (g_gl_disp == EGL_NO_DISPLAY) return -1;
+    if (!mtl_texture)                return -2;
+
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    g_frame_image = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT,
+                                   EGL_METAL_TEXTURE_ANGLE,
+                                   (EGLClientBuffer)mtl_texture,
+                                   img_attribs);
+    if (g_frame_image == EGL_NO_IMAGE) return -3;
+
+    typedef void (*PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)(GLenum, void*);
+    static PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC pglEGLImg = NULL;
+    if (!pglEGLImg)
+        pglEGLImg = (PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)
+            eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
+    if (!pglEGLImg) { eglDestroyImage(g_gl_disp, g_frame_image);
+                      g_frame_image = EGL_NO_IMAGE; return -4; }
+
+    glGenRenderbuffers(1, &g_frame_rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, g_frame_rbo);
+    pglEGLImg(GL_RENDERBUFFER, g_frame_image);
+
+    glGenFramebuffers(1, &g_frame_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, g_frame_rbo);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;
+        glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
+        eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
+        return -5;
+    }
+
+    glViewport(0, 0, width, height);
+    glClearColor(r, g, b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    return 0;
+}
+
+int lambda_gl_end_frame(void) {
+    if (g_gl_disp == EGL_NO_DISPLAY) return -1;
+    if (g_frame_fbo == 0)            return 0; // begin was never called
+
+    typedef EGLBoolean (*PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)(EGLDisplay);
+    static PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC pegl_wait = NULL;
+    if (!pegl_wait)
+        pegl_wait = (PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)
+            eglGetProcAddress("eglWaitUntilWorkScheduledANGLE");
+    if (pegl_wait) pegl_wait(g_gl_disp);
+    else           glFinish();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;
+    glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
+    eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
     return 0;
 }

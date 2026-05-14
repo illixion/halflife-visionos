@@ -199,6 +199,20 @@ int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
 // Tears down the long-lived context/display. Idempotent.
 void lambda_gl_teardown(void);
 
+// Per-frame begin/end. Wraps mtl_texture as the GL FBO color attachment,
+// binds it, clears to (r,g,b,1). Any GL calls between begin and end go
+// through ANGLE → Metal and land in mtl_texture. end_frame() finalises
+// via eglWaitUntilWorkScheduledANGLE and detaches the FBO.
+//
+// Use this around lambda_engine_frame() to drive xash's renderer (via
+// ref_gles3compat) into a Swift-owned MTLTexture.
+//
+// Returns 0 on success, negative on failure.
+int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
+                                           int width, int height,
+                                           float r, float g, float b);
+int lambda_gl_end_frame(void);
+
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
 // 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,
