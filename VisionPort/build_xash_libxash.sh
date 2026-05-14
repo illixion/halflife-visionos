@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
 rm -rf build
-python3 ./waf configure --xros --disable-gl --disable-soft --enable-vklite
+python3 ./waf configure --xros --disable-gl --disable-soft --enable-gles3compat --enable-static-gl
 # Final `xash` exec link is expected to fail (filesystem is normally a
 # runtime-loaded dylib). We harvest .o files; ignore the link failure.
 python3 ./waf build || true
@@ -26,7 +26,34 @@ mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
   ! -path "*build/filesystem/*" \
   ! -name 'launcher.c.*.o' \
   ! -path "*build/game_launch/*" \
-  ! -path "*build/ref/common/ref_context.c.*.o" | sort)
+  ! -path "*build/ref/common/ref_context.c.*.o" \
+  ! -path "*build/ref/gl/*" | sort)
+
+# Pre-link ref_gl objects (the GLES3COMPAT renderer + gl2_shim) into one .o
+# with renderer entry-points (R_Init, R_Shutdown, Tri*, etc.) hidden. Those
+# names collide with the engine's ref_common dispatch wrappers when whole-
+# archive linked. GetRefAPI stays exported — engine reaches it via
+# dlsym(RTLD_DEFAULT) at runtime, like vklite did.
+GL_RAW_OBJS=( $(find "$PWD/build/ref/gl" -type f -name '*.o' | sort) )
+GL_UNEXPORTS="$PWD/build/ref/gl/unexports.list"
+cat > "$GL_UNEXPORTS" <<'EOF'
+_R_Init
+_R_Shutdown
+_GL_GetProcAddress
+_TriBrightness
+_TriColor4f
+_TriColor4ub
+_TriCullFace
+_TriRenderMode
+_TriSpriteTexture
+_TriWorldToScreen
+_Mod_LoadAliasModel
+EOF
+GL_OBJ="$PWD/build/ref/gl/ref_gl.combined.o"
+xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+  -unexported_symbols_list "$GL_UNEXPORTS" \
+  -o "$GL_OBJ" "${GL_RAW_OBJS[@]}"
+XASH_OBJS+=("$GL_OBJ")
 
 # Pre-link filesystem (filesystem_stdio) into one .o with overlap symbols
 # hidden. Engine reaches FS via GetFSAPI/CreateInterface (extern in

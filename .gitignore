@@ -14,6 +14,7 @@
 # Vendored upstream clones (rebuild via setup script)
 VisionPort/xash3d-fwgs/
 VisionPort/hlsdk-portable/
+Vendor/angle-build/
 
 # Reference projects (their own repos)
 Lambda1VR/
@@ -25,8 +26,9 @@ LambdaVision/Vendor/MoltenVK.xcframework/
 # Half-Life game assets (proprietary, not redistributable; user-supplied)
 HalfLifeAssets/
 
-# Built artifacts from build_xash_libxash.sh
+# Built artifacts from build_xash_libxash.sh / build_angle_visionos.sh
 LambdaVision/Vendor/libxash/
+LambdaVision/Vendor/angle/
 .xcodebuildmcp/
 VisionPort/lambda_hlsdk_stubs.o
 log.txt

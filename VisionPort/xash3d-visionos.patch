@@ -23,7 +23,7 @@ index e0cc14b..527bdc4 100644
  // audio backends (XASH_SOUND)
  #define SOUND_NULL     0
 diff --git a/common/defaults.h b/common/defaults.h
-index 7cd9c1f..4b49681 100644
+index 7cd9c1f..294ed25 100644
 --- a/common/defaults.h
 +++ b/common/defaults.h
 @@ -30,7 +30,11 @@ SETUP BACKENDS DEFINITIONS
@@ -44,7 +44,7 @@ index 7cd9c1f..4b49681 100644
  	#elif XASH_IOS
  		#define DEFAULT_ACCELERATED_RENDERER "gles2"
 +	#elif XASH_VISIONOS
-+		#define DEFAULT_ACCELERATED_RENDERER "vklite"
++		#define DEFAULT_ACCELERATED_RENDERER "gles3compat"
  	#else // !XASH_MOBILE_PLATFORM
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
@@ -248,143 +248,23 @@ index 72bafc2..973d9bd 100644
  void Posix_Daemonize( void )
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-new file mode 100644
-index 0000000..3417f4e
---- /dev/null
+index 9624e29..3417f4e 100644
+--- a/engine/platform/visionos/vid_visionos.c
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -0,0 +1,132 @@
-+/*
-+vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
-+
-+CompositorServices owns the per-eye drawables; the host app's bridge feeds
-+input/audio. The renderer (eventually ref_vk_lite) talks to MoltenVK directly.
-+This file exists only to satisfy the engine's platform contract for the few
-+entry points platform.h doesn't already inline-stub for non-SDL builds.
-+*/
-+
-+#include "platform/platform.h"
-+#include "client.h"
-+
-+#if XASH_VIDEO == VIDEO_VISIONOS
-+
-+// ---- Video / VID -----------------------------------------------------------
-+
-+qboolean R_Init_Video( ref_graphic_apis_t type )
-+{
-+	(void)type;
-+	host.renderinfo_changed = false;
+@@ -18,8 +18,11 @@ qboolean R_Init_Video( ref_graphic_apis_t type )
+ {
+ 	(void)type;
+ 	host.renderinfo_changed = false;
+-	refState.width  = 1920;
+-	refState.height = 1080;
 +	// Match ref_vklite's VKLITE_COLORMAP_SIZE so 2D pixel coords map 1:1
 +	// to the pooled IOSurface. Resolution can grow once cp_view-driven
 +	// per-eye targets land.
 +	refState.width  = 512;
 +	refState.height = 512;
-+	return true;
-+}
-+
-+void R_Free_Video( void )
-+{
-+}
-+
-+qboolean VID_SetMode( void )
-+{
-+	return true;
-+}
-+
-+void VID_Info_f( void )
-+{
-+	Con_Printf( "visionOS: CompositorServices owns the present (no window)\n" );
-+}
-+
-+void VID_RestoreScreenResolution( window_mode_t window_mode )
-+{
-+	(void)window_mode;
-+}
-+
-+void VID_SaveWindowSize( int width, int height, qboolean maximized )
-+{
-+	(void)width; (void)height; (void)maximized;
-+}
-+
-+rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
-+{
-+	(void)window_mode;
-+	refState.width  = width;
-+	refState.height = height;
-+	return rserr_ok;
-+}
-+
-+void *GL_GetProcAddress( const char *name )
-+{
-+	(void)name;
-+	return NULL;
-+}
-+
-+int GL_SetAttribute( int attr, int val )
-+{
-+	(void)attr; (void)val;
-+	return 0;
-+}
-+
-+int GL_GetAttribute( int attr, int *val )
-+{
-+	(void)attr;
-+	if( val ) *val = 0;
-+	return 0;
-+}
-+
-+void GL_SwapBuffers( void )
-+{
-+}
-+
-+void GL_UpdateSwapInterval( void )
-+{
-+}
-+
-+int R_MaxVideoModes( void )
-+{
-+	return 0;
-+}
-+
-+struct vidmode_s *R_GetVideoMode( int num )
-+{
-+	(void)num;
-+	return NULL;
-+}
-+
-+ref_window_type_t R_GetWindowHandle( void **handle, ref_window_type_t type )
-+{
-+	(void)type;
-+	if( handle ) *handle = NULL;
-+	return REF_WINDOW_TYPE_NULL;
-+}
-+
-+qboolean SW_CreateBuffer( int width, int height, uint *stride, uint *bpp, uint *r, uint *g, uint *b )
-+{
-+	(void)width; (void)height; (void)stride; (void)bpp; (void)r; (void)g; (void)b;
-+	return false;
-+}
-+
-+void *SW_LockBuffer( void )
-+{
-+	return NULL;
-+}
-+
-+void SW_UnlockBuffer( void )
-+{
-+}
-+
-+platform_orientation_t Platform_GetDisplayOrientation( void )
-+{
-+	return ORIENTATION_LANDSCAPE;
-+}
-+
-+// ---- Platform_* (only what platform.h doesn't inline-stub) ----------------
-+
-+void Platform_Minimize_f( void )
-+{
-+}
-+
-+#endif // XASH_VIDEO == VIDEO_VISIONOS
+ 	return true;
+ }
+ 
 diff --git a/engine/wscript b/engine/wscript
 index 5b5e3a6..c882802 100644
 --- a/engine/wscript
@@ -434,50 +314,71 @@ index 302548a..399a05a 100644
  			continue;
  
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
+diff --git a/ref/gl/wscript b/ref/gl/wscript
+index f085da6..b3c8506 100644
+--- a/ref/gl/wscript
++++ b/ref/gl/wscript
+@@ -18,7 +18,9 @@ def options(opt):
+ 
+ def configure(conf):
+ 	conf.env.GL_STATIC = conf.options.GL_STATIC
+-	if conf.env.GL_STATIC:
++	if conf.env.GL_STATIC and not conf.env.XROS:
++		# visionOS supplies GL via ANGLE static libs at app link time;
++		# waf doesn't see them and shouldn't gate on lib=GL existing.
+ 		conf.check(lib='GL')
+ 
+ 	if conf.env.DEST_OS2 == 'android':
+@@ -59,7 +61,7 @@ def build(bld):
+ 		'ref_gles3compat': {
+ 			'enable':  bld.env.GLES3COMPAT,
+ 			'libs':    [],
+-			'defines': ['XASH_GLES3COMPAT=1'],
++			'defines': ['XASH_GLES3COMPAT=1'] + (['XASH_GL_STATIC=1'] if bld.env.XROS else []),
+ 		},
+ 	}
+ 
+@@ -67,9 +69,13 @@ def build(bld):
+ 		if not v['enable']:
+ 			continue
+ 
++		# visionOS: GL symbols come from ANGLE static libs at app link
++		# time. waf doesn't see them, so let the shlib link defer them.
++		extra_linkflags = ['-Wl,-undefined,dynamic_lookup'] if bld.env.XROS else []
+ 		bld.shlib(source = source,
+ 			target = k,
+ 			includes = includes,
+ 			use = libs + v['libs'],
+ 			defines = v['defines'] + ['REF_DLL=1'],
++			linkflags = extra_linkflags,
+ 			install_path = bld.env.LIBDIR)
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
-new file mode 100644
-index 0000000..ee6890a
---- /dev/null
+index 7f8314b..ee6890a 100644
+--- a/ref/vklite/r_context.c
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,906 @@
-+/*
-+r_context.c -- null renderer context
-+Copyright (C) 2023-2024 a1batross
-+
-+This program is free software: you can redistribute it and/or modify
-+it under the terms of the GNU General Public License as published by
-+the Free Software Foundation, either version 3 of the License, or
-+(at your option) any later version.
-+
-+This program is distributed in the hope that it will be useful,
-+but WITHOUT ANY WARRANTY; without even the implied warranty of
-+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-+GNU General Public License for more details.
-+*/
-+
-+#include <string.h>
+@@ -14,11 +14,18 @@ GNU General Public License for more details.
+ */
+ 
+ #include <string.h>
 +#include <math.h>
-+#include "xash3d_types.h"
-+#include "const.h"
-+#include "cvardef.h"
-+#include "xash3d_mathlib.h"
-+#include "ref_api.h"
+ #include "xash3d_types.h"
+ #include "const.h"
+ #include "cvardef.h"
+ #include "xash3d_mathlib.h"
+ #include "ref_api.h"
 +#include "ref_params.h"
 +#include "com_model.h"
 +#include "render_api.h"
 +#include "cl_entity.h"
 +#include "entity_types.h"
 +#include <stdlib.h>
-+
-+/*
-+ * this initially was made to be able to run full client
-+ * in hazardous^Wheadless environments
-+ * but might be a starting point for new renderers as well
-+ */
-+
-+static ref_api_t      gEngfuncs;
-+static ref_globals_t *gpGlobals;
-+
+ 
+ /*
+  * this initially was made to be able to run full client
+@@ -29,6 +36,130 @@ GNU General Public License for more details.
+ static ref_api_t      gEngfuncs;
+ static ref_globals_t *gpGlobals;
+ 
 +// Stage B minimal present: ref_vklite drives the bridge's pooled VkImage
 +// render so the engine — not Renderer.swift — owns the IOSurface contents
 +// each frame. The bridge fn is provided by Lambda_Bridge.c in the app exec;
@@ -602,90 +503,26 @@ index 0000000..ee6890a
 +	g_vklite_frame_counter++;
 +}
 +
-+static void R_SimpleStub( void )
-+{
-+	;
-+}
-+
-+static void R_SimpleStubInt( int unused )
-+{
-+	;
-+}
-+
-+static void R_SimpleStubUInt( unsigned int unused )
-+{
-+	;
-+}
-+
-+static void R_SimpleStubBool( qboolean unused )
-+{
-+	;
-+}
-+
-+static qboolean R_StudioFillAPI( struct engine_studio_api_s *api, struct r_studio_interface_s *pDefaultDraw )
-+{
-+	return false;
-+}
-+
-+static void R_StudioSetDrawInterface( struct r_studio_interface_s *pDraw )
-+{
-+	;
-+}
-+
-+static void R_GetDetailScaleForTexture( int texture, float *xScale, float *yScale )
-+{
-+	if( xScale ) *xScale = 1.0f;
-+	if( yScale ) *yScale = 1.0f;
-+}
-+
-+static void R_SetDetailScaleForTexture( int texture, float xScale, float yScale )
-+{
-+	;
-+}
-+
-+static void R_FillRenderAPI( render_api_t *api )
-+{
-+	;
-+}
-+
-+static void R_FillTriAPI( triangleapi_t *api )
-+{
-+	;
-+}
-+
-+static qboolean R_Init( void )
-+{
-+	gEngfuncs.R_Init_Video( REF_SOFTWARE );
-+	return true;
-+}
-+
-+static const char *R_GetConfigName( void )
-+{
-+	return NULL;
-+}
-+
-+static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int x, int y, float scale_x, float scale_y )
-+{
-+	return true;
-+}
-+
-+static void GL_SetupAttributes( int safegl )
-+{
-+	;
-+}
-+
-+static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
-+{
-+	;
-+}
-+
-+static const byte *R_GetTextureOriginalBuffer( unsigned int idx )
-+{
-+	return NULL;
-+}
-+
-+static int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
-+{
+ static void R_SimpleStub( void )
+ {
+ 	;
+@@ -101,11 +232,6 @@ static void GL_SetupAttributes( int safegl )
+ 	;
+ }
+ 
+-static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
+-{
+-	return true;
+-}
+-
+ static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
+ {
+ 	;
+@@ -118,7 +244,29 @@ static const byte *R_GetTextureOriginalBuffer( unsigned int idx )
+ 
+ static int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
+ {
+-	return 0;
 +	(void)flags; (void)update;
 +	if( !pic ) return 0;
 +	// Have the engine expand indexed/compressed formats to RGBA with the
@@ -709,29 +546,24 @@ index 0000000..ee6890a
 +		g_tex_table[slot].name[sizeof( g_tex_table[slot].name ) - 1] = '\0';
 +	}
 +	return slot;
-+}
-+
-+static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottomColor )
-+{
-+	;
-+}
-+
-+static void R_SetupSky( int *skytextures )
-+{
-+	;
-+}
-+
-+static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
-+{
+ }
+ 
+ static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottomColor )
+@@ -133,12 +281,25 @@ static void R_SetupSky( int *skytextures )
+ 
+ static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
+ {
+-	;
 +	if( texnum <= 0 || texnum >= VKLITE_TEX_MAX ) return;
 +	VKLiteTexture *t = &g_tex_table[texnum];
 +	if( !t->used || !t->bridge_handle ) return;
 +	lambda_bridge_record_draw_stretch_pic( x, y, w, h, s1, t1, s2, t2,
 +		255, 255, 255, 255, t->bridge_handle );
-+}
-+
-+static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
-+{
+ }
+ 
+ static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
+ {
+-	;
 +	(void)rendermode;
 +	lambda_bridge_record_fill_rgba( x, y, w, h, r, g, b, a );
 +}
@@ -742,93 +574,14 @@ index 0000000..ee6890a
 +	// frame in begin_frame. Stage C3 may need real state when textured
 +	// quads land.
 +	(void)enable;
-+}
-+
-+static int  WorldToScreen( const vec3_t world, vec3_t screen )
-+{
-+	VectorClear( screen );
-+	return 0;
-+}
-+
-+static qboolean VID_ScreenShot( const char *filename, int shot_type )
-+{
-+	return false;
-+}
-+
-+static qboolean VID_CubemapShot( const char *base, uint size, const float *vieworg, qboolean skyshot )
-+{
-+	return false;
-+}
-+
-+static colorVec R_LightPoint( const float *p )
-+{
-+	colorVec c = { 0 };
-+	return c;
-+}
-+
-+static void R_DecalShoot( int textureIndex, int entityIndex, int modelIndex, vec3_t pos, int flags, float scale )
-+{
-+	;
-+}
-+
-+static int R_CreateDecalList( struct decallist_s *pList )
-+{
-+	return 0;
-+}
-+
-+static float R_StudioEstimateFrame( cl_entity_t *e, mstudioseqdesc_t *pseqdesc, double time )
-+{
-+	return 0.0f;
-+}
-+
-+static void R_StudioLerpMovement( cl_entity_t *e, double time, vec3_t origin, vec3_t angles )
-+{
-+	;
-+}
-+
-+static void R_SetSkyCloudsTextures( int solidskyTexture, int alphaskyTexture )
-+{
-+	;
-+}
-+
-+static void GL_SubdivideSurface( model_t *mod, msurface_t *fa )
-+{
-+	;
-+}
-+
-+static void CL_RunLightStyles( lightstyle_t *ls )
-+{
-+
-+}
-+
-+
-+static qboolean Mod_ProcessRenderData( model_t *mod, qboolean create, const byte *buffer, size_t buffersize )
-+{
-+	return true;
-+}
-+
-+static void Mod_StudioLoadTextures( model_t *mod, void *data )
-+{
-+	;
-+}
-+
-+static void CL_DrawParticles( double frametime, particle_t *particles, float partsize )
-+{
-+	;
-+}
-+
-+static void CL_DrawTracers( double frametime, particle_t *tracers )
-+{
-+	;
-+}
-+
-+static void CL_DrawBeams( int fTrans, BEAM *beams )
-+{
-+	;
-+}
-+
-+static intptr_t RefGetParm( int parm, int arg )
-+{
+ }
+ 
+ static int  WorldToScreen( const vec3_t world, vec3_t screen )
+@@ -226,17 +387,32 @@ static void CL_DrawBeams( int fTrans, BEAM *beams )
+ 
+ static intptr_t RefGetParm( int parm, int arg )
+ {
+-	return 0;
 +	// PARM_TEX_WIDTH=1, PARM_TEX_HEIGHT=2 — engine derives UVs from these
 +	// in PIC_DrawGeneric, so returning 0 yields divide-by-zero UVs and
 +	// every glyph samples the same texel. Cover the two we need; other
@@ -839,31 +592,31 @@ index 0000000..ee6890a
 +	case 2: return g_tex_table[arg].height;
 +	default: return 0;
 +	}
-+}
-+
-+static int GL_FindTexture( const char *name )
-+{
+ }
+ 
+ static int GL_FindTexture( const char *name )
+ {
 +	if( !name || !*name ) return 0;
 +	for( int i = 1; i < VKLITE_TEX_MAX; ++i ) {
 +		if( g_tex_table[i].used && strcmp( g_tex_table[i].name, name ) == 0 )
 +			return i;
 +	}
-+	return 0;
-+}
-+
-+static const char *GL_TextureName( unsigned int texnum )
-+{
+ 	return 0;
+ }
+ 
+ static const char *GL_TextureName( unsigned int texnum )
+ {
+-	return NULL;
 +	if( texnum >= VKLITE_TEX_MAX || !g_tex_table[texnum].used ) return "";
 +	return g_tex_table[texnum].name;
-+}
-+
-+static const byte *GL_TextureData( unsigned int texnum )
-+{
-+	return NULL;
-+}
-+
-+static int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
-+{
+ }
+ 
+ static const byte *GL_TextureData( unsigned int texnum )
+@@ -246,12 +422,50 @@ static const byte *GL_TextureData( unsigned int texnum )
+ 
+ static int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
+ {
+-	return 0;
 +	// Reuse cache if the engine already loaded this name.
 +	int existing = GL_FindTexture( name );
 +	if( existing ) return existing;
@@ -874,10 +627,11 @@ index 0000000..ee6890a
 +	// rgbdata is engine-owned and freed by the engine's image cache; we don't
 +	// FS_FreeImage here because the engine retains the rgbdata for reuse.
 +	return slot;
-+}
-+
-+static int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags )
-+{
+ }
+ 
+ static int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags )
+ {
+-	return 0;
 +	(void)flags;
 +	if( !buffer || width <= 0 || height <= 0 ) return 0;
 +	int slot = vklite_alloc_texslot();
@@ -908,18 +662,14 @@ index 0000000..ee6890a
 +{
 +	(void)tmu;
 +	g_tex_current = (int)texnum;
-+}
-+
-+static void R_OverrideTextureSourceSize( unsigned int textnum, unsigned int srcWidth, unsigned int srcHeight )
-+{
-+
-+}
-+
-+static void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, const byte *buffer, pixformat_t fmt )
-+{
-+	;
-+}
-+
+ }
+ 
+ static void R_OverrideTextureSourceSize( unsigned int textnum, unsigned int srcWidth, unsigned int srcHeight )
+@@ -264,14 +478,268 @@ static void GL_UpdateTexture( int texnum, int cols, int rows, int width, int hei
+ 	;
+ }
+ 
+-static void GL_Bind( int tmu, unsigned int texnum )
 +
 +// Build column-major MVP for ref_viewpass_t rvp. HL world convention:
 +// X forward, Y left, Z up. We map to a Vulkan camera that looks down its
@@ -1039,7 +789,8 @@ index 0000000..ee6890a
 +}
 +
 +static void vklite_build_world( void )
-+{
+ {
+-	;
 +	lambda_bridge_world_clear();
 +	model_t *world = vklite_get_worldmodel();
 +	if( !world || world->numsurfaces <= 0 ) return;
@@ -1144,10 +895,11 @@ index 0000000..ee6890a
 +{
 +	vklite_build_world();
 +	g_vklite_world_built = true;
-+}
-+
-+static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
-+{
+ }
+ 
+ static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
+ {
+-	;
 +	if( !rvp ) return;
 +	// Belt-and-suspenders: if R_NewMap didn't fire (engine path drift) and
 +	// a world exists, build it lazily on first render.
@@ -1182,199 +934,78 @@ index 0000000..ee6890a
 +		lambda_bridge_record_world_range( mvp_ent,
 +			ent->model->firstmodelsurface, ent->model->nummodelsurfaces );
 +	}
-+}
-+
-+static void GL_OrthoBounds( const float *mins, const float *maxs )
-+{
-+	;
-+}
-+
-+static qboolean R_SpeedsMessage( char *out, size_t size )
-+{
-+	return false;
-+}
-+
-+static byte *Mod_GetCurrentVis( void )
-+{
-+	return NULL;
-+}
-+
-+static void Color4f( float r, float g, float b, float a )
-+{
-+	;
-+}
-+
-+static void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )
-+{
-+	;
-+}
-+
-+static void Vertex3fv( const float *worldPnt )
-+{
-+	;
-+}
-+
-+static void Vertex3f( float x, float y, float z )
-+{
-+	;
-+}
-+
-+static void CullFace( TRICULLSTYLE mode )
-+{
-+	;
-+}
-+
-+static void VGUI_SetupDrawing( qboolean rect )
-+{
-+	;
-+}
-+
-+static const ref_interface_t gReffuncs =
-+{
-+	.R_Init                = R_Init,
-+	.R_Shutdown            = R_SimpleStub,
-+	.R_GetConfigName       = R_GetConfigName,
-+	.R_SetDisplayTransform = R_SetDisplayTransform,
-+
-+	.GL_SetupAttributes = GL_SetupAttributes,
-+	.GL_InitExtensions  = R_SimpleStub,
-+	.GL_ClearExtensions = R_SimpleStub,
-+
-+	.R_GammaChanged       = R_SimpleStubBool,
+ }
+ 
+ static void GL_OrthoBounds( const float *mins, const float *maxs )
+@@ -331,9 +799,9 @@ static const ref_interface_t gReffuncs =
+ 	.GL_ClearExtensions = R_SimpleStub,
+ 
+ 	.R_GammaChanged       = R_SimpleStubBool,
+-	.R_BeginFrame         = R_SimpleStubBool,
 +	.R_BeginFrame         = R_VKLite_BeginFrame,
-+	.R_RenderScene        = R_SimpleStub,
+ 	.R_RenderScene        = R_SimpleStub,
+-	.R_EndFrame           = R_SimpleStub,
 +	.R_EndFrame           = R_VKLite_EndFrame,
-+	.R_PushScene          = R_SimpleStub,
-+	.R_PopScene           = R_SimpleStub,
-+	.GL_BackendStartFrame = R_SimpleStub,
-+	.GL_BackendEndFrame   = R_SimpleStub,
-+
-+	.R_ClearScreen    = R_SimpleStub,
-+	.R_AllowFog       = R_SimpleStubBool,
-+	.GL_SetRenderMode = R_SimpleStubInt,
-+
+ 	.R_PushScene          = R_SimpleStub,
+ 	.R_PopScene           = R_SimpleStub,
+ 	.GL_BackendStartFrame = R_SimpleStub,
+@@ -343,7 +811,7 @@ static const ref_interface_t gReffuncs =
+ 	.R_AllowFog       = R_SimpleStubBool,
+ 	.GL_SetRenderMode = R_SimpleStubInt,
+ 
+-	.R_AddEntity      = R_AddEntity,
 +	.R_AddEntity      = R_AddEntity_VKLite,
-+	.R_ProcessEntData = R_ProcessEntData,
-+
-+	.R_ShowTextures = R_SimpleStub,
-+
-+	.R_GetTextureOriginalBuffer = R_GetTextureOriginalBuffer,
-+	.GL_LoadTextureFromBuffer   = GL_LoadTextureFromBuffer,
-+	.GL_ProcessTexture          = GL_ProcessTexture,
-+	.R_SetupSky                 = R_SetupSky,
-+
+ 	.R_ProcessEntData = R_ProcessEntData,
+ 
+ 	.R_ShowTextures = R_SimpleStub,
+@@ -353,7 +821,7 @@ static const ref_interface_t gReffuncs =
+ 	.GL_ProcessTexture          = GL_ProcessTexture,
+ 	.R_SetupSky                 = R_SetupSky,
+ 
+-	.R_Set2DMode      = R_SimpleStubBool,
 +	.R_Set2DMode      = R_VKLite_Set2DMode,
-+	.R_DrawStretchPic = R_DrawStretchPic,
-+	.FillRGBA         = FillRGBA,
-+	.WorldToScreen    = WorldToScreen,
-+
-+	.VID_ScreenShot  = VID_ScreenShot,
-+	.VID_CubemapShot = VID_CubemapShot,
-+
-+	.R_LightPoint = R_LightPoint,
-+
-+	.R_DecalShoot      = R_DecalShoot,
-+	.R_DecalRemoveAll  = R_SimpleStubInt,
-+	.R_CreateDecalList = R_CreateDecalList,
-+	.R_ClearAllDecals  = R_SimpleStub,
-+
-+	.R_StudioEstimateFrame = R_StudioEstimateFrame,
-+	.R_StudioLerpMovement  = R_StudioLerpMovement,
-+	.R_StudioFillAPI          = R_StudioFillAPI,
-+	.R_StudioSetDrawInterface = R_StudioSetDrawInterface,
-+
-+	.R_SetSkyCloudsTextures     = R_SetSkyCloudsTextures,
-+	.GL_SubdivideSurface = GL_SubdivideSurface,
-+	.CL_RunLightStyles   = CL_RunLightStyles,
-+
-+
-+	.Mod_ProcessRenderData  = Mod_ProcessRenderData,
-+	.Mod_StudioLoadTextures = Mod_StudioLoadTextures,
-+
-+	.CL_DrawParticles = CL_DrawParticles,
-+	.CL_DrawTracers   = CL_DrawTracers,
-+	.CL_DrawBeams     = CL_DrawBeams,
-+
-+	.RefGetParm = RefGetParm,
-+
-+	.R_GetDetailScaleForTexture = R_GetDetailScaleForTexture,
-+	.R_SetDetailScaleForTexture = R_SetDetailScaleForTexture,
-+
-+	.GL_CreateTexture = GL_CreateTexture,
-+	.GL_FindTexture  = GL_FindTexture,
-+	.GL_TextureName  = GL_TextureName,
-+	.GL_TextureData  = GL_TextureData,
-+	.GL_LoadTexture  = GL_LoadTexture,
+ 	.R_DrawStretchPic = R_DrawStretchPic,
+ 	.FillRGBA         = FillRGBA,
+ 	.WorldToScreen    = WorldToScreen,
+@@ -395,19 +863,19 @@ static const ref_interface_t gReffuncs =
+ 	.GL_TextureName  = GL_TextureName,
+ 	.GL_TextureData  = GL_TextureData,
+ 	.GL_LoadTexture  = GL_LoadTexture,
+-	.GL_FreeTexture  = R_SimpleStubUInt,
 +	.GL_FreeTexture  = GL_FreeTextureSlot,
-+	.R_OverrideTextureSourceSize = R_OverrideTextureSourceSize,
-+
-+	.GL_UpdateTexture = GL_UpdateTexture,
-+
+ 	.R_OverrideTextureSourceSize = R_OverrideTextureSourceSize,
+ 
+ 	.GL_UpdateTexture = GL_UpdateTexture,
+ 
+-	.GL_Bind = GL_Bind,
 +	.GL_Bind = GL_Bind_VKLite,
-+
-+	.GL_RenderFrame    = GL_RenderFrame,
-+	.GL_OrthoBounds    = GL_OrthoBounds,
-+	.R_SpeedsMessage   = R_SpeedsMessage,
-+	.Mod_GetCurrentVis = Mod_GetCurrentVis,
+ 
+ 	.GL_RenderFrame    = GL_RenderFrame,
+ 	.GL_OrthoBounds    = GL_OrthoBounds,
+ 	.R_SpeedsMessage   = R_SpeedsMessage,
+ 	.Mod_GetCurrentVis = Mod_GetCurrentVis,
+-	.R_NewMap          = R_SimpleStub,
+-	.R_ClearScene      = R_SimpleStub,
 +	.R_NewMap          = R_VKLite_NewMap,
 +	.R_ClearScene      = R_VKLite_ClearScene,
-+
-+	.TriRenderMode = R_SimpleStubInt,
-+	.Begin         = R_SimpleStubInt,
-+	.End           = R_SimpleStub,
-+	.Color4f       = Color4f,
-+	.Color4ub      = Color4ub,
-+	.Vertex3fv     = Vertex3fv,
-+	.Vertex3f      = Vertex3f,
-+	.CullFace      = CullFace,
-+
-+	.R_FillRenderAPI = R_FillRenderAPI,
-+	.R_FillTriAPI    = R_FillTriAPI,
-+
-+	.VGUI_SetupDrawing   = VGUI_SetupDrawing,
-+};
-+
-+int EXPORT GetRefAPI( int version, ref_interface_t *funcs, ref_api_t *engfuncs, ref_globals_t *globals );
-+int EXPORT GetRefAPI( int version, ref_interface_t *funcs, ref_api_t *engfuncs, ref_globals_t *globals )
-+{
-+	if( version != REF_API_VERSION )
-+		return 0;
-+
-+	*funcs = gReffuncs;
-+	gEngfuncs = *engfuncs;
-+	gpGlobals = globals;
-+
-+	return REF_API_VERSION;
-+}
+ 
+ 	.TriRenderMode = R_SimpleStubInt,
+ 	.Begin         = R_SimpleStubInt,
 diff --git a/ref/vklite/wscript b/ref/vklite/wscript
-new file mode 100644
-index 0000000..624ac7a
---- /dev/null
+index 4ad0f74..624ac7a 100644
+--- a/ref/vklite/wscript
 +++ b/ref/vklite/wscript
-@@ -0,0 +1,23 @@
-+#! /usr/bin/env python
-+# encoding: utf-8
-+# mittorn, 2018
-+
-+def options(opt):
-+	pass
-+
-+def configure(conf):
-+	pass
-+
-+def build(bld):
-+	bld.shlib(
-+		source   = 'r_context.c',
-+		target   = 'ref_vklite',
-+		defines  = 'REF_DLL',
-+		use      = 'engine_includes sdk_includes werror',
+@@ -14,5 +14,10 @@ def build(bld):
+ 		target   = 'ref_vklite',
+ 		defines  = 'REF_DLL',
+ 		use      = 'engine_includes sdk_includes werror',
 +		# lambda_vulkan_render_eye_pooled is supplied by Lambda_Bridge.c in
 +		# the app exec at final-link time. The waf shlib link is just to
 +		# satisfy the build graph (we harvest .o files for libxash.a), so
 +		# permit undefined symbols here.
 +		linkflags = [ '-Wl,-undefined,dynamic_lookup' ],
-+		install_path = bld.env.LIBDIR
-+	)
+ 		install_path = bld.env.LIBDIR
+ 	)
 diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
 index 5733329..73de016 100644
 --- a/scripts/waifulib/xcompile.py
@@ -1460,7 +1091,7 @@ index 5733329..73de016 100644
  	conf.env.MSVC_WINE = conf.options.MSVC_WINE
  	conf.env.SAILFISH = conf.options.SAILFISH
 diff --git a/wscript b/wscript
-index 49d1d3a..6f80b69 100644
+index 49d1d3a..02b9001 100644
 --- a/wscript
 +++ b/wscript
 @@ -95,6 +95,7 @@ def register_define(self, conf):
@@ -1479,14 +1110,19 @@ index 49d1d3a..6f80b69 100644
  ]
  
  def options(opt):
-@@ -267,6 +269,10 @@ def configure(conf):
+@@ -267,6 +269,15 @@ def configure(conf):
  		conf.options.BUILD_BUNDLED_DEPS = True
  		conf.options.GLES3COMPAT      = True
  		conf.options.GL               = False
 +	elif conf.env.XROS:
-+		# visionOS: ignore host pkg-config, never see Homebrew's macOS dylibs
++		# visionOS: ignore host pkg-config, never see Homebrew's macOS dylibs.
++		# Renderer is ref_gles3compat linked statically against ANGLE
++		# (libEGL_static.a + libGLESv2_static.a) at the LambdaVision app
++		# link step. visionOS forbids dlopen of external dylibs.
 +		conf.options.BUILD_BUNDLED_DEPS = True
 +		conf.options.GL               = False
++		conf.options.GLES3COMPAT      = True
++		conf.options.GL_STATIC        = True
  
  	# psvita needs -fPIC set manually and static builds are incompatible with -fPIC
  	enforce_pic = conf.env.DEST_OS != 'psvita' and not conf.env.STATIC_LINKING

@@ -282,6 +282,8 @@
 					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
 					"-force_load",
 					"$(SRCROOT)/Vendor/libxash/libxash.a",
+					"-force_load",
+					"$(SRCROOT)/Vendor/angle/libANGLE.a",
 					"-Wl,-export_dynamic",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
@@ -328,6 +330,8 @@
 					"$(SRCROOT)/Vendor/MoltenVK.xcframework/xros-arm64/libMoltenVK.a",
 					"-force_load",
 					"$(SRCROOT)/Vendor/libxash/libxash.a",
+					"-force_load",
+					"$(SRCROOT)/Vendor/angle/libANGLE.a",
 					"-Wl,-export_dynamic",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.illixion.LambdaVision;
