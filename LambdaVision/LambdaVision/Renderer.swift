@@ -413,20 +413,11 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
-        // Phase 2c: tick the xash3d-fwgs engine once per frame. Init was
-        // performed by ContentView before the immersive space appeared;
-        // here we just drive Host_DoFrame. -1 == not initialized (engine
-        // was never booted, or already shut down).
+        // Phase 2 Stage B: ticking the engine drives ref_vklite, which in
+        // turn calls lambda_vulkan_render_eye_pooled inside R_EndFrame. The
+        // pooled IOSurface (slot 0, eye 0) is sampled by the demo cube —
+        // animation here == proof the engine's render path reached present.
         _ = lambda_engine_frame()
-
-        // Phase 2 step 3: per-frame Vulkan submission. Re-render the colorMap
-        // IOSurface in-place with an animated color. The cube samples it via
-        // the existing render pipeline — visible animation == proof that the
-        // bridge submitted, the GPU executed, and Metal saw the new contents.
-        let t = Float(frameIndex) * 0.04
-        let bg = 0.05 + 0.05 * sin(t)
-        let n = Int32(Self.vulkanColorMapSize)
-        _ = lambda_vulkan_render_eye_pooled(0, 0, n, n, bg, bg, bg + 0.05, t)
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
 

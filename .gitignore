@@ -30,3 +30,4 @@ LambdaVision/Vendor/libxash/
 .xcodebuildmcp/
 VisionPort/lambda_hlsdk_stubs.o
 log.txt
+LambdaVision/LambdaVision/log.txt

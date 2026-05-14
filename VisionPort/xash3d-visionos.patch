@@ -433,10 +433,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..7f8314b
+index 0000000..1f0c38f
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,473 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -453,6 +453,7 @@ index 0000000..7f8314b
 +*/
 +
 +#include <string.h>
++#include <math.h>
 +#include "xash3d_types.h"
 +#include "const.h"
 +#include "cvardef.h"
@@ -467,6 +468,40 @@ index 0000000..7f8314b
 +
 +static ref_api_t      gEngfuncs;
 +static ref_globals_t *gpGlobals;
++
++// Stage B minimal present: ref_vklite drives the bridge's pooled VkImage
++// render so the engine — not Renderer.swift — owns the IOSurface contents
++// each frame. The bridge fn is provided by Lambda_Bridge.c in the app exec;
++// undefined references here resolve at the final app link, same as the
++// vcs_info globals.
++//
++// Must match Renderer.vulkanColorMapSize on the Swift side and POOL_SLOTS/EYES
++// on the bridge side. Stage A used slot 0 / eye 0; we keep that until cp_view
++// stereo wiring lands.
++#define VKLITE_COLORMAP_SIZE 512
++
++extern const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
++                                                   int width, int height,
++                                                   float r, float g, float b,
++                                                   float time);
++
++static unsigned int g_vklite_frame_counter = 0;
++
++static void R_VKLite_BeginFrame( qboolean clearScene )
++{
++	(void)clearScene;
++}
++
++static void R_VKLite_EndFrame( void )
++{
++	// Animated dark blue clear, proof the engine is driving the present.
++	float t  = (float)g_vklite_frame_counter * 0.04f;
++	float bg = 0.05f + 0.05f * sinf( t );
++	lambda_vulkan_render_eye_pooled( 0, 0,
++		VKLITE_COLORMAP_SIZE, VKLITE_COLORMAP_SIZE,
++		bg, bg, bg + 0.05f, t );
++	g_vklite_frame_counter++;
++}
 +
 +static void R_SimpleStub( void )
 +{
@@ -770,9 +805,9 @@ index 0000000..7f8314b
 +	.GL_ClearExtensions = R_SimpleStub,
 +
 +	.R_GammaChanged       = R_SimpleStubBool,
-+	.R_BeginFrame         = R_SimpleStubBool,
++	.R_BeginFrame         = R_VKLite_BeginFrame,
 +	.R_RenderScene        = R_SimpleStub,
-+	.R_EndFrame           = R_SimpleStub,
++	.R_EndFrame           = R_VKLite_EndFrame,
 +	.R_PushScene          = R_SimpleStub,
 +	.R_PopScene           = R_SimpleStub,
 +	.GL_BackendStartFrame = R_SimpleStub,
@@ -877,10 +912,10 @@ index 0000000..7f8314b
 +}
 diff --git a/ref/vklite/wscript b/ref/vklite/wscript
 new file mode 100644
-index 0000000..4ad0f74
+index 0000000..624ac7a
 --- /dev/null
 +++ b/ref/vklite/wscript
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,23 @@
 +#! /usr/bin/env python
 +# encoding: utf-8
 +# mittorn, 2018
@@ -897,6 +932,11 @@ index 0000000..4ad0f74
 +		target   = 'ref_vklite',
 +		defines  = 'REF_DLL',
 +		use      = 'engine_includes sdk_includes werror',
++		# lambda_vulkan_render_eye_pooled is supplied by Lambda_Bridge.c in
++		# the app exec at final-link time. The waf shlib link is just to
++		# satisfy the build graph (we harvest .o files for libxash.a), so
++		# permit undefined symbols here.
++		linkflags = [ '-Wl,-undefined,dynamic_lookup' ],
 +		install_path = bld.env.LIBDIR
 +	)
 diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
