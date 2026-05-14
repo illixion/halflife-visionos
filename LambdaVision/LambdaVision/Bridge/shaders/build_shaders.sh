@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SHADERS=(tri.vert tri.frag quad.vert quad.frag quad_tex.vert quad_tex.frag axes.vert axes.frag)
+SHADERS=(tri.vert tri.frag quad.vert quad.frag quad_tex.vert quad_tex.frag axes.vert axes.frag world.vert world.frag)
 for s in "${SHADERS[@]}"; do glslangValidator -V "$s" -o "$s.spv"; done
 
 {

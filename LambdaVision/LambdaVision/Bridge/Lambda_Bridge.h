@@ -126,6 +126,30 @@ void lambda_bridge_record_draw_stretch_pic(float x, float y, float w, float h,
 // so 3D draws z-occlude correctly.
 void lambda_bridge_record_debug_axes(const float mvp_col_major[16]);
 
+// Stage D2: per-batch entry describing a contiguous run of textured world
+// vertices to draw with a specific texture handle.
+typedef struct {
+    uint32_t texture_handle;  // 0 == draw untextured (white)
+    uint32_t first_vertex;
+    uint32_t vertex_count;
+} lambda_bridge_world_batch;
+
+// Stage D2: upload (or replace) the world geometry. Vertex layout is
+// 5 floats: x,y,z,u,v. Batches reference contiguous spans inside the
+// vertex array and the texture each span uses. The bridge keeps a copy
+// of the batch list. Subsequent uploads release the prior buffers.
+void lambda_bridge_world_upload(const float *verts_pos_uv,
+                                int          vertex_count,
+                                const lambda_bridge_world_batch *batches,
+                                int          batch_count);
+
+// Free the uploaded world. Safe to call when nothing's uploaded.
+void lambda_bridge_world_clear(void);
+
+// Stage D2: record draws for the uploaded world geometry into the active
+// frame. No-op if no world is uploaded.
+void lambda_bridge_record_world(const float mvp_col_major[16]);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

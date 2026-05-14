@@ -436,10 +436,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..ea5b458
+index 0000000..f8dc9d3
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,831 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -463,6 +463,9 @@ index 0000000..ea5b458
 +#include "xash3d_mathlib.h"
 +#include "ref_api.h"
 +#include "ref_params.h"
++#include "com_model.h"
++#include "render_api.h"
++#include <stdlib.h>
 +
 +/*
 + * this initially was made to be able to run full client
@@ -498,6 +501,19 @@ index 0000000..ea5b458
 +                                                          unsigned char b, unsigned char a,
 +                                                          unsigned int texture_handle );
 +extern void        lambda_bridge_record_debug_axes( const float mvp[16] );
++
++typedef struct lambda_bridge_world_batch_s {
++	unsigned int texture_handle;
++	unsigned int first_vertex;
++	unsigned int vertex_count;
++} lambda_bridge_world_batch;
++
++extern void        lambda_bridge_world_upload( const float *verts_pos_uv,
++                                                int vertex_count,
++                                                const lambda_bridge_world_batch *batches,
++                                                int batch_count );
++extern void        lambda_bridge_world_clear( void );
++extern void        lambda_bridge_record_world( const float mvp[16] );
 +
 +// ref_vklite texture table. Slot 0 reserved as "no texture"; engine treats
 +// texnum == 0 as invalid.
@@ -960,12 +976,137 @@ index 0000000..ea5b458
 +	}
 +}
 +
++// === Stage D2: walk worldmodel BSP, emit textured triangles ==============
++
++static int vklite_surface_vert_count( const msurface_t *s )
++{
++	return ( s->numedges < 3 ) ? 0 : 3 * ( s->numedges - 2 );
++}
++
++static void vklite_emit_surface( model_t *world, msurface_t *surf,
++                                  qboolean qbsp2, float *out )
++{
++	mtexinfo_t *ti = surf->texinfo;
++	texture_t *tex = ti ? ti->texture : NULL;
++	float tw = ( tex && tex->width  ) ? (float)tex->width  : 1.0f;
++	float th = ( tex && tex->height ) ? (float)tex->height : 1.0f;
++
++	int n = surf->numedges;
++	// Resolve each surface vertex position by walking surfedges + edges.
++	float positions[256][3];
++	if( n > 256 ) n = 256; // pathological cap
++	for( int i = 0; i < n; ++i ) {
++		int se = world->surfedges[surf->firstedge + i];
++		int abss = se < 0 ? -se : se;
++		unsigned int vi;
++		if( qbsp2 ) {
++			medge32_t *e = &world->edges32[abss];
++			vi = ( se > 0 ) ? e->v[0] : e->v[1];
++		} else {
++			medge16_t *e = &world->edges16[abss];
++			vi = ( se > 0 ) ? e->v[0] : e->v[1];
++		}
++		if( (int)vi >= world->numvertexes ) { vi = 0; }
++		positions[i][0] = world->vertexes[vi].position[0];
++		positions[i][1] = world->vertexes[vi].position[1];
++		positions[i][2] = world->vertexes[vi].position[2];
++	}
++
++	float *w = out;
++	for( int i = 1; i <= n - 2; ++i ) {
++		int idx[3] = { 0, i, i + 1 };
++		for( int k = 0; k < 3; ++k ) {
++			int vi = idx[k];
++			float *p = positions[vi];
++			float s = p[0]*ti->vecs[0][0] + p[1]*ti->vecs[0][1] +
++			          p[2]*ti->vecs[0][2] + ti->vecs[0][3];
++			float t = p[0]*ti->vecs[1][0] + p[1]*ti->vecs[1][1] +
++			          p[2]*ti->vecs[1][2] + ti->vecs[1][3];
++			*w++ = p[0]; *w++ = p[1]; *w++ = p[2];
++			*w++ = s / tw;
++			*w++ = t / th;
++		}
++	}
++}
++
++static model_t *vklite_get_worldmodel( void )
++{
++	// PARM_GET_WORLD_PTR returns world_static_t* (BSP-load metadata), NOT
++	// the renderable model_t — name is misleading. The worldmodel lives at
++	// gp_cl->models[1].
++	ref_client_t *cl = (ref_client_t *)gEngfuncs.EngineGetParm( PARM_GET_CLIENT_PTR, 0 );
++	if( cl && cl->nummodels > 1 ) return cl->models[1];
++	return NULL;
++}
++
++static void vklite_build_world( void )
++{
++	lambda_bridge_world_clear();
++	model_t *world = vklite_get_worldmodel();
++	if( !world || world->numsurfaces <= 0 ) return;
++	qboolean qbsp2 = ( world->flags & MODEL_QBSP2 ) != 0;
++
++	int total_verts = 0;
++	for( int i = 0; i < world->numsurfaces; ++i )
++		total_verts += vklite_surface_vert_count( &world->surfaces[i] );
++	if( total_verts == 0 ) return;
++
++	float *verts = (float *)malloc( total_verts * 5 * sizeof( float ) );
++	lambda_bridge_world_batch *batches = (lambda_bridge_world_batch *)
++		malloc( world->numsurfaces * sizeof( *batches ) );
++	if( !verts || !batches ) { free( verts ); free( batches ); return; }
++
++	unsigned int first = 0;
++	int nbatch = 0;
++	for( int i = 0; i < world->numsurfaces; ++i ) {
++		msurface_t *surf = &world->surfaces[i];
++		int vc = vklite_surface_vert_count( surf );
++		if( vc == 0 ) continue;
++		vklite_emit_surface( world, surf, qbsp2, verts + first * 5 );
++
++		unsigned int handle = 0;
++		mtexinfo_t *ti = surf->texinfo;
++		if( ti && ti->texture ) {
++			int texnum = ti->texture->gl_texturenum;
++			if( texnum > 0 && texnum < VKLITE_TEX_MAX && g_tex_table[texnum].used )
++				handle = g_tex_table[texnum].bridge_handle;
++		}
++		batches[nbatch].texture_handle = handle;
++		batches[nbatch].first_vertex   = first;
++		batches[nbatch].vertex_count   = (unsigned int)vc;
++		first += (unsigned int)vc;
++		nbatch++;
++	}
++
++	lambda_bridge_world_upload( verts, (int)first, batches, nbatch );
++	free( verts );
++	free( batches );
++}
++
++static qboolean g_vklite_world_built = false;
++
++static void R_VKLite_NewMap( void )
++{
++	vklite_build_world();
++	g_vklite_world_built = true;
++}
++
 +static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 +{
 +	if( !rvp ) return;
++	// Belt-and-suspenders: if R_NewMap didn't fire (engine path drift) and
++	// a world exists, build it lazily on first render.
++	if( !g_vklite_world_built ) {
++		model_t *w = vklite_get_worldmodel();
++		if( w && w->numsurfaces > 0 ) {
++			vklite_build_world();
++			g_vklite_world_built = true;
++		}
++	}
++
 +	float mvp[16];
 +	vklite_build_mvp( rvp, mvp );
-+	lambda_bridge_record_debug_axes( mvp );
++	lambda_bridge_record_world( mvp );
 +}
 +
 +static void GL_OrthoBounds( const float *mins, const float *maxs )
@@ -1100,7 +1241,7 @@ index 0000000..ea5b458
 +	.GL_OrthoBounds    = GL_OrthoBounds,
 +	.R_SpeedsMessage   = R_SpeedsMessage,
 +	.Mod_GetCurrentVis = Mod_GetCurrentVis,
-+	.R_NewMap          = R_SimpleStub,
++	.R_NewMap          = R_VKLite_NewMap,
 +	.R_ClearScene      = R_SimpleStub,
 +
 +	.TriRenderMode = R_SimpleStubInt,

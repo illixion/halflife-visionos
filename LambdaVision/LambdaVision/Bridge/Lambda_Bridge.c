@@ -124,6 +124,14 @@ static VkPipelineLayout      g_axesPipelineLayout    = VK_NULL_HANDLE;
 static VkPipeline            g_axesPipeline          = VK_NULL_HANDLE;
 static VkBuffer              g_axesVB                = VK_NULL_HANDLE;
 static VkDeviceMemory        g_axesVBMem             = VK_NULL_HANDLE;
+static VkPipelineLayout      g_worldPipelineLayout   = VK_NULL_HANDLE;
+static VkPipeline            g_worldPipeline         = VK_NULL_HANDLE;
+static VkBuffer              g_worldVB               = VK_NULL_HANDLE;
+static VkDeviceMemory        g_worldVBMem            = VK_NULL_HANDLE;
+static int                   g_worldVertexCount      = 0;
+static lambda_bridge_world_batch *g_worldBatches    = NULL;
+static int                   g_worldBatchCount      = 0;
+static uint32_t              g_worldWhiteTex        = 0; // 1x1 white fallback
 static PFN_vkDestroyInstance     g_pfnDestroyInstance     = NULL;
 static PFN_vkDestroyDevice       g_pfnDestroyDevice       = NULL;
 static PFN_vkGetDeviceProcAddr   g_pfnGetDeviceProcAddr   = NULL;
@@ -1594,6 +1602,238 @@ void lambda_bridge_record_debug_axes(const float mvp[16]) {
     pfn_vkCmdDraw(g_active_cmd, 6, 1, 0, 0);
 }
 
+// === Stage D2: textured world pipeline + uploaded geometry ================
+
+static bool ensure_world_pipeline(void) {
+    if (g_worldPipeline) return true;
+    if (!g_hasDynamicRender) return false;
+    // Reuses g_texDSL + g_texSampler + g_texDescPool from the 2D textured
+    // path, so make sure those exist.
+    if (!ensure_tex_pipeline()) return false;
+
+    DEVFN(vkCreateShaderModule);
+    DEVFN(vkDestroyShaderModule);
+    DEVFN(vkCreatePipelineLayout);
+    DEVFN(vkCreateGraphicsPipelines);
+
+    VkShaderModuleCreateInfo vsmCi = {0};
+    vsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vsmCi.codeSize = world_vert_spv_len;
+    vsmCi.pCode = (const uint32_t *)world_vert_spv;
+    VkShaderModule vsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &vsmCi, NULL, &vsm) != VK_SUCCESS) return false;
+    VkShaderModuleCreateInfo fsmCi = {0};
+    fsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    fsmCi.codeSize = world_frag_spv_len;
+    fsmCi.pCode = (const uint32_t *)world_frag_spv;
+    VkShaderModule fsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &fsmCi, NULL, &fsm) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPushConstantRange pcRange = {0};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(float) * 16;
+    VkPipelineLayoutCreateInfo plCi = {0};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.setLayoutCount = 1;
+    plCi.pSetLayouts = &g_texDSL;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    if (pfn_vkCreatePipelineLayout(g_device, &plCi, NULL, &g_worldPipelineLayout) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2] = {0};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsm; stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fsm; stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vbind = {0};
+    vbind.binding = 0; vbind.stride = sizeof(float) * 5;
+    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription vattrs[2] = {0};
+    vattrs[0].location = 0; vattrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; vattrs[0].offset = 0;
+    vattrs[1].location = 1; vattrs[1].format = VK_FORMAT_R32G32_SFLOAT;    vattrs[1].offset = sizeof(float) * 3;
+    VkPipelineVertexInputStateCreateInfo vi = {0};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &vbind;
+    vi.vertexAttributeDescriptionCount = 2;
+    vi.pVertexAttributeDescriptions = vattrs;
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {0};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp = {0};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs = {0};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = {0};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState blendAtt = {0};
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb = {0};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1; cb.pAttachments = &blendAtt;
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = {0};
+    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+    VkPipelineDepthStencilStateCreateInfo ds = {0};
+    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkFormat colorFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkPipelineRenderingCreateInfoKHR prCi = {0};
+    prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    prCi.colorAttachmentCount = 1;
+    prCi.pColorAttachmentFormats = &colorFmt;
+    prCi.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
+
+    VkGraphicsPipelineCreateInfo gpCi = {0};
+    gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gpCi.pNext = &prCi;
+    gpCi.stageCount = 2; gpCi.pStages = stages;
+    gpCi.pVertexInputState = &vi;
+    gpCi.pInputAssemblyState = &ia;
+    gpCi.pViewportState = &vp;
+    gpCi.pRasterizationState = &rs;
+    gpCi.pMultisampleState = &ms;
+    gpCi.pColorBlendState = &cb;
+    gpCi.pDynamicState = &dyn;
+    gpCi.pDepthStencilState = &ds;
+    gpCi.layout = g_worldPipelineLayout;
+
+    VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_worldPipeline);
+    pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+    pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+    if (pres != VK_SUCCESS) return false;
+
+    // 1x1 white fallback texture for surfaces whose texture didn't resolve.
+    if (!g_worldWhiteTex) {
+        uint8_t px[4] = { 255, 255, 255, 255 };
+        g_worldWhiteTex = lambda_bridge_create_texture(px, 1, 1);
+    }
+    return true;
+}
+
+void lambda_bridge_world_clear(void) {
+    if (!g_device) return;
+    DEVFN(vkDestroyBuffer);
+    DEVFN(vkFreeMemory);
+    if (g_worldVB) pfn_vkDestroyBuffer(g_device, g_worldVB, NULL);
+    if (g_worldVBMem) pfn_vkFreeMemory(g_device, g_worldVBMem, NULL);
+    g_worldVB = VK_NULL_HANDLE; g_worldVBMem = VK_NULL_HANDLE;
+    g_worldVertexCount = 0;
+    free(g_worldBatches);
+    g_worldBatches = NULL;
+    g_worldBatchCount = 0;
+}
+
+void lambda_bridge_world_upload(const float *verts_pos_uv,
+                                int vertex_count,
+                                const lambda_bridge_world_batch *batches,
+                                int batch_count) {
+    if (!g_device) return;
+    if (vertex_count <= 0 || batch_count <= 0 || !verts_pos_uv || !batches) return;
+    if (!ensure_world_pipeline()) return;
+
+    lambda_bridge_world_clear();
+
+    size_t bytes = (size_t)vertex_count * 5 * sizeof(float);
+    DEVFN(vkCreateBuffer);
+    DEVFN(vkDestroyBuffer);
+    DEVFN(vkGetBufferMemoryRequirements);
+    DEVFN(vkAllocateMemory);
+    DEVFN(vkFreeMemory);
+    DEVFN(vkBindBufferMemory);
+    DEVFN(vkMapMemory);
+    DEVFN(vkUnmapMemory);
+
+    VkBufferCreateInfo bci = {0};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (pfn_vkCreateBuffer(g_device, &bci, NULL, &g_worldVB) != VK_SUCCESS) return;
+    VkMemoryRequirements req;
+    pfn_vkGetBufferMemoryRequirements(g_device, g_worldVB, &req);
+    uint32_t mt = find_memory_type(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mt == UINT32_MAX) mt = 0;
+    VkMemoryAllocateInfo mai = {0};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = mt;
+    if (pfn_vkAllocateMemory(g_device, &mai, NULL, &g_worldVBMem) != VK_SUCCESS) {
+        pfn_vkDestroyBuffer(g_device, g_worldVB, NULL);
+        g_worldVB = VK_NULL_HANDLE;
+        return;
+    }
+    pfn_vkBindBufferMemory(g_device, g_worldVB, g_worldVBMem, 0);
+    void *mapped = NULL;
+    pfn_vkMapMemory(g_device, g_worldVBMem, 0, bytes, 0, &mapped);
+    memcpy(mapped, verts_pos_uv, bytes);
+    pfn_vkUnmapMemory(g_device, g_worldVBMem);
+
+    g_worldVertexCount = vertex_count;
+    g_worldBatches = (lambda_bridge_world_batch *)malloc(sizeof(*batches) * batch_count);
+    if (g_worldBatches) {
+        memcpy(g_worldBatches, batches, sizeof(*batches) * batch_count);
+        g_worldBatchCount = batch_count;
+    }
+}
+
+void lambda_bridge_record_world(const float mvp[16]) {
+    if (g_active_slot < 0) return;
+    if (!g_worldVB || !g_worldBatches || g_worldBatchCount == 0) return;
+    if (!ensure_world_pipeline()) return;
+
+    DEVFN(vkCmdBindPipeline);
+    DEVFN(vkCmdBindVertexBuffers);
+    DEVFN(vkCmdBindDescriptorSets);
+    DEVFN(vkCmdPushConstants);
+    DEVFN(vkCmdDraw);
+
+    pfn_vkCmdBindPipeline(g_active_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_worldPipeline);
+    VkDeviceSize zero = 0;
+    pfn_vkCmdBindVertexBuffers(g_active_cmd, 0, 1, &g_worldVB, &zero);
+    pfn_vkCmdPushConstants(g_active_cmd, g_worldPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, mvp);
+
+    VkDescriptorSet lastDS = VK_NULL_HANDLE;
+    for (int i = 0; i < g_worldBatchCount; ++i) {
+        lambda_bridge_world_batch *b = &g_worldBatches[i];
+        uint32_t h = b->texture_handle;
+        if (h == 0 || h > TEX_POOL_MAX || !g_textures[h - 1].used) h = g_worldWhiteTex;
+        if (h == 0) continue;
+        VkDescriptorSet ds = g_textures[h - 1].descSet;
+        if (ds != lastDS) {
+            pfn_vkCmdBindDescriptorSets(g_active_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                g_worldPipelineLayout, 0, 1, &ds, 0, NULL);
+            lastDS = ds;
+        }
+        pfn_vkCmdDraw(g_active_cmd, b->vertex_count, 1, b->first_vertex, 0);
+    }
+}
+
 void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
                                     uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (g_active_slot < 0) return;
@@ -1914,6 +2154,15 @@ void lambda_vulkan_release_pool(void) {
     }
     for (int i = 0; i < TEX_POOL_MAX; ++i) {
         if (g_textures[i].used) lambda_bridge_destroy_texture((uint32_t)(i + 1));
+    }
+    lambda_bridge_world_clear();
+    if (g_worldPipeline || g_worldPipelineLayout) {
+        DEVFN(vkDestroyPipeline);
+        DEVFN(vkDestroyPipelineLayout);
+        if (g_worldPipeline) pfn_vkDestroyPipeline(g_device, g_worldPipeline, NULL);
+        if (g_worldPipelineLayout) pfn_vkDestroyPipelineLayout(g_device, g_worldPipelineLayout, NULL);
+        g_worldPipeline = VK_NULL_HANDLE;
+        g_worldPipelineLayout = VK_NULL_HANDLE;
     }
     if (g_axesVB || g_axesVBMem || g_axesPipeline) {
         DEVFN(vkDestroyBuffer);
