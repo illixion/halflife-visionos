@@ -48,7 +48,10 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                    mag_filter::linear,
                                    min_filter::linear);
 
-    half4 colorSample   = colorMap.sample(colorSampler, in.texCoord.xy);
+    // Flip V: ANGLE writes with GL bottom-left origin into the MTLTexture
+    // but Metal samples top-left. Easier than re-projecting the engine.
+    float2 uv = float2(in.texCoord.x, 1.0 - in.texCoord.y);
+    half4 colorSample   = colorMap.sample(colorSampler, uv);
 
     return float4(colorSample);
 }

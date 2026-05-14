@@ -11,7 +11,7 @@ index e0cc14b..527bdc4 100644
  // audio backends (XASH_SOUND)
  #define SOUND_NULL     0
 diff --git a/common/defaults.h b/common/defaults.h
-index 7cd9c1f..294ed25 100644
+index 7cd9c1f..504f056 100644
 --- a/common/defaults.h
 +++ b/common/defaults.h
 @@ -30,7 +30,11 @@ SETUP BACKENDS DEFINITIONS
@@ -27,7 +27,19 @@ index 7cd9c1f..294ed25 100644
  		#define XASH_VIDEO     VIDEO_SDL
  		#define XASH_INPUT     INPUT_SDL
  		#define XASH_SOUND     SOUND_SDL
-@@ -193,6 +197,8 @@ Default build-depended cvar and constant values
+@@ -151,6 +155,11 @@ Default build-depended cvar and constant values
+ 	#define DEFAULT_ALLOWCONSOLE 1
+ #elif XASH_ANDROID
+ 	#define DEFAULT_TOUCH_ENABLE "1"
++#elif XASH_VISIONOS
++	// visionOS uses spatial input (gaze + pinch / controllers), not a
++	// touchscreen. The touch overlay tries to load touch_default/* sprites
++	// that aren't in the PAK and renders them as magenta squares.
++	#define DEFAULT_TOUCH_ENABLE "0"
+ #elif XASH_MOBILE_PLATFORM
+ 	#define DEFAULT_TOUCH_ENABLE "1"
+ 	#define DEFAULT_M_IGNORE     "1"
+@@ -193,6 +202,8 @@ Default build-depended cvar and constant values
  		#define DEFAULT_ACCELERATED_RENDERER "gles1"
  	#elif XASH_IOS
  		#define DEFAULT_ACCELERATED_RENDERER "gles2"
@@ -384,6 +396,80 @@ index 3fa5df3..395283b 100644
  	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
  		gl2wrap_config.version = 100;
  	if( gl2wrap_config.buf_storage )
+diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
+index 216039f..64f4303 100644
+--- a/ref/gl/gl_image.c
++++ b/ref/gl/gl_image.c
+@@ -594,6 +594,22 @@ static void GL_SetTextureFormat( gl_texture_t *tex, pixformat_t format, int chan
+ 
+ 	Assert( tex != NULL );
+ 
++#if XASH_GLES
++	// ES 3.0 requires the internalformat's channel count to match the
++	// `format` argument of glTexImage2D. xash's heuristic picks GL_RGB /
++	// GL_LUMINANCE / GL_LUMINANCE_ALPHA from channelMask but the actual
++	// pixel buffer is always PF_RGBA_32 → format=GL_RGBA at upload time,
++	// triggering INVALID_ENUM / INVALID_OPERATION. Pin to GL_RGBA8 so
++	// the pair always matches. The compressed-DXT path below still wins
++	// when applicable.
++	if( !ImageCompressed( format ) && !FBitSet( tex->flags, TF_DEPTHMAP )
++		&& !FBitSet( tex->flags, TF_ARB_FLOAT|TF_ARB_16BIT ))
++	{
++		tex->format = GL_RGBA8;
++		return;
++	}
++#endif
++
+ 	if( ImageCompressed( format ))
+ 	{
+ 		switch( format )
+@@ -653,14 +669,31 @@ static void GL_SetTextureFormat( gl_texture_t *tex, pixformat_t format, int chan
+ 		{
+ 		case 1:
+ 			if( FBitSet( tex->flags, TF_ALPHACONTRAST ))
++#if XASH_GLES
++				tex->format = GL_LUMINANCE; // GL_INTENSITY8 not in ES3
++#else
+ 				tex->format = GL_INTENSITY8;
+-			else tex->format = GL_LUMINANCE8;
++#endif
++			else
++#if XASH_GLES
++				tex->format = GL_LUMINANCE;  // GL_LUMINANCE8 (sized) not in ES3 core
++#else
++				tex->format = GL_LUMINANCE8;
++#endif
++			break;
++		case 2:
++#if XASH_GLES
++			tex->format = GL_LUMINANCE_ALPHA; // GL_LUMINANCE8_ALPHA8 not in ES3
++#else
++			tex->format = GL_LUMINANCE8_ALPHA8;
++#endif
+ 			break;
+-		case 2: tex->format = GL_LUMINANCE8_ALPHA8; break;
+ 		case 3:
+ 			switch( bits )
+ 			{
++#if !XASH_GLES
+ 			case 16: tex->format = GL_RGB5; break;
++#endif
+ 			case 32: tex->format = GL_RGB8; break;
+ 			default: tex->format = GL_RGB; break;
+ 			}
+@@ -851,6 +884,12 @@ static void GL_TextureImageRAW( gl_texture_t *tex, GLint side, GLint level, GLin
+ 
+ 	Assert( tex != NULL );
+ 
++#if XASH_GLES
++	// Drain any pending GL error so GL_CheckTexImageError doesn't blame
++	// this upload for an error left over from setup or a previous call.
++	while( pglGetError() != GL_NO_ERROR ) { }
++#endif
++
+ 	if( FBitSet( tex->flags, TF_DEPTHMAP ))
+ 		inFormat = GL_DEPTH_COMPONENT;
+ 	else switch( rawformat )
 diff --git a/ref/gl/wscript b/ref/gl/wscript
 index f085da6..9a9f280 100644
 --- a/ref/gl/wscript

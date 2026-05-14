@@ -2661,6 +2661,9 @@ int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
 // just issue GL calls.
 static GLuint    g_frame_fbo   = 0;
 static GLuint    g_frame_rbo   = 0;
+static GLuint    g_frame_depth = 0;
+static int       g_frame_depth_w = 0;
+static int       g_frame_depth_h = 0;
 static EGLImage  g_frame_image = EGL_NO_IMAGE;
 
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
@@ -2690,10 +2693,28 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
     glBindRenderbuffer(GL_RENDERBUFFER, g_frame_rbo);
     pglEGLImg(GL_RENDERBUFFER, g_frame_image);
 
+    // Depth+stencil renderbuffer. xash's BSP/studio rendering relies on
+    // z-test and skybox/decals on stencil. Without this, every fragment
+    // passes depth → far geometry overwrites near geometry. Keep the
+    // depth RBO across frames if the size matches (colorMap is constant
+    // size today, so this allocates exactly once).
+    if (g_frame_depth == 0
+        || g_frame_depth_w != width
+        || g_frame_depth_h != height) {
+        if (g_frame_depth) { glDeleteRenderbuffers(1, &g_frame_depth); g_frame_depth = 0; }
+        glGenRenderbuffers(1, &g_frame_depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, g_frame_depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, 0x88F0 /*GL_DEPTH24_STENCIL8*/, width, height);
+        g_frame_depth_w = width;
+        g_frame_depth_h = height;
+    }
+
     glGenFramebuffers(1, &g_frame_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER, g_frame_rbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, 0x821A /*GL_DEPTH_STENCIL_ATTACHMENT*/,
+                              GL_RENDERBUFFER, g_frame_depth);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2705,7 +2726,9 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
 
     glViewport(0, 0, width, height);
     glClearColor(r, g, b, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glClearDepthf(1.0f);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     return 0;
 }
 
