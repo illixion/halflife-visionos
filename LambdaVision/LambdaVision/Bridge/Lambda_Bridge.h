@@ -73,6 +73,27 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
 // Releases all pooled per-eye resources. Safe before destroy_device.
 void lambda_vulkan_release_pool(void);
 
+// Stage C1: split the monolithic pooled-render call into begin/end so the
+// engine's renderer (ref_vklite) can record its own draw commands between
+// them. lambda_bridge_begin_frame:
+//   - lazily allocates pool[slot][eye] for (w,h),
+//   - resets the slot's command buffer + begins recording,
+//   - transitions the VkImage UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL,
+//   - opens a dynamic-rendering pass with load-op CLEAR (r,g,b,1).
+// Returns 0 on success; <0 on failure.
+//
+// After this returns, the engine may issue draw commands by calling back
+// into the bridge (lambda_bridge_record_*, added in C2+). Until those exist,
+// the frame is clear-only — equivalent to the old lambda_vulkan_render_eye_pooled
+// minus the test triangle.
+int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
+                              float r, float g, float b);
+
+// Stage C1: closes the rendering pass opened by begin_frame, transitions to
+// GENERAL so Metal can sample the IOSurface, submits + waits idle, returns
+// the IOSurface (bridge-owned). NULL on failure or if no frame is active.
+const void *lambda_bridge_end_frame(void);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

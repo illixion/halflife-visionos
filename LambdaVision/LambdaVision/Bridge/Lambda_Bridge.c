@@ -873,6 +873,149 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
     return (const void *)e->surface;
 }
 
+// =====================================================================
+// Stage C1: engine-driven recording. begin_frame/end_frame bracket a
+// dynamic-rendering pass into pool[slot][eye]; the engine's renderer
+// records draws via future bridge fns between these two. Until those
+// fns exist, the frame is just a clear.
+// =====================================================================
+
+static int      g_active_slot   = -1;
+static int      g_active_eye    = -1;
+static VkCommandBuffer g_active_cmd = VK_NULL_HANDLE;
+
+int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
+                              float r, float g, float b) {
+    if (!g_device || !g_cmdPool || !g_hasMetalObjects) return -1;
+    if (!g_hasDynamicRender) return -2;
+    if (slot < 0 || slot >= POOL_SLOTS || eye < 0 || eye >= POOL_EYES) return -3;
+    if (!ensure_tri_pipeline()) return -4; // ensures pipeline cache exists for C2+
+    if (g_active_slot != -1) return -5;    // frame already in progress
+
+    EyeSlot *e = &g_pool[slot][eye];
+    if (e->surface && (e->width != width || e->height != height)) {
+        destroy_eye_slot(e);
+    }
+    if (!e->surface) {
+        if (!alloc_eye_slot(e, width, height)) return -6;
+    }
+
+    DEVFN(vkBeginCommandBuffer);
+    DEVFN(vkCmdPipelineBarrier);
+    DEVFN(vkResetCommandBuffer);
+    DEVFN(vkCmdSetViewport);
+    DEVFN(vkCmdSetScissor);
+
+    pfn_vkResetCommandBuffer(e->cmd, 0);
+
+    VkCommandBufferBeginInfo bi = {0};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    pfn_vkBeginCommandBuffer(e->cmd, &bi);
+
+    VkImageSubresourceRange range = {0};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+
+    VkImageMemoryBarrier toAtt = {0};
+    toAtt.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toAtt.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toAtt.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAtt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.image = e->image;
+    toAtt.subresourceRange = range;
+    toAtt.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    pfn_vkCmdPipelineBarrier(e->cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, NULL, 0, NULL, 1, &toAtt);
+
+    VkRenderingAttachmentInfoKHR colorAtt = {0};
+    colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+    colorAtt.imageView = e->view;
+    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAtt.clearValue.color.float32[0] = r;
+    colorAtt.clearValue.color.float32[1] = g;
+    colorAtt.clearValue.color.float32[2] = b;
+    colorAtt.clearValue.color.float32[3] = 1.0f;
+
+    VkRenderingInfoKHR ri = {0};
+    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+    ri.renderArea.extent.width = (uint32_t)width;
+    ri.renderArea.extent.height = (uint32_t)height;
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &colorAtt;
+    g_pfnCmdBeginRendering(e->cmd, &ri);
+
+    VkViewport vpRect = {0};
+    vpRect.width = (float)width; vpRect.height = (float)height;
+    vpRect.maxDepth = 1.0f;
+    pfn_vkCmdSetViewport(e->cmd, 0, 1, &vpRect);
+
+    VkRect2D scissor = {0};
+    scissor.extent.width = (uint32_t)width;
+    scissor.extent.height = (uint32_t)height;
+    pfn_vkCmdSetScissor(e->cmd, 0, 1, &scissor);
+
+    g_active_slot = slot;
+    g_active_eye  = eye;
+    g_active_cmd  = e->cmd;
+    return 0;
+}
+
+const void *lambda_bridge_end_frame(void) {
+    if (g_active_slot < 0) return NULL;
+    EyeSlot *e = &g_pool[g_active_slot][g_active_eye];
+    VkCommandBuffer cb = g_active_cmd;
+
+    DEVFN(vkCmdPipelineBarrier);
+    DEVFN(vkEndCommandBuffer);
+    DEVFN(vkQueueSubmit);
+    DEVFN(vkQueueWaitIdle);
+
+    g_pfnCmdEndRendering(cb);
+
+    VkImageSubresourceRange range = {0};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+
+    VkImageMemoryBarrier toGen = {0};
+    toGen.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toGen.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toGen.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGen.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGen.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGen.image = e->image;
+    toGen.subresourceRange = range;
+    toGen.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toGen.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    pfn_vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, NULL, 0, NULL, 1, &toGen);
+
+    pfn_vkEndCommandBuffer(cb);
+
+    VkSubmitInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    VkResult subRes = pfn_vkQueueSubmit(g_gfxQueue, 1, &si, VK_NULL_HANDLE);
+    VkResult waitRes = (subRes == VK_SUCCESS) ? pfn_vkQueueWaitIdle(g_gfxQueue) : subRes;
+
+    IOSurfaceRef out = e->surface;
+    g_active_slot = -1;
+    g_active_eye  = -1;
+    g_active_cmd  = VK_NULL_HANDLE;
+
+    if (subRes != VK_SUCCESS || waitRes != VK_SUCCESS) return NULL;
+    return (const void *)out;
+}
+
 void lambda_vulkan_release_pool(void) {
     if (!g_device) return;
     for (int s = 0; s < POOL_SLOTS; ++s) {

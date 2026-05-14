@@ -433,10 +433,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..1f0c38f
+index 0000000..ee5968c
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,472 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -480,26 +480,25 @@ index 0000000..1f0c38f
 +// stereo wiring lands.
 +#define VKLITE_COLORMAP_SIZE 512
 +
-+extern const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
-+                                                   int width, int height,
-+                                                   float r, float g, float b,
-+                                                   float time);
++extern int        lambda_bridge_begin_frame( int slot, int eye, int width, int height,
++                                              float r, float g, float b );
++extern const void *lambda_bridge_end_frame( void );
 +
 +static unsigned int g_vklite_frame_counter = 0;
 +
 +static void R_VKLite_BeginFrame( qboolean clearScene )
 +{
 +	(void)clearScene;
++	float t  = (float)g_vklite_frame_counter * 0.04f;
++	float bg = 0.05f + 0.05f * sinf( t );
++	lambda_bridge_begin_frame( 0, 0,
++		VKLITE_COLORMAP_SIZE, VKLITE_COLORMAP_SIZE,
++		bg, bg, bg + 0.05f );
 +}
 +
 +static void R_VKLite_EndFrame( void )
 +{
-+	// Animated dark blue clear, proof the engine is driving the present.
-+	float t  = (float)g_vklite_frame_counter * 0.04f;
-+	float bg = 0.05f + 0.05f * sinf( t );
-+	lambda_vulkan_render_eye_pooled( 0, 0,
-+		VKLITE_COLORMAP_SIZE, VKLITE_COLORMAP_SIZE,
-+		bg, bg, bg + 0.05f, t );
++	lambda_bridge_end_frame();
 +	g_vklite_frame_counter++;
 +}
 +
