@@ -290,6 +290,31 @@ actor Renderer {
         }
         print("[LambdaVision] ANGLE smoke test rc=\(glRc): \(String(cString: glStatus))")
 
+        // Persistent GL context + GL→Metal interop probe. Allocates a
+        // 256x256 BGRA8 render-target MTLTexture, hands it to ANGLE which
+        // clears it to magenta via an EGL_METAL_TEXTURE_ANGLE-wrapped FBO.
+        // Success means we can render into any MTLTexture that Compositor-
+        // Services hands us, which is the whole basis for the ref/gl path.
+        var setupStatus = [CChar](repeating: 0, count: 256)
+        let setupRc = setupStatus.withUnsafeMutableBufferPointer { buf in
+            lambda_gl_setup(buf.baseAddress, Int32(buf.count))
+        }
+        print("[LambdaVision] lambda_gl_setup rc=\(setupRc): \(String(cString: setupStatus))")
+
+        let probeDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm, width: 256, height: 256, mipmapped: false)
+        probeDesc.usage = [.renderTarget, .shaderRead]
+        probeDesc.storageMode = .private
+        if let probeTex = device.makeTexture(descriptor: probeDesc) {
+            let ptr = Unmanaged.passUnretained(probeTex).toOpaque()
+            var clearStatus = [CChar](repeating: 0, count: 256)
+            let clearRc = clearStatus.withUnsafeMutableBufferPointer { buf in
+                lambda_gl_clear_mtl_texture(ptr, 256, 256, 1.0, 0.0, 1.0,
+                                            buf.baseAddress, Int32(buf.count))
+            }
+            print("[LambdaVision] lambda_gl_clear_mtl_texture rc=\(clearRc): \(String(cString: clearStatus))")
+        }
+
         var devStatus = [CChar](repeating: 0, count: 384)
         let rc = devStatus.withUnsafeMutableBufferPointer { buf in
             lambda_vulkan_create_device(buf.baseAddress, Int32(buf.count))

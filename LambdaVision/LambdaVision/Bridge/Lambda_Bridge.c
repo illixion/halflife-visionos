@@ -2436,3 +2436,207 @@ int lambda_gl_smoke_test(char *status_out, int status_cap) {
     eglTerminate(disp);
     return 0;
 }
+
+// ---- Persistent GL state for the ANGLE → CompositorServices bridge ------
+//
+// One EGLDisplay + EGLContext for the app lifetime. The pbuffer surface
+// here is a placeholder so eglMakeCurrent succeeds before any drawable is
+// available; actual frame rendering targets the drawable's MTLTexture
+// wrapped via EGL_ANGLE_metal_texture_client_buffer.
+
+static EGLDisplay g_gl_disp = EGL_NO_DISPLAY;
+static EGLContext g_gl_ctx  = EGL_NO_CONTEXT;
+static EGLSurface g_gl_surf = EGL_NO_SURFACE;
+static EGLConfig  g_gl_cfg  = NULL;
+
+int lambda_gl_setup(char *status_out, int status_cap) {
+    if (g_gl_disp != EGL_NO_DISPLAY) {
+        snprintf(status_out, status_cap, "already initialized");
+        return 0;
+    }
+
+    const EGLAttrib disp_attribs[] = {
+        EGL_PLATFORM_ANGLE_TYPE_ANGLE,
+        EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+        EGL_NONE
+    };
+    g_gl_disp = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE,
+                                      (void *)EGL_DEFAULT_DISPLAY,
+                                      disp_attribs);
+    if (g_gl_disp == EGL_NO_DISPLAY) {
+        snprintf(status_out, status_cap,
+                 "eglGetPlatformDisplay → NO_DISPLAY (err=0x%x)", eglGetError());
+        return -1;
+    }
+
+    EGLint major = 0, minor = 0;
+    if (!eglInitialize(g_gl_disp, &major, &minor)) {
+        snprintf(status_out, status_cap,
+                 "eglInitialize failed (err=0x%x)", eglGetError());
+        g_gl_disp = EGL_NO_DISPLAY;
+        return -2;
+    }
+
+    const EGLint cfg_attribs[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+        EGL_NONE
+    };
+    EGLint num_cfgs = 0;
+    if (!eglChooseConfig(g_gl_disp, cfg_attribs, &g_gl_cfg, 1, &num_cfgs)
+        || num_cfgs < 1) {
+        // Fall back to whatever config eglGetConfigs returns first.
+        EGLint total = 0;
+        eglGetConfigs(g_gl_disp, NULL, 0, &total);
+        EGLConfig probe[1] = { NULL };
+        if (total > 0 && eglGetConfigs(g_gl_disp, probe, 1, &num_cfgs)
+            && num_cfgs >= 1) {
+            g_gl_cfg = probe[0];
+        } else {
+            snprintf(status_out, status_cap,
+                     "eglChooseConfig: 0 matches (total=%d, err=0x%x)",
+                     total, eglGetError());
+            eglTerminate(g_gl_disp);
+            g_gl_disp = EGL_NO_DISPLAY;
+            return -3;
+        }
+    }
+
+    const EGLint ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_NONE
+    };
+    g_gl_ctx = eglCreateContext(g_gl_disp, g_gl_cfg, EGL_NO_CONTEXT, ctx_attribs);
+    if (g_gl_ctx == EGL_NO_CONTEXT) {
+        snprintf(status_out, status_cap,
+                 "eglCreateContext failed (err=0x%x)", eglGetError());
+        eglTerminate(g_gl_disp);
+        g_gl_disp = EGL_NO_DISPLAY;
+        return -4;
+    }
+
+    const EGLint surf_attribs[] = {
+        EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE
+    };
+    g_gl_surf = eglCreatePbufferSurface(g_gl_disp, g_gl_cfg, surf_attribs);
+    if (g_gl_surf == EGL_NO_SURFACE) {
+        snprintf(status_out, status_cap,
+                 "eglCreatePbufferSurface failed (err=0x%x)", eglGetError());
+        eglDestroyContext(g_gl_disp, g_gl_ctx);
+        eglTerminate(g_gl_disp);
+        g_gl_disp = EGL_NO_DISPLAY;
+        g_gl_ctx  = EGL_NO_CONTEXT;
+        return -5;
+    }
+
+    if (!eglMakeCurrent(g_gl_disp, g_gl_surf, g_gl_surf, g_gl_ctx)) {
+        snprintf(status_out, status_cap,
+                 "eglMakeCurrent failed (err=0x%x)", eglGetError());
+        eglDestroySurface(g_gl_disp, g_gl_surf);
+        eglDestroyContext(g_gl_disp, g_gl_ctx);
+        eglTerminate(g_gl_disp);
+        g_gl_disp = EGL_NO_DISPLAY;
+        g_gl_ctx  = EGL_NO_CONTEXT;
+        g_gl_surf = EGL_NO_SURFACE;
+        return -6;
+    }
+
+    snprintf(status_out, status_cap, "EGL %d.%d / context ES%d.%d ready",
+             major, minor, 3, 0);
+    return 0;
+}
+
+void lambda_gl_teardown(void) {
+    if (g_gl_disp == EGL_NO_DISPLAY) return;
+    eglMakeCurrent(g_gl_disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (g_gl_surf != EGL_NO_SURFACE) eglDestroySurface(g_gl_disp, g_gl_surf);
+    if (g_gl_ctx  != EGL_NO_CONTEXT) eglDestroyContext(g_gl_disp, g_gl_ctx);
+    eglTerminate(g_gl_disp);
+    g_gl_disp = EGL_NO_DISPLAY;
+    g_gl_ctx  = EGL_NO_CONTEXT;
+    g_gl_surf = EGL_NO_SURFACE;
+    g_gl_cfg  = NULL;
+}
+
+int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
+                                float r, float g, float b,
+                                char *status_out, int status_cap) {
+    if (g_gl_disp == EGL_NO_DISPLAY || g_gl_ctx == EGL_NO_CONTEXT) {
+        snprintf(status_out, status_cap, "gl_setup not called");
+        return -1;
+    }
+    if (!mtl_texture) {
+        snprintf(status_out, status_cap, "null mtl_texture");
+        return -2;
+    }
+
+    // Wrap the Metal texture as an EGLImage. EGL_METAL_TEXTURE_ANGLE accepts
+    // any MTLTexture with MTLTextureUsageRenderTarget set.
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    EGLImage img = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT,
+                                  EGL_METAL_TEXTURE_ANGLE,
+                                  (EGLClientBuffer)mtl_texture,
+                                  img_attribs);
+    if (img == EGL_NO_IMAGE) {
+        snprintf(status_out, status_cap,
+                 "eglCreateImage(METAL_TEXTURE) failed (err=0x%x)", eglGetError());
+        return -3;
+    }
+
+    // Attach via a GL renderbuffer (more direct than texture target for FBO
+    // color writes). glEGLImageTargetRenderbufferStorageOES is in
+    // GL_OES_EGL_image, exposed by ANGLE on all backends.
+    typedef void (*PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)(GLenum, void*);
+    PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC pglEGLImageTargetRenderbufferStorageOES =
+        (PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC)
+            eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
+    if (!pglEGLImageTargetRenderbufferStorageOES) {
+        snprintf(status_out, status_cap,
+                 "glEGLImageTargetRenderbufferStorageOES not exposed");
+        eglDestroyImage(g_gl_disp, img);
+        return -4;
+    }
+
+    GLuint rbo = 0, fbo = 0;
+    glGenRenderbuffers(1, &rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
+    pglEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER, img);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER, rbo);
+
+    GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (fbo_status != GL_FRAMEBUFFER_COMPLETE) {
+        snprintf(status_out, status_cap,
+                 "FBO not complete (0x%x)", fbo_status);
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteRenderbuffers(1, &rbo);
+        eglDestroyImage(g_gl_disp, img);
+        return -5;
+    }
+
+    glViewport(0, 0, width, height);
+    glClearColor(r, g, b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Flush to Metal command queue. eglWaitUntilWorkScheduledANGLE is the
+    // ANGLE-recommended hand-off primitive when passing the underlying
+    // resource back to a Metal consumer (the CompositorServices encoder).
+    typedef EGLBoolean (*PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)(EGLDisplay);
+    PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC pegl_wait =
+        (PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)
+            eglGetProcAddress("eglWaitUntilWorkScheduledANGLE");
+    if (pegl_wait) pegl_wait(g_gl_disp);
+    else           glFinish();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteRenderbuffers(1, &rbo);
+    eglDestroyImage(g_gl_disp, img);
+
+    snprintf(status_out, status_cap, "cleared %dx%d to (%.2f,%.2f,%.2f)",
+             width, height, r, g, b);
+    return 0;
+}

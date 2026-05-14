@@ -177,6 +177,28 @@ int lambda_engine_frame(void);
 // Tears engine down. Idempotent.
 void lambda_engine_shutdown(void);
 
+// ---- ANGLE / EGL bridge ----
+
+// One-shot setup: creates a long-lived EGLDisplay + EGLContext bound to
+// ANGLE's Metal backend, makes the context current on a 1x1 pbuffer so
+// subsequent GL calls are valid even before any drawable arrives.
+// Returns 0 on success, negative on failure (with diagnostic in status_out).
+int lambda_gl_setup(char *status_out, int status_cap);
+
+// Per-frame proof: wraps a Swift-owned MTLTexture (id<MTLTexture> cast to
+// void*) as an EGLImage via EGL_ANGLE_metal_texture_client_buffer, attaches
+// to an FBO color attachment, glClears to (r,g,b,1), then schedules the
+// Metal work so the texture is presentable. Use to verify the GL→Metal
+// interop path before bringing the full xash R_RenderFrame pipeline in.
+//
+// Returns 0 on success.
+int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
+                                float r, float g, float b,
+                                char *status_out, int status_cap);
+
+// Tears down the long-lived context/display. Idempotent.
+void lambda_gl_teardown(void);
+
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
 // 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,
