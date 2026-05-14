@@ -2764,13 +2764,61 @@ int lambda_gl_end_frame(void) {
 // work-queue posted from any Swift thread.
 
 #include <pthread.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <fcntl.h>
+
+// Where the crash handler writes the backtrace. Set by Swift at launch
+// via lambda_set_crash_log_path; usually <app sandbox>/Documents/crash.log
+// so it survives the process death and can be inspected later.
+static char g_crash_log_path[1024] = "";
+
+void lambda_set_crash_log_path(const char *path) {
+    if (path) snprintf(g_crash_log_path, sizeof(g_crash_log_path), "%s", path);
+}
+
+static void crash_handler(int sig) {
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    int fds[2] = { 2 /*stderr*/, -1 };
+    if (g_crash_log_path[0])
+        fds[1] = open(g_crash_log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    for (int i = 0; i < 2; i++) {
+        int fd = fds[i];
+        if (fd < 0) continue;
+        char hdr[128];
+        int hl = snprintf(hdr, sizeof(hdr),
+            "\n[LambdaVision] CRASH sig=%d on gl-worker; %d frames:\n", sig, n);
+        write(fd, hdr, hl);
+        backtrace_symbols_fd(frames, n, fd);
+    }
+    if (fds[1] >= 0) close(fds[1]);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_crash_handlers(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGILL,  &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+}
 
 typedef enum {
     WORK_NONE = 0,
     WORK_SETUP,
     WORK_INIT,
     WORK_FRAME,
+    WORK_CMD,
 } gl_work_kind_t;
+
+// engine console command (Cbuf_AddText) is the public C entry point.
+// declared here so we don't have to pull engine headers in.
+extern void Cbuf_AddText( const char *text );
 
 static pthread_t       g_w_thread;
 static pthread_mutex_t g_w_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -2778,6 +2826,18 @@ static pthread_cond_t  g_w_post = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t  g_w_done = PTHREAD_COND_INITIALIZER;
 static gl_work_kind_t  g_w_kind = WORK_NONE;
 static int             g_w_started = 0;
+// Ticket counters. Posters wait until any prior work completes before
+// submitting their own (g_w_in_ticket == g_w_done_ticket), then bump
+// g_w_in_ticket; the worker writes g_w_done_ticket and broadcasts so
+// every blocked poster wakes and checks its own ticket. Without this,
+// a second poster arriving while the worker is busy would overwrite
+// g_w_kind and only one of the two posters would see the next done
+// signal (pthread_cond_signal wakes one), losing the other forever.
+static unsigned int    g_w_in_ticket = 0;
+static unsigned int    g_w_done_ticket = 0;
+// Held by lambda_gl_worker_* wrappers while they stage the payload and
+// post — keeps two callers from racing on g_w_cmd / g_w_mtl / etc.
+static pthread_mutex_t g_w_api_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 // Per-kind payloads (only one in flight at a time, so a flat union is fine).
 static char       g_w_status[384];
@@ -2793,10 +2853,13 @@ static const char *g_w_init_argv[W_MAX_ARGV];
 static void      *g_w_mtl = NULL;
 static int        g_w_w = 0, g_w_h = 0;
 static float      g_w_r = 0, g_w_g = 0, g_w_b = 0;
+// cmd
+static char       g_w_cmd[256];
 
 static void *gl_worker_main(void *arg) {
     (void)arg;
     pthread_setname_np("LambdaVision.gl-worker");
+    install_crash_handlers();
     pthread_mutex_lock(&g_w_mtx);
     for (;;) {
         while (g_w_kind == WORK_NONE)
@@ -2828,21 +2891,34 @@ static void *gl_worker_main(void *arg) {
             g_w_result = (br != 0) ? br : er;
             break;
         }
+        case WORK_CMD:
+            // Append "\n" so the engine treats it as a complete line.
+            Cbuf_AddText(g_w_cmd);
+            Cbuf_AddText("\n");
+            g_w_result = 0;
+            break;
         default: g_w_result = -1; break;
         }
 
         pthread_mutex_lock(&g_w_mtx);
         g_w_kind = WORK_NONE;
-        pthread_cond_signal(&g_w_done);
+        g_w_done_ticket++;
+        pthread_cond_broadcast(&g_w_done);
     }
     return NULL;
 }
 
 static int worker_post_and_wait(gl_work_kind_t kind) {
     pthread_mutex_lock(&g_w_mtx);
+    // Wait until the worker is idle so we don't overwrite a pending kind.
+    while (g_w_in_ticket != g_w_done_ticket)
+        pthread_cond_wait(&g_w_done, &g_w_mtx);
+    unsigned int my_ticket = ++g_w_in_ticket;
     g_w_kind = kind;
-    pthread_cond_signal(&g_w_post);
-    while (g_w_kind != WORK_NONE)
+    pthread_cond_broadcast(&g_w_post);
+    // Wait until OUR specific work finishes (broadcast wakes everyone;
+    // each checks their own ticket).
+    while (g_w_done_ticket < my_ticket)
         pthread_cond_wait(&g_w_done, &g_w_mtx);
     int rc = g_w_result;
     pthread_mutex_unlock(&g_w_mtx);
@@ -2850,6 +2926,7 @@ static int worker_post_and_wait(gl_work_kind_t kind) {
 }
 
 int lambda_gl_worker_setup(char *status_out, int status_cap) {
+    pthread_mutex_lock(&g_w_api_mtx);
     if (!g_w_started) {
         g_w_started = 1;
         pthread_create(&g_w_thread, NULL, gl_worker_main, NULL);
@@ -2857,12 +2934,14 @@ int lambda_gl_worker_setup(char *status_out, int status_cap) {
     int rc = worker_post_and_wait(WORK_SETUP);
     if (status_out && status_cap > 0)
         snprintf(status_out, status_cap, "%s", g_w_status);
+    pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
 }
 
 int lambda_gl_worker_engine_init(const char *basedir,
                                  int argc, const char *const *argv,
                                  char *status_out, int status_cap) {
+    pthread_mutex_lock(&g_w_api_mtx);
     snprintf(g_w_init_basedir, sizeof(g_w_init_basedir), "%s", basedir);
     g_w_init_argc = argc < W_MAX_ARGV ? argc : W_MAX_ARGV;
     for (int i = 0; i < g_w_init_argc; i++) {
@@ -2873,12 +2952,25 @@ int lambda_gl_worker_engine_init(const char *basedir,
     int rc = worker_post_and_wait(WORK_INIT);
     if (status_out && status_cap > 0)
         snprintf(status_out, status_cap, "%s", g_w_status);
+    pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
 }
 
 int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
                                   float r, float g, float b) {
+    pthread_mutex_lock(&g_w_api_mtx);
     g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
     g_w_r = r; g_w_g = g; g_w_b = b;
-    return worker_post_and_wait(WORK_FRAME);
+    int rc = worker_post_and_wait(WORK_FRAME);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return rc;
+}
+
+int lambda_gl_worker_cmd(const char *cmd) {
+    if (!cmd) return -1;
+    pthread_mutex_lock(&g_w_api_mtx);
+    snprintf(g_w_cmd, sizeof(g_w_cmd), "%s", cmd);
+    int rc = worker_post_and_wait(WORK_CMD);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return rc;
 }

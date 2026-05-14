@@ -349,7 +349,7 @@ actor Renderer {
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
         let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
         let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
-                     "+map", "c0a0"]
+                     "+map", "c1a0"]
         let cArgs = extra.map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
         var buf = [CChar](repeating: 0, count: 384)
@@ -425,6 +425,20 @@ actor Renderer {
 
         frame.startSubmission()
 
+        // Tick the engine ONCE per real frame and write to colorMap once.
+        // Without this, each drawable in the loop below would re-tick the
+        // engine (running it at 2× speed) and the eyes would sample
+        // different moments in time — visible as per-eye divergent
+        // transients (e.g. HUD glyphs, particles).
+        ensureEngineInitialized()
+        let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
+        let frameRc = lambda_gl_worker_render_frame(
+            colorMapPtr, Int32(colorMap.width), Int32(colorMap.height),
+            0.1, 0.1, 0.1)
+        if frameRc != 0 {
+            print("[LambdaVision] GL worker render rc=\(frameRc)")
+        }
+
         for drawable in drawables {
             render(drawable: drawable, frameIndex: frame.frameIndex)
         }
@@ -451,17 +465,8 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
-        // ref_gles3compat draws into colorMap via ANGLE on the GL worker
-        // thread (the only thread allowed to touch the EGL context).
-        // Dark-grey clear so we can see if the engine drew nothing.
-        ensureEngineInitialized()
-        let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
-        let frameRc = lambda_gl_worker_render_frame(
-            colorMapPtr, Int32(colorMap.width), Int32(colorMap.height),
-            0.1, 0.1, 0.1)
-        if frameRc != 0 {
-            print("[LambdaVision] GL worker render rc=\(frameRc)")
-        }
+        // colorMap was filled once by renderFrame() before this loop; both
+        // eyes sample the same engine tick.
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
 

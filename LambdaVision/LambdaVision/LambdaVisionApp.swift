@@ -15,6 +15,16 @@ struct ImmersiveSpaceContent: CompositorContent {
 
     var body: some CompositorContent {
         CompositorLayer(configuration: self) { @MainActor layerRenderer in
+            // Crash dump goes here; pull via `xcrun devicectl ... pull` or
+            // the Files app. Overwritten on each crash.
+            if let docs = try? FileManager.default.url(
+                for: .documentDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true) {
+                let path = docs.appendingPathComponent("crash.log").path
+                path.withCString { lambda_set_crash_log_path($0) }
+                print("[LambdaVision] crash log path: \(path)")
+            }
+            KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
         }
     }

@@ -212,6 +212,14 @@ int lambda_gl_worker_engine_init(const char *writable_dir,
 int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
                                   float r, float g, float b);
 
+// Posts an engine console command (Cbuf_AddText) onto the worker thread.
+// Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.
+int lambda_gl_worker_cmd(const char *cmd);
+
+// Sets where the crash handler writes the backtrace (one file, overwritten
+// each crash). Call once at launch with a path inside the app sandbox.
+void lambda_set_crash_log_path(const char *path);
+
 // Per-frame begin/end. Wraps mtl_texture as the GL FBO color attachment,
 // binds it, clears to (r,g,b,1). Any GL calls between begin and end go
 // through ANGLE → Metal and land in mtl_texture. end_frame() finalises
