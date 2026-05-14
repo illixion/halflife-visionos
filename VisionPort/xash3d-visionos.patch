@@ -266,7 +266,7 @@ index 72bafc2..973d9bd 100644
  void Posix_Daemonize( void )
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-index 9624e29..d853c61 100644
+index 9624e29..5f14a9d 100644
 --- a/engine/platform/visionos/vid_visionos.c
 +++ b/engine/platform/visionos/vid_visionos.c
 @@ -9,17 +9,35 @@ entry points platform.h doesn't already inline-stub for non-SDL builds.
@@ -294,8 +294,8 @@ index 9624e29..d853c61 100644
 +	// Match ref_vklite's VKLITE_COLORMAP_SIZE so 2D pixel coords map 1:1
 +	// to the pooled IOSurface. Resolution can grow once cp_view-driven
 +	// per-eye targets land.
-+	refState.width  = 512;
-+	refState.height = 512;
++	refState.width  = 1024;
++	refState.height = 1024;
 +	// SDL platforms call GL_InitExtensions() here after creating a real
 +	// GL context. We rely on the LambdaVision app to have already made
 +	// an ANGLE EGL context current before lambda_engine_init runs, so

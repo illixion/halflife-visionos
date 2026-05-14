@@ -250,14 +250,16 @@ actor Renderer {
 
         let metalAllocator = MTKMeshBufferAllocator(device: device)
 
-        // Flat UI panel facing -Z. Thin slab keeps the existing cube vertex
-        // descriptor + texture mapping working; visually it's a quad showing
-        // the engine's pooled IOSurface.
-        let mdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 0.02),
-                                     segments: SIMD3<UInt32>(1, 1, 1),
-                                     geometryType: MDLGeometryType.triangles,
-                                     inwardNormals: false,
-                                     allocator: metalAllocator)
+        // Single flat plane (no side/back faces) so both eyes always see
+        // the same texture region. With a box, each eye sees slivers of
+        // different side faces, making 2D engine artifacts (HUD glyphs,
+        // intro text) appear in different positions per eye.
+        // newPlane lays the mesh in XZ; updateGameState rotates 90° around
+        // X so the plane faces -Z (toward the viewer).
+        let mdlMesh = MDLMesh.newPlane(withDimensions: SIMD2<Float>(4, 4),
+                                       segments: SIMD2<UInt32>(1, 1),
+                                       geometryType: MDLGeometryType.triangles,
+                                       allocator: metalAllocator)
 
         let mdlVertexDescriptor = MTKModelIOVertexDescriptorFromMetal(mtlVertexDescriptor)
 
@@ -278,7 +280,10 @@ actor Renderer {
         case wrapFailed
     }
 
-    static let vulkanColorMapSize = 512
+    // 1024² is large enough that each engine pixel maps to well below one
+    // fragment at viewer distance, so small high-frequency HUD content
+    // (text glyphs, single-texel decals) doesn't alias differently per eye.
+    static let vulkanColorMapSize = 1024
 
     /// Phase 2 step 2/3: produce a colorMap whose pixels are rendered by
     /// Vulkan into an IOSurface (rgba16Float), imported by Metal. Uses the
@@ -392,10 +397,11 @@ actor Renderer {
     private func updateGameState() {
         /// Update any game state before rendering
 
-        // Static panel facing the user. No rotation; engine UI lives on its
-        // surface so spinning it is distracting.
-        let modelMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        self.uniforms[0].modelMatrix = modelMatrix
+        // Plane mesh lies flat in XZ; tilt it up so its surface faces -Z
+        // (toward the viewer). Then translate out 8 units in front.
+        let tilt = matrix4x4_rotation(radians: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        let translate = matrix4x4_translation(0.0, 0.0, -8.0)
+        self.uniforms[0].modelMatrix = translate * tilt
     }
 
     func renderFrame() {
@@ -519,7 +525,9 @@ actor Renderer {
 
         renderEncoder.label = "Primary Render Encoder"
         renderEncoder.pushDebugGroup("Draw Box (Vulkan-textured)")
-        renderEncoder.setCullMode(.back)
+        // Plane is double-sided; disable culling so viewer sees it from
+        // either rotation direction.
+        renderEncoder.setCullMode(.none)
         renderEncoder.setFrontFacing(.counterClockwise)
         renderEncoder.setRenderPipelineState(pipelineState)
         renderEncoder.setDepthStencilState(depthState)
