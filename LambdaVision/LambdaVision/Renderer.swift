@@ -249,8 +249,11 @@ actor Renderer {
 
         let metalAllocator = MTKMeshBufferAllocator(device: device)
 
-        let mdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 4),
-                                     segments: SIMD3<UInt32>(2, 2, 2),
+        // Flat UI panel facing -Z. Thin slab keeps the existing cube vertex
+        // descriptor + texture mapping working; visually it's a quad showing
+        // the engine's pooled IOSurface.
+        let mdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 0.02),
+                                     segments: SIMD3<UInt32>(1, 1, 1),
                                      geometryType: MDLGeometryType.triangles,
                                      inwardNormals: false,
                                      allocator: metalAllocator)
@@ -350,14 +353,10 @@ actor Renderer {
     private func updateGameState() {
         /// Update any game state before rendering
 
-        let rotationAxis = SIMD3<Float>(1, 1, 0)
-        let modelRotationMatrix = matrix4x4_rotation(radians: rotation, axis: rotationAxis)
-        let modelTranslationMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
-
+        // Static panel facing the user. No rotation; engine UI lives on its
+        // surface so spinning it is distracting.
+        let modelMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
         self.uniforms[0].modelMatrix = modelMatrix
-
-        rotation += 0.01
     }
 
     func renderFrame() {

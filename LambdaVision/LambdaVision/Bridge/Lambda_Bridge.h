@@ -101,6 +101,25 @@ const void *lambda_bridge_end_frame(void);
 void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
                                     uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 
+// Stage C3: textures. Upload a tightly-packed RGBA8 buffer (width*height*4
+// bytes) into a new VkImage with an attached descriptor set. Returns a
+// non-zero opaque handle on success, 0 on failure. The bridge owns the
+// underlying VkImage; destroy with lambda_bridge_destroy_texture.
+uint32_t lambda_bridge_create_texture(const void *rgba_bytes,
+                                      int width, int height);
+
+// Frees a texture previously created via lambda_bridge_create_texture.
+// Safe to call with handle 0 (no-op).
+void lambda_bridge_destroy_texture(uint32_t handle);
+
+// Stage C3: record one textured quad into the active frame. Coordinates
+// match record_fill_rgba (engine 2D pixel space). uv_* are 0..1 normalized.
+// Tint is multiplied by the sampled color (rgba 0..255).
+void lambda_bridge_record_draw_stretch_pic(float x, float y, float w, float h,
+                                           float s1, float t1, float s2, float t2,
+                                           uint8_t r, uint8_t g, uint8_t b, uint8_t a,
+                                           uint32_t texture_handle);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

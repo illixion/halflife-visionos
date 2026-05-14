@@ -436,10 +436,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..1c8ab40
+index 0000000..134485d
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,631 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -489,6 +489,78 @@ index 0000000..1c8ab40
 +extern void        lambda_bridge_record_fill_rgba( float x, float y, float w, float h,
 +                                                   unsigned char r, unsigned char g,
 +                                                   unsigned char b, unsigned char a );
++extern unsigned int lambda_bridge_create_texture( const void *rgba_bytes, int width, int height );
++extern void        lambda_bridge_destroy_texture( unsigned int handle );
++extern void        lambda_bridge_record_draw_stretch_pic( float x, float y, float w, float h,
++                                                          float s1, float t1, float s2, float t2,
++                                                          unsigned char r, unsigned char g,
++                                                          unsigned char b, unsigned char a,
++                                                          unsigned int texture_handle );
++
++// ref_vklite texture table. Slot 0 reserved as "no texture"; engine treats
++// texnum == 0 as invalid.
++#define VKLITE_TEX_MAX 1024
++typedef struct {
++	qboolean     used;
++	unsigned int bridge_handle;  // opaque from bridge; 0 == not uploaded
++	int          width;
++	int          height;
++	char         name[64];
++	byte        *original_buffer;  // optional cache for R_GetTextureOriginalBuffer
++	size_t       original_size;
++} VKLiteTexture;
++static VKLiteTexture g_tex_table[VKLITE_TEX_MAX];
++static int           g_tex_current = 0;
++
++static int vklite_alloc_texslot( void )
++{
++	for( int i = 1; i < VKLITE_TEX_MAX; ++i )
++		if( !g_tex_table[i].used ) return i;
++	return 0;
++}
++
++// Convert engine rgbdata_t to a tightly-packed RGBA8 buffer. Returns NULL on
++// unsupported format. Caller owns the returned buffer (Mem_Free... we use plain
++// malloc here since engine helpers aren't available without gEngfuncs.memAlloc).
++static byte *vklite_rgbdata_to_rgba8( rgbdata_t *pic, int *out_w, int *out_h )
++{
++	if( !pic || !pic->buffer ) return NULL;
++	int w = pic->width, h = pic->height;
++	*out_w = w; *out_h = h;
++	size_t px = (size_t)w * (size_t)h;
++	byte *out = (byte *)malloc( px * 4 );
++	if( !out ) return NULL;
++
++	switch( pic->type )
++	{
++	case PF_RGBA_32:
++		memcpy( out, pic->buffer, px * 4 );
++		break;
++	case PF_RGB_24:
++		for( size_t i = 0; i < px; ++i ) {
++			out[i*4+0] = pic->buffer[i*3+0];
++			out[i*4+1] = pic->buffer[i*3+1];
++			out[i*4+2] = pic->buffer[i*3+2];
++			out[i*4+3] = 255;
++		}
++		break;
++	case PF_INDEXED_24:
++	case PF_INDEXED_32:
++		if( !pic->palette ) { free( out ); return NULL; }
++		for( size_t i = 0; i < px; ++i ) {
++			byte idx = pic->buffer[i];
++			out[i*4+0] = pic->palette[idx*3+0];
++			out[i*4+1] = pic->palette[idx*3+1];
++			out[i*4+2] = pic->palette[idx*3+2];
++			out[i*4+3] = ( pic->flags & IMAGE_HAS_ALPHA ) && idx == 255 ? 0 : 255;
++		}
++		break;
++	default:
++		free( out );
++		return NULL;
++	}
++	return out;
++}
 +
 +static unsigned int g_vklite_frame_counter = 0;
 +
@@ -597,7 +669,29 @@ index 0000000..1c8ab40
 +
 +static int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
 +{
-+	return 0;
++	(void)flags; (void)update;
++	if( !pic ) return 0;
++	// Have the engine expand indexed/compressed formats to RGBA with the
++	// proper transparent-index handling — our local converter only knows
++	// the easy formats.
++	gEngfuncs.Image_Process( &pic, 0, 0, IMAGE_FORCE_RGBA, 0.0f );
++	int w = 0, h = 0;
++	byte *rgba = vklite_rgbdata_to_rgba8( pic, &w, &h );
++	if( !rgba ) return 0;
++	int slot = vklite_alloc_texslot();
++	if( slot == 0 ) { free( rgba ); return 0; }
++	unsigned int bh = lambda_bridge_create_texture( rgba, w, h );
++	free( rgba );
++	if( bh == 0 ) return 0;
++	g_tex_table[slot].used = true;
++	g_tex_table[slot].bridge_handle = bh;
++	g_tex_table[slot].width = w;
++	g_tex_table[slot].height = h;
++	if( name ) {
++		strncpy( g_tex_table[slot].name, name, sizeof( g_tex_table[slot].name ) - 1 );
++		g_tex_table[slot].name[sizeof( g_tex_table[slot].name ) - 1] = '\0';
++	}
++	return slot;
 +}
 +
 +static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottomColor )
@@ -612,7 +706,11 @@ index 0000000..1c8ab40
 +
 +static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
 +{
-+	;
++	if( texnum <= 0 || texnum >= VKLITE_TEX_MAX ) return;
++	VKLiteTexture *t = &g_tex_table[texnum];
++	if( !t->used || !t->bridge_handle ) return;
++	lambda_bridge_record_draw_stretch_pic( x, y, w, h, s1, t1, s2, t2,
++		255, 255, 255, 255, t->bridge_handle );
 +}
 +
 +static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
@@ -714,17 +812,32 @@ index 0000000..1c8ab40
 +
 +static intptr_t RefGetParm( int parm, int arg )
 +{
-+	return 0;
++	// PARM_TEX_WIDTH=1, PARM_TEX_HEIGHT=2 — engine derives UVs from these
++	// in PIC_DrawGeneric, so returning 0 yields divide-by-zero UVs and
++	// every glyph samples the same texel. Cover the two we need; other
++	// parm queries can return 0 until they bite.
++	if( arg <= 0 || arg >= VKLITE_TEX_MAX || !g_tex_table[arg].used ) return 0;
++	switch( parm ) {
++	case 1: return g_tex_table[arg].width;
++	case 2: return g_tex_table[arg].height;
++	default: return 0;
++	}
 +}
 +
 +static int GL_FindTexture( const char *name )
 +{
++	if( !name || !*name ) return 0;
++	for( int i = 1; i < VKLITE_TEX_MAX; ++i ) {
++		if( g_tex_table[i].used && strcmp( g_tex_table[i].name, name ) == 0 )
++			return i;
++	}
 +	return 0;
 +}
 +
 +static const char *GL_TextureName( unsigned int texnum )
 +{
-+	return NULL;
++	if( texnum >= VKLITE_TEX_MAX || !g_tex_table[texnum].used ) return "";
++	return g_tex_table[texnum].name;
 +}
 +
 +static const byte *GL_TextureData( unsigned int texnum )
@@ -734,12 +847,50 @@ index 0000000..1c8ab40
 +
 +static int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
 +{
-+	return 0;
++	// Reuse cache if the engine already loaded this name.
++	int existing = GL_FindTexture( name );
++	if( existing ) return existing;
++
++	rgbdata_t *pic = gEngfuncs.FS_LoadImage( name, buf, size );
++	if( !pic ) return 0;
++	int slot = GL_LoadTextureFromBuffer( name, pic, (texFlags_t)flags, false );
++	// rgbdata is engine-owned and freed by the engine's image cache; we don't
++	// FS_FreeImage here because the engine retains the rgbdata for reuse.
++	return slot;
 +}
 +
 +static int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags )
 +{
-+	return 0;
++	(void)flags;
++	if( !buffer || width <= 0 || height <= 0 ) return 0;
++	int slot = vklite_alloc_texslot();
++	if( slot == 0 ) return 0;
++	unsigned int bh = lambda_bridge_create_texture( buffer, width, height );
++	if( bh == 0 ) return 0;
++	g_tex_table[slot].used = true;
++	g_tex_table[slot].bridge_handle = bh;
++	g_tex_table[slot].width = width;
++	g_tex_table[slot].height = height;
++	if( name ) {
++		strncpy( g_tex_table[slot].name, name, sizeof( g_tex_table[slot].name ) - 1 );
++		g_tex_table[slot].name[sizeof( g_tex_table[slot].name ) - 1] = '\0';
++	}
++	return slot;
++}
++
++static void GL_FreeTextureSlot( unsigned int texnum )
++{
++	if( texnum == 0 || texnum >= VKLITE_TEX_MAX ) return;
++	VKLiteTexture *t = &g_tex_table[texnum];
++	if( !t->used ) return;
++	if( t->bridge_handle ) lambda_bridge_destroy_texture( t->bridge_handle );
++	memset( t, 0, sizeof( *t ) );
++}
++
++static void GL_Bind_VKLite( int tmu, unsigned int texnum )
++{
++	(void)tmu;
++	g_tex_current = (int)texnum;
 +}
 +
 +static void R_OverrideTextureSourceSize( unsigned int textnum, unsigned int srcWidth, unsigned int srcHeight )
@@ -752,10 +903,6 @@ index 0000000..1c8ab40
 +	;
 +}
 +
-+static void GL_Bind( int tmu, unsigned int texnum )
-+{
-+	;
-+}
 +
 +static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 +{
@@ -883,12 +1030,12 @@ index 0000000..1c8ab40
 +	.GL_TextureName  = GL_TextureName,
 +	.GL_TextureData  = GL_TextureData,
 +	.GL_LoadTexture  = GL_LoadTexture,
-+	.GL_FreeTexture  = R_SimpleStubUInt,
++	.GL_FreeTexture  = GL_FreeTextureSlot,
 +	.R_OverrideTextureSourceSize = R_OverrideTextureSourceSize,
 +
 +	.GL_UpdateTexture = GL_UpdateTexture,
 +
-+	.GL_Bind = GL_Bind,
++	.GL_Bind = GL_Bind_VKLite,
 +
 +	.GL_RenderFrame    = GL_RenderFrame,
 +	.GL_OrthoBounds    = GL_OrthoBounds,
