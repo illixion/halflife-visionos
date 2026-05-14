@@ -1,3 +1,15 @@
+diff --git a/3rdparty/library_suffix b/3rdparty/library_suffix
+--- a/3rdparty/library_suffix
++++ b/3rdparty/library_suffix
+@@ -1 +1 @@
+-Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa
++Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa-dirty
+diff --git a/3rdparty/mainui b/3rdparty/mainui
+--- a/3rdparty/mainui
++++ b/3rdparty/mainui
+@@ -1 +1 @@
+-Subproject commit a4ec67f28037583617c05222e54e04777f677041
++Subproject commit a4ec67f28037583617c05222e54e04777f677041-dirty
 diff --git a/common/backends.h b/common/backends.h
 index e0cc14b..527bdc4 100644
 --- a/common/backends.h
@@ -200,6 +212,25 @@ index ec64677..be7f43f 100644
  	return false;
  #else
  	int exelen = wai_getExecutablePath( NULL, 0, NULL );
+diff --git a/engine/platform/posix/crash_posix.c b/engine/platform/posix/crash_posix.c
+index 9461b45..c1a33b2 100644
+--- a/engine/platform/posix/crash_posix.c
++++ b/engine/platform/posix/crash_posix.c
+@@ -66,6 +66,14 @@ static void Sys_Crash( int signal, siginfo_t *si, void *context )
+ 	}
+ #endif // HAVE_LIBBACKTRACE
+ 
++#if XASH_VISIONOS
++	// Don't run the normal Sys_Quit shutdown path from a signal handler:
++	// Mod_FreeAll → GL_DeleteTextures grabs ANGLE's ContextMutex, which the
++	// faulting thread is already holding (e.g. mid-glReadPixels), causing
++	// a hang inside the crash handler. Just dump and exit.
++	_exit( 128 + signal );
++#endif
++
+ #if XASH_ANDROID
+ 	// also write to a dedicated crash report file the Java side picks up on next launch
+ 	if( crashlog_path[0] )
 diff --git a/engine/platform/posix/lib_posix.c b/engine/platform/posix/lib_posix.c
 index 9c34f38..23a3d26 100644
 --- a/engine/platform/posix/lib_posix.c
@@ -396,6 +427,39 @@ index 3fa5df3..395283b 100644
  	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
  		gl2wrap_config.version = 100;
  	if( gl2wrap_config.buf_storage )
+diff --git a/ref/gl/gl_backend.c b/ref/gl/gl_backend.c
+index 4e1d5b8..fab0449 100644
+--- a/ref/gl/gl_backend.c
++++ b/ref/gl/gl_backend.c
+@@ -561,6 +561,16 @@ qboolean VID_ScreenShot( const char *filename, int shot_type )
+ 	int	width = 0, height = 0;
+ 	qboolean	result;
+ 
++#if XASH_VISIONOS
++	// ANGLE/Metal's glReadPixels path faults inside AGX texture readback
++	// when sourcing from our EGLImage-backed colorMap renderbuffer. The
++	// engine triggers this on every level transition (auto-thumbnail).
++	// Until per-eye targets land and we can do a proper Metal-side blit
++	// for thumbnails, short-circuit all screenshot variants.
++	(void)filename; (void)shot_type;
++	return false;
++#endif
++
+ 	r_shot = Mem_Calloc( r_temppool, sizeof( rgbdata_t ));
+ 	r_shot->width = (gpGlobals->width + 3) & ~3;
+ 	r_shot->height = (gpGlobals->height + 3) & ~3;
+@@ -616,6 +626,11 @@ qboolean VID_CubemapShot( const char *base, uint size, const float *vieworg, qbo
+ 	string		basename;
+ 	int		i = 1, flags, result;
+ 
++#if XASH_VISIONOS
++	(void)base; (void)size; (void)vieworg; (void)skyshot;
++	return false;
++#endif
++
+ 	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !WORLDMODEL )
+ 		return false;
+ 
 diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
 index 216039f..64f4303 100644
 --- a/ref/gl/gl_image.c

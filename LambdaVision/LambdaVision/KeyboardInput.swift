@@ -28,9 +28,21 @@ final class KeyboardInput {
     private func attach(_ kb: GCKeyboard) {
         guard let input = kb.keyboardInput else { return }
         input.keyChangedHandler = { _, _, code, pressed in
+            // One-shot debug keys fire on press only.
+            if pressed, let oneshot = KeyboardInput.oneShot(for: code) {
+                _ = oneshot.withCString { lambda_gl_worker_cmd($0) }
+                return
+            }
             guard let cmd = KeyboardInput.command(for: code) else { return }
             let full = (pressed ? "+" : "-") + cmd
             _ = full.withCString { lambda_gl_worker_cmd($0) }
+        }
+    }
+
+    private static func oneShot(for code: GCKeyCode) -> String? {
+        switch code {
+        case .keyV: return "noclip"
+        default:    return nil
         }
     }
 

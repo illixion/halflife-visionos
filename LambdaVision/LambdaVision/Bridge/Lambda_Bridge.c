@@ -2295,6 +2295,8 @@ int lambda_engine_init(const char *writable_dir,
     }
 
     g_engine_inited = 1;
+    // Enable cheats so debug binds (e.g. V → noclip) work.
+    { extern void Cbuf_AddText( const char *text ); Cbuf_AddText("sv_cheats 1\n"); }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
     return 0;
