@@ -1801,10 +1801,14 @@ void lambda_bridge_world_upload(const float *verts_pos_uv,
     }
 }
 
-void lambda_bridge_record_world(const float mvp[16]) {
+void lambda_bridge_record_world_range(const float mvp[16],
+                                      int first_batch, int batch_count) {
     if (g_active_slot < 0) return;
     if (!g_worldVB || !g_worldBatches || g_worldBatchCount == 0) return;
     if (!ensure_world_pipeline()) return;
+    if (first_batch < 0 || batch_count <= 0) return;
+    if (first_batch + batch_count > g_worldBatchCount)
+        batch_count = g_worldBatchCount - first_batch;
 
     DEVFN(vkCmdBindPipeline);
     DEVFN(vkCmdBindVertexBuffers);
@@ -1819,8 +1823,10 @@ void lambda_bridge_record_world(const float mvp[16]) {
         VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, mvp);
 
     VkDescriptorSet lastDS = VK_NULL_HANDLE;
-    for (int i = 0; i < g_worldBatchCount; ++i) {
+    int end = first_batch + batch_count;
+    for (int i = first_batch; i < end; ++i) {
         lambda_bridge_world_batch *b = &g_worldBatches[i];
+        if (b->vertex_count == 0) continue;
         uint32_t h = b->texture_handle;
         if (h == 0 || h > TEX_POOL_MAX || !g_textures[h - 1].used) h = g_worldWhiteTex;
         if (h == 0) continue;
@@ -1832,6 +1838,10 @@ void lambda_bridge_record_world(const float mvp[16]) {
         }
         pfn_vkCmdDraw(g_active_cmd, b->vertex_count, 1, b->first_vertex, 0);
     }
+}
+
+void lambda_bridge_record_world(const float mvp[16]) {
+    lambda_bridge_record_world_range(mvp, 0, g_worldBatchCount);
 }
 
 void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,

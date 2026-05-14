@@ -150,6 +150,12 @@ void lambda_bridge_world_clear(void);
 // frame. No-op if no world is uploaded.
 void lambda_bridge_record_world(const float mvp_col_major[16]);
 
+// Stage E1: draw a contiguous sub-range of the uploaded batches with the
+// supplied MVP. Lets a brush entity (door, button) be drawn from the same
+// world VB at its current transform.
+void lambda_bridge_record_world_range(const float mvp_col_major[16],
+                                      int first_batch, int batch_count);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

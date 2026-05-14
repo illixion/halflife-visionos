@@ -436,10 +436,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..f8dc9d3
+index 0000000..ee6890a
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,831 @@
+@@ -0,0 +1,906 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -465,6 +465,8 @@ index 0000000..f8dc9d3
 +#include "ref_params.h"
 +#include "com_model.h"
 +#include "render_api.h"
++#include "cl_entity.h"
++#include "entity_types.h"
 +#include <stdlib.h>
 +
 +/*
@@ -514,6 +516,8 @@ index 0000000..f8dc9d3
 +                                                int batch_count );
 +extern void        lambda_bridge_world_clear( void );
 +extern void        lambda_bridge_record_world( const float mvp[16] );
++extern void        lambda_bridge_record_world_range( const float mvp[16],
++                                                     int first_batch, int batch_count );
 +
 +// ref_vklite texture table. Slot 0 reserved as "no texture"; engine treats
 +// texnum == 0 as invalid.
@@ -668,11 +672,6 @@ index 0000000..f8dc9d3
 +static void GL_SetupAttributes( int safegl )
 +{
 +	;
-+}
-+
-+static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
-+{
-+	return true;
 +}
 +
 +static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
@@ -1056,13 +1055,15 @@ index 0000000..f8dc9d3
 +		malloc( world->numsurfaces * sizeof( *batches ) );
 +	if( !verts || !batches ) { free( verts ); free( batches ); return; }
 +
++	// Emit batches 1:1 with surfaces so entity surface ranges
++	// (firstmodelsurface, nummodelsurfaces) map directly to batch indices.
++	// Zero-vertex slots are kept as empty batches.
 +	unsigned int first = 0;
-+	int nbatch = 0;
 +	for( int i = 0; i < world->numsurfaces; ++i ) {
 +		msurface_t *surf = &world->surfaces[i];
 +		int vc = vklite_surface_vert_count( surf );
-+		if( vc == 0 ) continue;
-+		vklite_emit_surface( world, surf, qbsp2, verts + first * 5 );
++		if( vc > 0 )
++			vklite_emit_surface( world, surf, qbsp2, verts + first * 5 );
 +
 +		unsigned int handle = 0;
 +		mtexinfo_t *ti = surf->texinfo;
@@ -1071,19 +1072,73 @@ index 0000000..f8dc9d3
 +			if( texnum > 0 && texnum < VKLITE_TEX_MAX && g_tex_table[texnum].used )
 +				handle = g_tex_table[texnum].bridge_handle;
 +		}
-+		batches[nbatch].texture_handle = handle;
-+		batches[nbatch].first_vertex   = first;
-+		batches[nbatch].vertex_count   = (unsigned int)vc;
++		batches[i].texture_handle = handle;
++		batches[i].first_vertex   = first;
++		batches[i].vertex_count   = (unsigned int)vc;
 +		first += (unsigned int)vc;
-+		nbatch++;
 +	}
 +
-+	lambda_bridge_world_upload( verts, (int)first, batches, nbatch );
++	lambda_bridge_world_upload( verts, (int)first, batches, world->numsurfaces );
 +	free( verts );
 +	free( batches );
 +}
 +
 +static qboolean g_vklite_world_built = false;
++
++// Per-frame brush entity list (doors, buttons, breakables, ...). Reset
++// by R_ClearScene, populated by R_AddEntity, drained by GL_RenderFrame.
++#define VKLITE_MAX_ENTS 256
++static cl_entity_t *g_vklite_brush_ents[VKLITE_MAX_ENTS];
++static int          g_vklite_brush_ent_count = 0;
++
++static void R_VKLite_ClearScene( void )
++{
++	g_vklite_brush_ent_count = 0;
++}
++
++static qboolean R_AddEntity_VKLite( struct cl_entity_s *ent, int type )
++{
++	if( !ent || !ent->model ) return true;
++	if( ent->model->type == mod_brush && g_vklite_brush_ent_count < VKLITE_MAX_ENTS )
++		g_vklite_brush_ents[g_vklite_brush_ent_count++] = ent;
++	(void)type;
++	return true;
++}
++
++// Build a column-major 4x4 from HL entity origin + angles (no scale).
++// Same yaw/pitch/roll order as Matrix4x4_CreateFromEntity.
++static void vklite_entity_model_matrix( const vec3_t origin, const vec3_t angles,
++                                         float M[16] )
++{
++	float p = angles[0] * (float)M_PI / 180.0f;
++	float y = angles[1] * (float)M_PI / 180.0f;
++	float r = angles[2] * (float)M_PI / 180.0f;
++	float sp = sinf( p ), cp = cosf( p );
++	float sy = sinf( y ), cy = cosf( y );
++	float sr = sinf( r ), cr = cosf( r );
++
++	// Row-major rotation, then write column-major.
++	float R[3][3] = {
++		{ cp*cy,           sr*sp*cy + cr*-sy,  cr*sp*cy + -sr*-sy },
++		{ cp*sy,           sr*sp*sy + cr*cy,   cr*sp*sy + -sr*cy  },
++		{ -sp,             sr*cp,              cr*cp              }
++	};
++	M[ 0] = R[0][0]; M[ 1] = R[1][0]; M[ 2] = R[2][0]; M[ 3] = 0.0f;
++	M[ 4] = R[0][1]; M[ 5] = R[1][1]; M[ 6] = R[2][1]; M[ 7] = 0.0f;
++	M[ 8] = R[0][2]; M[ 9] = R[1][2]; M[10] = R[2][2]; M[11] = 0.0f;
++	M[12] = origin[0]; M[13] = origin[1]; M[14] = origin[2]; M[15] = 1.0f;
++}
++
++static void vklite_mat4_mul( const float A[16], const float B[16], float out[16] )
++{
++	for( int c = 0; c < 4; ++c )
++	for( int r = 0; r < 4; ++r ) {
++		float s = 0.0f;
++		for( int k = 0; k < 4; ++k )
++			s += A[k * 4 + r] * B[c * 4 + k];
++		out[c * 4 + r] = s;
++	}
++}
 +
 +static void R_VKLite_NewMap( void )
 +{
@@ -1106,7 +1161,27 @@ index 0000000..f8dc9d3
 +
 +	float mvp[16];
 +	vklite_build_mvp( rvp, mvp );
-+	lambda_bridge_record_world( mvp );
++
++	// Draw worldmodel (submodel 0). cl->models[1]->firstmodelsurface = 0,
++	// nummodelsurfaces = N — covers the static world but not brush ents.
++	model_t *world = vklite_get_worldmodel();
++	if( world ) {
++		lambda_bridge_record_world_range( mvp,
++			world->firstmodelsurface, world->nummodelsurfaces );
++	}
++
++	// Draw each captured brush entity with its own transform.
++	for( int i = 0; i < g_vklite_brush_ent_count; ++i ) {
++		cl_entity_t *ent = g_vklite_brush_ents[i];
++		if( !ent->model || ent->model->type != mod_brush ) continue;
++		if( ent->model->nummodelsurfaces <= 0 ) continue;
++
++		float M_ent[16], mvp_ent[16];
++		vklite_entity_model_matrix( ent->origin, ent->angles, M_ent );
++		vklite_mat4_mul( mvp, M_ent, mvp_ent );
++		lambda_bridge_record_world_range( mvp_ent,
++			ent->model->firstmodelsurface, ent->model->nummodelsurfaces );
++	}
 +}
 +
 +static void GL_OrthoBounds( const float *mins, const float *maxs )
@@ -1178,7 +1253,7 @@ index 0000000..f8dc9d3
 +	.R_AllowFog       = R_SimpleStubBool,
 +	.GL_SetRenderMode = R_SimpleStubInt,
 +
-+	.R_AddEntity      = R_AddEntity,
++	.R_AddEntity      = R_AddEntity_VKLite,
 +	.R_ProcessEntData = R_ProcessEntData,
 +
 +	.R_ShowTextures = R_SimpleStub,
@@ -1242,7 +1317,7 @@ index 0000000..f8dc9d3
 +	.R_SpeedsMessage   = R_SpeedsMessage,
 +	.Mod_GetCurrentVis = Mod_GetCurrentVis,
 +	.R_NewMap          = R_VKLite_NewMap,
-+	.R_ClearScene      = R_SimpleStub,
++	.R_ClearScene      = R_VKLite_ClearScene,
 +
 +	.TriRenderMode = R_SimpleStubInt,
 +	.Begin         = R_SimpleStubInt,
