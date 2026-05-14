@@ -120,6 +120,12 @@ void lambda_bridge_record_draw_stretch_pic(float x, float y, float w, float h,
                                            uint8_t r, uint8_t g, uint8_t b, uint8_t a,
                                            uint32_t texture_handle);
 
+// Stage D1: render 3 colored debug-axis lines through the origin (X=red,
+// Y=green, Z=blue, +/- 64 world units) using the supplied column-major
+// MVP matrix. Requires an active frame; the slot now has a depth buffer
+// so 3D draws z-occlude correctly.
+void lambda_bridge_record_debug_axes(const float mvp_col_major[16]);
+
 // Phase 2c: xash3d-fwgs engine wiring. The engine normally owns main()
 // + a while loop calling COM_Frame; we patched it into a frame-driven
 // surface (Host_DoInit / Host_DoFrame / Host_Shutdown) so visionOS can

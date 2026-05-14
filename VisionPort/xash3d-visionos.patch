@@ -436,10 +436,10 @@ index 302548a..399a05a 100644
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
 new file mode 100644
-index 0000000..134485d
+index 0000000..ea5b458
 --- /dev/null
 +++ b/ref/vklite/r_context.c
-@@ -0,0 +1,631 @@
+@@ -0,0 +1,690 @@
 +/*
 +r_context.c -- null renderer context
 +Copyright (C) 2023-2024 a1batross
@@ -462,6 +462,7 @@ index 0000000..134485d
 +#include "cvardef.h"
 +#include "xash3d_mathlib.h"
 +#include "ref_api.h"
++#include "ref_params.h"
 +
 +/*
 + * this initially was made to be able to run full client
@@ -496,6 +497,7 @@ index 0000000..134485d
 +                                                          unsigned char r, unsigned char g,
 +                                                          unsigned char b, unsigned char a,
 +                                                          unsigned int texture_handle );
++extern void        lambda_bridge_record_debug_axes( const float mvp[16] );
 +
 +// ref_vklite texture table. Slot 0 reserved as "no texture"; engine treats
 +// texnum == 0 as invalid.
@@ -904,9 +906,66 @@ index 0000000..134485d
 +}
 +
 +
++// Build column-major MVP for ref_viewpass_t rvp. HL world convention:
++// X forward, Y left, Z up. We map to a Vulkan camera that looks down its
++// +Z, with +X right and +Y down (default NDC). Near/far chosen large
++// enough to cover any HL map.
++static void vklite_build_mvp( const struct ref_viewpass_s *rvp, float mvp[16] )
++{
++	vec3_t fwd, right, up;
++	AngleVectors( rvp->viewangles, fwd, right, up );
++
++	// Camera basis in world space:
++	//   camRight  =  right  (engine right = world -Y)
++	//   camDown   = -up     (Vulkan +Y points down)
++	//   camFwd    =  fwd
++	float cr[3] = { right[0], right[1], right[2] };
++	float cd[3] = { -up[0],   -up[1],   -up[2] };
++	float cf[3] = { fwd[0],   fwd[1],   fwd[2] };
++	const float *o = rvp->vieworigin;
++
++	// View matrix (world -> camera). Column-major.
++	float V[16] = {
++		cr[0], cd[0], cf[0], 0.0f,
++		cr[1], cd[1], cf[1], 0.0f,
++		cr[2], cd[2], cf[2], 0.0f,
++		-(cr[0]*o[0] + cr[1]*o[1] + cr[2]*o[2]),
++		-(cd[0]*o[0] + cd[1]*o[1] + cd[2]*o[2]),
++		-(cf[0]*o[0] + cf[1]*o[1] + cf[2]*o[2]),
++		1.0f
++	};
++
++	// Perspective (Vulkan, depth [0,1]).
++	float fovx = rvp->fov_x ? rvp->fov_x : 90.0f;
++	float fovy = rvp->fov_y ? rvp->fov_y : 60.0f;
++	float fx = 1.0f / tanf( fovx * 0.5f * (float)M_PI / 180.0f );
++	float fy = 1.0f / tanf( fovy * 0.5f * (float)M_PI / 180.0f );
++	const float zn = 4.0f, zf = 16384.0f;
++	float a = zf / ( zf - zn );
++	float b = -( zn * zf ) / ( zf - zn );
++	float P[16] = {
++		fx,  0,   0,   0,
++		0,   fy,  0,   0,
++		0,   0,   a,   1,
++		0,   0,   b,   0
++	};
++
++	// mvp = P * V  (column-major mul).
++	for( int c = 0; c < 4; ++c )
++	for( int r = 0; r < 4; ++r ) {
++		float s = 0.0f;
++		for( int k = 0; k < 4; ++k )
++			s += P[k * 4 + r] * V[c * 4 + k];
++		mvp[c * 4 + r] = s;
++	}
++}
++
 +static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
 +{
-+	;
++	if( !rvp ) return;
++	float mvp[16];
++	vklite_build_mvp( rvp, mvp );
++	lambda_bridge_record_debug_axes( mvp );
 +}
 +
 +static void GL_OrthoBounds( const float *mins, const float *maxs )

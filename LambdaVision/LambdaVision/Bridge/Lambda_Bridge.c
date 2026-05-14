@@ -120,6 +120,10 @@ static VkDescriptorSetLayout g_texDSL      = VK_NULL_HANDLE;
 static VkDescriptorPool      g_texDescPool = VK_NULL_HANDLE;
 static VkPipelineLayout      g_texQuadPipelineLayout = VK_NULL_HANDLE;
 static VkPipeline            g_texQuadPipeline       = VK_NULL_HANDLE;
+static VkPipelineLayout      g_axesPipelineLayout    = VK_NULL_HANDLE;
+static VkPipeline            g_axesPipeline          = VK_NULL_HANDLE;
+static VkBuffer              g_axesVB                = VK_NULL_HANDLE;
+static VkDeviceMemory        g_axesVBMem             = VK_NULL_HANDLE;
 static PFN_vkDestroyInstance     g_pfnDestroyInstance     = NULL;
 static PFN_vkDestroyDevice       g_pfnDestroyDevice       = NULL;
 static PFN_vkGetDeviceProcAddr   g_pfnGetDeviceProcAddr   = NULL;
@@ -523,12 +527,29 @@ typedef struct {
     VkImage         image;
     VkImageView     view;
     VkDeviceMemory  memory;
+    VkImage         depthImage;
+    VkImageView     depthView;
+    VkDeviceMemory  depthMemory;
     VkCommandBuffer cmd;
     int             width;
     int             height;
 } EyeSlot;
 
 static EyeSlot g_pool[POOL_SLOTS][POOL_EYES];
+
+static uint32_t find_memory_type(uint32_t typeBits, VkMemoryPropertyFlags required) {
+    PFN_vkGetPhysicalDeviceMemoryProperties pfnMP =
+        (PFN_vkGetPhysicalDeviceMemoryProperties)
+        vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!pfnMP) return UINT32_MAX;
+    VkPhysicalDeviceMemoryProperties mp;
+    pfnMP(g_phys, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if (!(typeBits & (1u << i))) continue;
+        if ((mp.memoryTypes[i].propertyFlags & required) == required) return i;
+    }
+    return UINT32_MAX;
+}
 
 static void destroy_eye_slot(EyeSlot *e) {
     DEVFN(vkFreeCommandBuffers);
@@ -538,6 +559,9 @@ static void destroy_eye_slot(EyeSlot *e) {
     if (e->cmd && g_cmdPool) {
         pfn_vkFreeCommandBuffers(g_device, g_cmdPool, 1, &e->cmd);
     }
+    if (e->depthView) pfn_vkDestroyImageView(g_device, e->depthView, NULL);
+    if (e->depthImage) pfn_vkDestroyImage(g_device, e->depthImage, NULL);
+    if (e->depthMemory) pfn_vkFreeMemory(g_device, e->depthMemory, NULL);
     if (e->view) pfn_vkDestroyImageView(g_device, e->view, NULL);
     if (e->image) pfn_vkDestroyImage(g_device, e->image, NULL);
     if (e->memory) pfn_vkFreeMemory(g_device, e->memory, NULL);
@@ -647,14 +671,74 @@ static bool alloc_eye_slot(EyeSlot *e, int w, int h) {
         return false;
     }
 
+    // Depth buffer (D32_SFLOAT, device-local). World 3D pipelines depth-test
+    // against this; 2D pipelines explicitly disable depth.
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkImageView depthView = VK_NULL_HANDLE;
+    VkDeviceMemory depthMem = VK_NULL_HANDLE;
+    {
+        VkImageCreateInfo dici = {0};
+        dici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        dici.imageType = VK_IMAGE_TYPE_2D;
+        dici.format = VK_FORMAT_D32_SFLOAT;
+        dici.extent.width = (uint32_t)w;
+        dici.extent.height = (uint32_t)h;
+        dici.extent.depth = 1;
+        dici.mipLevels = 1;
+        dici.arrayLayers = 1;
+        dici.samples = VK_SAMPLE_COUNT_1_BIT;
+        dici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        dici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        dici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        DEVFN(vkCreateImage);
+        if (pfn_vkCreateImage(g_device, &dici, NULL, &depthImage) != VK_SUCCESS) goto depth_fail;
+        VkMemoryRequirements dreq;
+        DEVFN(vkGetImageMemoryRequirements);
+        pfn_vkGetImageMemoryRequirements(g_device, depthImage, &dreq);
+        uint32_t dmt = find_memory_type(dreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (dmt == UINT32_MAX) dmt = 0;
+        VkMemoryAllocateInfo dmai = {0};
+        dmai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        dmai.allocationSize = dreq.size;
+        dmai.memoryTypeIndex = dmt;
+        DEVFN(vkAllocateMemory);
+        DEVFN(vkBindImageMemory);
+        if (pfn_vkAllocateMemory(g_device, &dmai, NULL, &depthMem) != VK_SUCCESS) goto depth_fail;
+        pfn_vkBindImageMemory(g_device, depthImage, depthMem, 0);
+        VkImageViewCreateInfo divci = {0};
+        divci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        divci.image = depthImage;
+        divci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        divci.format = VK_FORMAT_D32_SFLOAT;
+        divci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        divci.subresourceRange.levelCount = 1;
+        divci.subresourceRange.layerCount = 1;
+        DEVFN(vkCreateImageView);
+        if (pfn_vkCreateImageView(g_device, &divci, NULL, &depthView) != VK_SUCCESS) goto depth_fail;
+    }
+
     e->surface = surface;
     e->image = image;
     e->view = view;
     e->memory = memory;
+    e->depthImage = depthImage;
+    e->depthView = depthView;
+    e->depthMemory = depthMem;
     e->cmd = cb;
     e->width = w;
     e->height = h;
     return true;
+
+depth_fail:
+    { DEVFN(vkDestroyImageView); DEVFN(vkDestroyImage); DEVFN(vkFreeMemory);
+      if (depthView) pfn_vkDestroyImageView(g_device, depthView, NULL);
+      if (depthImage) pfn_vkDestroyImage(g_device, depthImage, NULL);
+      if (depthMem) pfn_vkFreeMemory(g_device, depthMem, NULL);
+      pfn_vkDestroyImageView(g_device, view, NULL);
+      pfn_vkFreeMemory(g_device, memory, NULL);
+      pfn_vkDestroyImage(g_device, image, NULL); }
+    CFRelease(surface);
+    return false;
 }
 
 static bool ensure_tri_pipeline(void) {
@@ -753,6 +837,7 @@ static bool ensure_tri_pipeline(void) {
     prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     prCi.colorAttachmentCount = 1;
     prCi.pColorAttachmentFormats = &colorFmt;
+    prCi.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
 
     VkGraphicsPipelineCreateInfo gpCi = {0};
     gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -766,6 +851,9 @@ static bool ensure_tri_pipeline(void) {
     gpCi.pMultisampleState = &ms;
     gpCi.pColorBlendState = &cb;
     gpCi.pDynamicState = &dyn;
+    VkPipelineDepthStencilStateCreateInfo dsOff = {0};
+    dsOff.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    gpCi.pDepthStencilState = &dsOff;
     gpCi.layout = g_triPipelineLayout;
     gpCi.renderPass = VK_NULL_HANDLE;  // dynamic rendering
 
@@ -874,6 +962,7 @@ static bool ensure_quad_pipeline(void) {
     prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     prCi.colorAttachmentCount = 1;
     prCi.pColorAttachmentFormats = &colorFmt;
+    prCi.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
 
     VkGraphicsPipelineCreateInfo gpCi = {0};
     gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -886,26 +975,15 @@ static bool ensure_quad_pipeline(void) {
     gpCi.pMultisampleState = &ms;
     gpCi.pColorBlendState = &cb;
     gpCi.pDynamicState = &dyn;
+    VkPipelineDepthStencilStateCreateInfo dsOff = {0};
+    dsOff.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    gpCi.pDepthStencilState = &dsOff;
     gpCi.layout = g_quadPipelineLayout;
 
     VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_quadPipeline);
     pfn_vkDestroyShaderModule(g_device, fsm, NULL);
     pfn_vkDestroyShaderModule(g_device, vsm, NULL);
     return pres == VK_SUCCESS;
-}
-
-static uint32_t find_memory_type(uint32_t typeBits, VkMemoryPropertyFlags required) {
-    PFN_vkGetPhysicalDeviceMemoryProperties pfnMP =
-        (PFN_vkGetPhysicalDeviceMemoryProperties)
-        vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceMemoryProperties");
-    if (!pfnMP) return UINT32_MAX;
-    VkPhysicalDeviceMemoryProperties mp;
-    pfnMP(g_phys, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-        if (!(typeBits & (1u << i))) continue;
-        if ((mp.memoryTypes[i].propertyFlags & required) == required) return i;
-    }
-    return UINT32_MAX;
 }
 
 static bool ensure_tex_pipeline(void) {
@@ -1035,6 +1113,7 @@ static bool ensure_tex_pipeline(void) {
     prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     prCi.colorAttachmentCount = 1;
     prCi.pColorAttachmentFormats = &colorFmt;
+    prCi.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
 
     VkGraphicsPipelineCreateInfo gpCi = {0};
     gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1047,6 +1126,9 @@ static bool ensure_tex_pipeline(void) {
     gpCi.pMultisampleState = &ms;
     gpCi.pColorBlendState = &cb;
     gpCi.pDynamicState = &dyn;
+    VkPipelineDepthStencilStateCreateInfo dsOff = {0};
+    dsOff.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    gpCi.pDepthStencilState = &dsOff;
     gpCi.layout = g_texQuadPipelineLayout;
     VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_texQuadPipeline);
     pfn_vkDestroyShaderModule(g_device, fsm, NULL);
@@ -1315,6 +1397,203 @@ void lambda_bridge_record_draw_stretch_pic(float x, float y, float w, float h,
     pfn_vkCmdDraw(g_active_cmd, 6, 1, 0, 0);
 }
 
+// === Stage D1: world-space line pipeline + debug axes ====================
+
+static bool ensure_axes_buffer(void) {
+    if (g_axesVB) return true;
+    DEVFN(vkCreateBuffer);
+    DEVFN(vkDestroyBuffer);
+    DEVFN(vkGetBufferMemoryRequirements);
+    DEVFN(vkAllocateMemory);
+    DEVFN(vkBindBufferMemory);
+    DEVFN(vkMapMemory);
+    DEVFN(vkUnmapMemory);
+
+    // 6 verts (3 line segments). Each vert: 3 floats pos + 4 floats color.
+    // HL world coords: X forward, Y left, Z up. Use a very long length so
+    // the axes cross close to the player no matter where they spawn; we
+    // care about visibility, not realism.
+    const float L = 4096.0f;
+    const float verts[6 * 7] = {
+        // X axis (red)
+        0,0,0,  1,0,0,1,   L,0,0,  1,0,0,1,
+        // Y axis (green)
+        0,0,0,  0,1,0,1,   0,L,0,  0,1,0,1,
+        // Z axis (blue)
+        0,0,0,  0,0,1,1,   0,0,L,  0,0,1,1,
+    };
+
+    VkBufferCreateInfo bci = {0};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = sizeof(verts);
+    bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (pfn_vkCreateBuffer(g_device, &bci, NULL, &g_axesVB) != VK_SUCCESS) return false;
+
+    VkMemoryRequirements req;
+    pfn_vkGetBufferMemoryRequirements(g_device, g_axesVB, &req);
+    uint32_t mt = find_memory_type(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mt == UINT32_MAX) mt = 0;
+    VkMemoryAllocateInfo mai = {0};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = mt;
+    if (pfn_vkAllocateMemory(g_device, &mai, NULL, &g_axesVBMem) != VK_SUCCESS) {
+        pfn_vkDestroyBuffer(g_device, g_axesVB, NULL);
+        g_axesVB = VK_NULL_HANDLE;
+        return false;
+    }
+    pfn_vkBindBufferMemory(g_device, g_axesVB, g_axesVBMem, 0);
+    void *mapped = NULL;
+    pfn_vkMapMemory(g_device, g_axesVBMem, 0, sizeof(verts), 0, &mapped);
+    memcpy(mapped, verts, sizeof(verts));
+    pfn_vkUnmapMemory(g_device, g_axesVBMem);
+    return true;
+}
+
+static bool ensure_axes_pipeline(void) {
+    if (g_axesPipeline) return true;
+    if (!g_hasDynamicRender) return false;
+    if (!ensure_axes_buffer()) return false;
+
+    DEVFN(vkCreateShaderModule);
+    DEVFN(vkDestroyShaderModule);
+    DEVFN(vkCreatePipelineLayout);
+    DEVFN(vkCreateGraphicsPipelines);
+
+    VkShaderModuleCreateInfo vsmCi = {0};
+    vsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vsmCi.codeSize = axes_vert_spv_len;
+    vsmCi.pCode = (const uint32_t *)axes_vert_spv;
+    VkShaderModule vsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &vsmCi, NULL, &vsm) != VK_SUCCESS) return false;
+    VkShaderModuleCreateInfo fsmCi = {0};
+    fsmCi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    fsmCi.codeSize = axes_frag_spv_len;
+    fsmCi.pCode = (const uint32_t *)axes_frag_spv;
+    VkShaderModule fsm = VK_NULL_HANDLE;
+    if (pfn_vkCreateShaderModule(g_device, &fsmCi, NULL, &fsm) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPushConstantRange pcRange = {0};
+    pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pcRange.offset = 0;
+    pcRange.size = sizeof(float) * 16; // mat4 mvp
+    VkPipelineLayoutCreateInfo plCi = {0};
+    plCi.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plCi.pushConstantRangeCount = 1;
+    plCi.pPushConstantRanges = &pcRange;
+    if (pfn_vkCreatePipelineLayout(g_device, &plCi, NULL, &g_axesPipelineLayout) != VK_SUCCESS) {
+        pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+        pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+        return false;
+    }
+
+    VkPipelineShaderStageCreateInfo stages[2] = {0};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vsm; stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fsm; stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vbind = {0};
+    vbind.binding = 0;
+    vbind.stride = sizeof(float) * 7;
+    vbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription vattrs[2] = {0};
+    vattrs[0].location = 0; vattrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;     vattrs[0].offset = 0;
+    vattrs[1].location = 1; vattrs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;  vattrs[1].offset = sizeof(float) * 3;
+    VkPipelineVertexInputStateCreateInfo vi = {0};
+    vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &vbind;
+    vi.vertexAttributeDescriptionCount = 2;
+    vi.pVertexAttributeDescriptions = vattrs;
+
+    VkPipelineInputAssemblyStateCreateInfo ia = {0};
+    ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+    VkPipelineViewportStateCreateInfo vp = {0};
+    vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.viewportCount = 1; vp.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rs = {0};
+    rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo ms = {0};
+    ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAtt = {0};
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb = {0};
+    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb.attachmentCount = 1; cb.pAttachments = &blendAtt;
+
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn = {0};
+    dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+    VkPipelineDepthStencilStateCreateInfo ds = {0};
+    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkFormat colorFmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+    VkPipelineRenderingCreateInfoKHR prCi = {0};
+    prCi.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+    prCi.colorAttachmentCount = 1;
+    prCi.pColorAttachmentFormats = &colorFmt;
+    prCi.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
+
+    VkGraphicsPipelineCreateInfo gpCi = {0};
+    gpCi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gpCi.pNext = &prCi;
+    gpCi.stageCount = 2; gpCi.pStages = stages;
+    gpCi.pVertexInputState = &vi;
+    gpCi.pInputAssemblyState = &ia;
+    gpCi.pViewportState = &vp;
+    gpCi.pRasterizationState = &rs;
+    gpCi.pMultisampleState = &ms;
+    gpCi.pColorBlendState = &cb;
+    gpCi.pDynamicState = &dyn;
+    gpCi.pDepthStencilState = &ds;
+    gpCi.layout = g_axesPipelineLayout;
+    VkResult pres = pfn_vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &gpCi, NULL, &g_axesPipeline);
+    pfn_vkDestroyShaderModule(g_device, fsm, NULL);
+    pfn_vkDestroyShaderModule(g_device, vsm, NULL);
+    return pres == VK_SUCCESS;
+}
+
+void lambda_bridge_record_debug_axes(const float mvp[16]) {
+    if (g_active_slot < 0) return;
+    if (!ensure_axes_pipeline()) return;
+
+    DEVFN(vkCmdBindPipeline);
+    DEVFN(vkCmdBindVertexBuffers);
+    DEVFN(vkCmdPushConstants);
+    DEVFN(vkCmdDraw);
+
+    pfn_vkCmdBindPipeline(g_active_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_axesPipeline);
+    VkDeviceSize zero = 0;
+    pfn_vkCmdBindVertexBuffers(g_active_cmd, 0, 1, &g_axesVB, &zero);
+    pfn_vkCmdPushConstants(g_active_cmd, g_axesPipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16, mvp);
+    pfn_vkCmdDraw(g_active_cmd, 6, 1, 0, 0);
+}
+
 void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
                                     uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (g_active_slot < 0) return;
@@ -1342,14 +1621,19 @@ void lambda_bridge_record_fill_rgba(float x, float y, float w, float h,
     pfn_vkCmdDraw(g_active_cmd, 6, 1, 0, 0);
 }
 
+// Legacy entry retained only for Renderer.swift's makeVulkanColorMap, which
+// needs an IOSurface handle bound into the demo cube/panel before the engine
+// runs its first frame. Stage C1 split rendering into begin_frame/end_frame;
+// this fn now just primes the slot and hands back the IOSurface. (r,g,b,time)
+// arguments are ignored.
 const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
                                             int width, int height,
                                             float r, float g, float b,
                                             float time) {
+    (void)r; (void)g; (void)b; (void)time;
     if (!g_device || !g_cmdPool || !g_hasMetalObjects) return NULL;
     if (!g_hasDynamicRender) return NULL;
     if (slot < 0 || slot >= POOL_SLOTS || eye < 0 || eye >= POOL_EYES) return NULL;
-    if (!ensure_tri_pipeline()) return NULL;
 
     EyeSlot *e = &g_pool[slot][eye];
     if (e->surface && (e->width != width || e->height != height)) {
@@ -1358,6 +1642,11 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
     if (!e->surface) {
         if (!alloc_eye_slot(e, width, height)) return NULL;
     }
+    return (const void *)e->surface;
+}
+
+// Old body retained below temporarily for diff clarity; unreachable.
+#if 0
 
     DEVFN(vkBeginCommandBuffer);
     DEVFN(vkEndCommandBuffer);
@@ -1459,6 +1748,7 @@ const void *lambda_vulkan_render_eye_pooled(int slot, int eye,
 
     return (const void *)e->surface;
 }
+#endif
 
 // =====================================================================
 // Stage C1: engine-driven recording. begin_frame/end_frame bracket a
@@ -1472,7 +1762,6 @@ int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
     if (!g_device || !g_cmdPool || !g_hasMetalObjects) return -1;
     if (!g_hasDynamicRender) return -2;
     if (slot < 0 || slot >= POOL_SLOTS || eye < 0 || eye >= POOL_EYES) return -3;
-    if (!ensure_tri_pipeline()) return -4; // ensures pipeline cache exists for C2+
     if (g_active_slot != -1) return -5;    // frame already in progress
 
     EyeSlot *e = &g_pool[slot][eye];
@@ -1501,18 +1790,26 @@ int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
     range.levelCount = 1;
     range.layerCount = 1;
 
-    VkImageMemoryBarrier toAtt = {0};
-    toAtt.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toAtt.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    toAtt.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    toAtt.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toAtt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toAtt.image = e->image;
-    toAtt.subresourceRange = range;
-    toAtt.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkImageMemoryBarrier toAtt[2] = {0};
+    toAtt[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toAtt[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toAtt[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAtt[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt[0].image = e->image;
+    toAtt[0].subresourceRange = range;
+    toAtt[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toAtt[1] = toAtt[0];
+    toAtt[1].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    toAtt[1].image = e->depthImage;
+    toAtt[1].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    toAtt[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    toAtt[1].subresourceRange.levelCount = 1;
+    toAtt[1].subresourceRange.layerCount = 1;
     pfn_vkCmdPipelineBarrier(e->cmd,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0, 0, NULL, 0, NULL, 1, &toAtt);
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        0, 0, NULL, 0, NULL, 2, toAtt);
 
     VkRenderingAttachmentInfoKHR colorAtt = {0};
     colorAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
@@ -1525,6 +1822,14 @@ int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
     colorAtt.clearValue.color.float32[2] = b;
     colorAtt.clearValue.color.float32[3] = 1.0f;
 
+    VkRenderingAttachmentInfoKHR depthAtt = {0};
+    depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+    depthAtt.imageView = e->depthView;
+    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAtt.clearValue.depthStencil.depth = 1.0f;
+
     VkRenderingInfoKHR ri = {0};
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
     ri.renderArea.extent.width = (uint32_t)width;
@@ -1532,6 +1837,7 @@ int lambda_bridge_begin_frame(int slot, int eye, int width, int height,
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &colorAtt;
+    ri.pDepthAttachment = &depthAtt;
     g_pfnCmdBeginRendering(e->cmd, &ri);
 
     VkViewport vpRect = {0};
@@ -1608,6 +1914,18 @@ void lambda_vulkan_release_pool(void) {
     }
     for (int i = 0; i < TEX_POOL_MAX; ++i) {
         if (g_textures[i].used) lambda_bridge_destroy_texture((uint32_t)(i + 1));
+    }
+    if (g_axesVB || g_axesVBMem || g_axesPipeline) {
+        DEVFN(vkDestroyBuffer);
+        DEVFN(vkFreeMemory);
+        DEVFN(vkDestroyPipeline);
+        DEVFN(vkDestroyPipelineLayout);
+        if (g_axesPipeline) pfn_vkDestroyPipeline(g_device, g_axesPipeline, NULL);
+        if (g_axesPipelineLayout) pfn_vkDestroyPipelineLayout(g_device, g_axesPipelineLayout, NULL);
+        if (g_axesVB) pfn_vkDestroyBuffer(g_device, g_axesVB, NULL);
+        if (g_axesVBMem) pfn_vkFreeMemory(g_device, g_axesVBMem, NULL);
+        g_axesPipeline = VK_NULL_HANDLE; g_axesPipelineLayout = VK_NULL_HANDLE;
+        g_axesVB = VK_NULL_HANDLE; g_axesVBMem = VK_NULL_HANDLE;
     }
     if (g_triPipeline || g_quadPipeline || g_texQuadPipeline) {
         DEVFN(vkDestroyPipeline);
