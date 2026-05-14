@@ -2302,3 +2302,108 @@ void lambda_engine_shutdown(void) {
     Host_Shutdown();
     g_engine_inited = 0;
 }
+
+// ---- ANGLE / EGL smoke test ----------------------------------------------
+//
+// ANGLE's Metal backend is requested via eglGetPlatformDisplay with
+// EGL_PLATFORM_ANGLE_TYPE_ANGLE_METAL. We make a context current on a 1x1
+// pbuffer surface (avoids needing EGL_KHR_surfaceless_context) and read
+// back the GL strings to confirm the libGLESv2_static + libEGL_static .a
+// objects link, dispatch, and produce a working Metal-backed context inside
+// the visionOS app sandbox. No CompositorServices integration yet.
+
+#define EGL_EGLEXT_PROTOTYPES
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <EGL/eglext_angle.h>
+#include <GLES2/gl2.h>
+
+int lambda_gl_smoke_test(char *status_out, int status_cap) {
+    const EGLint disp_attribs[] = {
+        EGL_PLATFORM_ANGLE_TYPE_ANGLE,
+        EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+        EGL_NONE
+    };
+    EGLDisplay disp = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE,
+                                            EGL_DEFAULT_DISPLAY,
+                                            disp_attribs);
+    if (disp == EGL_NO_DISPLAY) {
+        snprintf(status_out, status_cap,
+                 "eglGetPlatformDisplay → NO_DISPLAY (err=0x%x)", eglGetError());
+        return -1;
+    }
+
+    EGLint major = 0, minor = 0;
+    if (!eglInitialize(disp, &major, &minor)) {
+        snprintf(status_out, status_cap,
+                 "eglInitialize failed (err=0x%x)", eglGetError());
+        return -2;
+    }
+
+    const EGLint cfg_attribs[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+        EGL_RED_SIZE,        8,
+        EGL_GREEN_SIZE,      8,
+        EGL_BLUE_SIZE,       8,
+        EGL_ALPHA_SIZE,      8,
+        EGL_NONE
+    };
+    EGLConfig cfg = NULL;
+    EGLint num_cfgs = 0;
+    if (!eglChooseConfig(disp, cfg_attribs, &cfg, 1, &num_cfgs) || num_cfgs < 1) {
+        snprintf(status_out, status_cap,
+                 "eglChooseConfig → %d configs (err=0x%x)", num_cfgs, eglGetError());
+        eglTerminate(disp);
+        return -3;
+    }
+
+    const EGLint ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
+    };
+    EGLContext ctx = eglCreateContext(disp, cfg, EGL_NO_CONTEXT, ctx_attribs);
+    if (ctx == EGL_NO_CONTEXT) {
+        snprintf(status_out, status_cap,
+                 "eglCreateContext failed (err=0x%x)", eglGetError());
+        eglTerminate(disp);
+        return -4;
+    }
+
+    const EGLint surf_attribs[] = {
+        EGL_WIDTH,  1,
+        EGL_HEIGHT, 1,
+        EGL_NONE
+    };
+    EGLSurface surf = eglCreatePbufferSurface(disp, cfg, surf_attribs);
+    if (surf == EGL_NO_SURFACE) {
+        snprintf(status_out, status_cap,
+                 "eglCreatePbufferSurface failed (err=0x%x)", eglGetError());
+        eglDestroyContext(disp, ctx);
+        eglTerminate(disp);
+        return -5;
+    }
+
+    if (!eglMakeCurrent(disp, surf, surf, ctx)) {
+        snprintf(status_out, status_cap,
+                 "eglMakeCurrent failed (err=0x%x)", eglGetError());
+        eglDestroySurface(disp, surf);
+        eglDestroyContext(disp, ctx);
+        eglTerminate(disp);
+        return -6;
+    }
+
+    const char *ver = (const char *)glGetString(GL_VERSION);
+    const char *rnd = (const char *)glGetString(GL_RENDERER);
+    const char *ven = (const char *)glGetString(GL_VENDOR);
+    snprintf(status_out, status_cap,
+             "EGL %d.%d / %s / %s / %s",
+             major, minor,
+             ven ? ven : "?", rnd ? rnd : "?", ver ? ver : "?");
+
+    eglMakeCurrent(disp, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroySurface(disp, surf);
+    eglDestroyContext(disp, ctx);
+    eglTerminate(disp);
+    return 0;
+}

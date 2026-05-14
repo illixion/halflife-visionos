@@ -177,6 +177,19 @@ int lambda_engine_frame(void);
 // Tears engine down. Idempotent.
 void lambda_engine_shutdown(void);
 
+// ---- ANGLE / EGL smoke test ----
+// Initializes EGL via ANGLE's Metal backend, makes a context current on a
+// 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,
+// tears down. Returns:
+//   0 on success
+//  -1 eglGetPlatformDisplay failed
+//  -2 eglInitialize failed
+//  -3 eglChooseConfig failed / no config
+//  -4 eglCreateContext failed
+//  -5 eglCreatePbufferSurface failed
+//  -6 eglMakeCurrent failed
+int lambda_gl_smoke_test(char *status_out, int status_cap);
+
 #ifdef __cplusplus
 }
 #endif

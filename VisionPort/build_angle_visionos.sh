@@ -41,7 +41,7 @@ fi
 
 # --- 3. gn gen + ninja for device and simulator ---
 cd "$ANGLE_ROOT/angle"
-COMMON_ARGS='target_os="ios" target_platform="xros" target_cpu="arm64" ios_deployment_target="2.0" is_debug=false is_component_build=false ios_enable_code_signing=false angle_enable_metal=true angle_enable_vulkan=false angle_enable_gl=false angle_enable_swiftshader=false angle_enable_null=false symbol_level=1'
+COMMON_ARGS='target_os="ios" target_platform="xros" target_cpu="arm64" ios_deployment_target="2.0" is_debug=false is_component_build=false ios_enable_code_signing=false angle_enable_metal=true angle_enable_vulkan=false angle_enable_gl=false angle_enable_swiftshader=false angle_enable_null=false angle_enable_wgpu=false symbol_level=1 use_custom_libcxx=false treat_warnings_as_errors=false'
 
 for variant in device simulator; do
     if [[ "$variant" == device ]]; then OUT=out/xrosDevice; else OUT=out/xrosSim; fi
@@ -57,11 +57,21 @@ for variant in xrosDevice xrosSim; do
     if [[ "$variant" == xrosDevice ]]; then NAME=libANGLE.a; else NAME=libANGLE-sim.a; fi
     cd "$ANGLE_ROOT/angle/out/$variant"
     OBJLIST=$(mktemp)
-    {
-        find obj/src -name '*.o' -not -path '*/volk/*'
-        find obj/third_party -name '*.o' \
-            -not -path '*/dawn/*' -not -path '*/volk/*' -not -path '*/googletest/*'
-    } > "$OBJLIST"
+    # Include every .o under obj/ except known-non-runtime paths:
+    #   - dawn (WebGPU, brings vk* symbols colliding with MoltenVK)
+    #   - volk (Vulkan loader, same collision)
+    #   - googletest/gmock/gtest/samples/tests (no runtime use)
+    #   - buildtools (build-time only)
+    find obj -name '*.o' \
+        -not -path '*/dawn/*' \
+        -not -path '*/volk/*' \
+        -not -path '*/googletest/*' \
+        -not -path '*/gmock/*' \
+        -not -path '*/gtest/*' \
+        -not -path '*/samples/*' \
+        -not -path '*/tests/*' \
+        -not -path '*/buildtools/*' \
+        > "$OBJLIST"
     libtool -static -filelist "$OBJLIST" -o "$OUT_DIR/$NAME" 2>&1 \
         | grep -v 'warning same member' || true
     rm -f "$OBJLIST"

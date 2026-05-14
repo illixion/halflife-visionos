@@ -284,6 +284,12 @@ actor Renderer {
     /// pooled bridge API at (slot=0, eye=0) so render() can re-render the
     /// same IOSurface in-place each frame.
     static func makeVulkanColorMap(device: MTLDevice) throws -> MTLTexture {
+        var glStatus = [CChar](repeating: 0, count: 384)
+        let glRc = glStatus.withUnsafeMutableBufferPointer { buf in
+            lambda_gl_smoke_test(buf.baseAddress, Int32(buf.count))
+        }
+        print("[LambdaVision] ANGLE smoke test rc=\(glRc): \(String(cString: glStatus))")
+
         var devStatus = [CChar](repeating: 0, count: 384)
         let rc = devStatus.withUnsafeMutableBufferPointer { buf in
             lambda_vulkan_create_device(buf.baseAddress, Int32(buf.count))

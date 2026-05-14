@@ -263,7 +263,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Vendor/MoltenVK_include";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Vendor/MoltenVK_include",
+					"$(SRCROOT)/Vendor/angle/include",
+				);
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -311,7 +314,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Vendor/MoltenVK_include";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Vendor/MoltenVK_include",
+					"$(SRCROOT)/Vendor/angle/include",
+				);
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
