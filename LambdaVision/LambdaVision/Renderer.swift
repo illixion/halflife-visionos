@@ -321,24 +321,20 @@ actor Renderer {
         }
         if rc != 0 { throw VulkanColorMapError.deviceInit(rc) }
 
-        let n = Int32(vulkanColorMapSize)
-        guard let surfacePtr = lambda_vulkan_render_eye_pooled(0, 0, n, n, 0.05, 0.05, 0.10, 0.0) else {
-            throw VulkanColorMapError.clearFailed("pooled render returned NULL")
-        }
-        let surface = Unmanaged<IOSurfaceRef>.fromOpaque(
-            UnsafeMutableRawPointer(mutating: surfacePtr)
-        ).takeUnretainedValue()
-        print("[LambdaVision] Vulkan colorMap: pooled (slot=0, eye=0) \(vulkanColorMapSize)x\(vulkanColorMapSize)")
-
+        // Option A: drop the Vulkan colorMap entirely. ANGLE renders into a
+        // Swift-allocated MTLTexture each frame; the existing Metal pipeline
+        // samples it just like before. Same scaffolding, GL is now the only
+        // pixel producer for the colorMap.
         let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba16Float, width: vulkanColorMapSize, height: vulkanColorMapSize, mipmapped: false)
-        desc.usage = [.shaderRead]
-        desc.storageMode = .shared
+            pixelFormat: .bgra8Unorm, width: vulkanColorMapSize, height: vulkanColorMapSize, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
 
-        guard let tex = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0) else {
+        guard let tex = device.makeTexture(descriptor: desc) else {
             throw VulkanColorMapError.wrapFailed
         }
-        tex.label = "VulkanIOSurfaceColorMap"
+        tex.label = "AngleColorMap"
+        print("[LambdaVision] GL colorMap: \(vulkanColorMapSize)x\(vulkanColorMapSize) bgra8Unorm via ANGLE")
         return tex
     }
 
@@ -443,10 +439,24 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
-        // Phase 2 Stage B: ticking the engine drives ref_vklite, which in
-        // turn calls lambda_vulkan_render_eye_pooled inside R_EndFrame. The
-        // pooled IOSurface (slot 0, eye 0) is sampled by the demo cube —
-        // animation here == proof the engine's render path reached present.
+        // Option A: per-frame GL render into the colorMap MTLTexture via
+        // ANGLE. Animated channels prove the render path is live (not just
+        // a static one-shot clear). Replaces the prior vklite-driven Vulkan
+        // refill of the same colorMap slot. Engine tick still runs so game
+        // logic advances even though its renderer isn't wired through here
+        // yet (that's option B).
+        let t = Float(drawable.frameTiming.presentationTime.timeInterval)
+        let cr = 0.5 + 0.5 * sin(t * 0.7)
+        let cg = 0.5 + 0.5 * sin(t * 1.1 + 2.0)
+        let cb = 0.5 + 0.5 * sin(t * 1.7 + 4.0)
+        let colorMapPtr = Unmanaged.passUnretained(colorMap).toOpaque()
+        var glClearStatus = [CChar](repeating: 0, count: 128)
+        _ = glClearStatus.withUnsafeMutableBufferPointer { buf in
+            lambda_gl_clear_mtl_texture(colorMapPtr,
+                                        Int32(colorMap.width), Int32(colorMap.height),
+                                        cr, cg, cb,
+                                        buf.baseAddress, Int32(buf.count))
+        }
         _ = lambda_engine_frame()
 
         let renderPassDescriptor = MTL4RenderPassDescriptor()
