@@ -221,6 +221,18 @@ int lambda_gl_worker_render_eye(int eye_index, float eye_offset,
                                 void *mtl_texture, int width, int height,
                                 float r, float g, float b);
 
+// Step 3b.1: install/clear asymmetric per-eye projection. Call
+// lambda_engine_set_projection_tangents() before each per-eye render and
+// lambda_engine_clear_projection_override() once the pair is done (or leave
+// active across frames — the renderer reads it every R_RenderFrame).
+//
+// tangents4: (tan(left), tan(right), tan(top), tan(bottom)) — all positive
+// magnitudes; frustum spans -left..+right and -bottom..+top at the near
+// plane (forward-Z OpenGL convention).
+void lambda_engine_set_projection_tangents(const float *tangents4,
+                                           float zNear, float zFar);
+void lambda_engine_clear_projection_override(void);
+
 // Posts an engine console command (Cbuf_AddText) onto the worker thread.
 // Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.
 int lambda_gl_worker_cmd(const char *cmd);

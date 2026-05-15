@@ -2320,6 +2320,33 @@ void lambda_engine_set_stereo_offset(float off) {
     cl_stereo_eye_offset = off;
 }
 
+// Step 3b.1: asymmetric per-eye projection from CompositorServices.
+// tangents4 is (tan_left, tan_right, tan_top, tan_bottom), all positive
+// magnitudes; the resulting frustum spans -left..+right and -bottom..+top
+// at the near plane. Forward-Z OpenGL convention (xash's depth pipeline).
+extern int   cl_stereo_proj_override_active;
+extern float cl_stereo_proj_override[16];
+void lambda_engine_set_projection_tangents(const float *tangents4,
+                                           float zNear, float zFar) {
+    float l = -tangents4[0] * zNear;
+    float r =  tangents4[1] * zNear;
+    float t =  tangents4[2] * zNear;
+    float b = -tangents4[3] * zNear;
+    float *P = cl_stereo_proj_override;
+    memset(P, 0, sizeof cl_stereo_proj_override);
+    P[0]  = (2.0f * zNear) / (r - l);
+    P[5]  = (2.0f * zNear) / (t - b);
+    P[8]  = (r + l) / (r - l);
+    P[9]  = (t + b) / (t - b);
+    P[10] = -(zFar + zNear) / (zFar - zNear);
+    P[11] = -1.0f;
+    P[14] = -(2.0f * zFar * zNear) / (zFar - zNear);
+    cl_stereo_proj_override_active = 1;
+}
+void lambda_engine_clear_projection_override(void) {
+    cl_stereo_proj_override_active = 0;
+}
+
 void lambda_engine_shutdown(void) {
     if (!g_engine_inited) return;
     Host_Shutdown();

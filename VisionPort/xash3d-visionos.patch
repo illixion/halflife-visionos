@@ -332,69 +332,149 @@ index 72bafc2..973d9bd 100644
  void Posix_Daemonize( void )
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-index 9624e29..5f14a9d 100644
---- a/engine/platform/visionos/vid_visionos.c
+new file mode 100644
+index 0000000..386cf5c
+--- /dev/null
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -9,17 +9,35 @@ entry points platform.h doesn't already inline-stub for non-SDL builds.
- 
- #include "platform/platform.h"
- #include "client.h"
+@@ -0,0 +1,138 @@
++/*
++vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
++
++CompositorServices owns the per-eye drawables; the host app's bridge feeds
++input/audio. The renderer (eventually ref_vk_lite) talks to MoltenVK directly.
++This file exists only to satisfy the engine's platform contract for the few
++entry points platform.h doesn't already inline-stub for non-SDL builds.
++*/
++
++#include "platform/platform.h"
++#include "client.h"
 +#include "ref_common.h"
 +#include <dlfcn.h>
- 
- #if XASH_VIDEO == VIDEO_VISIONOS
- 
++
++#if XASH_VIDEO == VIDEO_VISIONOS
++
 +// ANGLE's EGL is statically linked into the app exec. Declared here to
 +// avoid pulling EGL/egl.h (and its system-header dependencies) into the
 +// engine's include path.
 +extern void *eglGetProcAddress( const char *procname );
 +
- // ---- Video / VID -----------------------------------------------------------
- 
- qboolean R_Init_Video( ref_graphic_apis_t type )
- {
- 	(void)type;
- 	host.renderinfo_changed = false;
--	refState.width  = 1920;
--	refState.height = 1080;
-+	// Match ref_vklite's VKLITE_COLORMAP_SIZE so 2D pixel coords map 1:1
-+	// to the pooled IOSurface. Resolution can grow once cp_view-driven
-+	// per-eye targets land.
++// ---- Video / VID -----------------------------------------------------------
++
++qboolean R_Init_Video( ref_graphic_apis_t type )
++{
++	(void)type;
++	host.renderinfo_changed = false;
 +	refState.width  = 1024;
 +	refState.height = 1024;
-+	// SDL platforms call GL_InitExtensions() here after creating a real
-+	// GL context. We rely on the LambdaVision app to have already made
-+	// an ANGLE EGL context current before lambda_engine_init runs, so
-+	// the renderer's pgl* function pointers can resolve via dlsym/eglGet-
-+	// ProcAddress now. Skipping this leaves them all NULL → crash in
-+	// GL_SetDefaults's first pglFinish().
 +	if( ref.dllFuncs.GL_InitExtensions )
 +		ref.dllFuncs.GL_InitExtensions();
- 	return true;
- }
- 
-@@ -57,8 +75,19 @@ rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mod
- 
- void *GL_GetProcAddress( const char *name )
- {
--	(void)name;
--	return NULL;
-+	// ref_gles3compat resolves every pgl* via this hook. PREFER ANGLE's
-+	// eglGetProcAddress over dlsym(RTLD_DEFAULT). When linked with
-+	// libANGLE.a via -force_load, the GLES entry points (glGetString,
-+	// glCreateShader, ...) appear in the dyld symbol table BUT through
-+	// public-API wrappers that are inert until ANGLE-internal state is
-+	// fully set up. eglGetProcAddress returns the real dispatch-table
-+	// entry, which works as soon as a context is current. Symptom of
-+	// using dlsym: pglGetString returns NULL even though the direct
-+	// (link-time) glGetString call works on the same context+thread.
++	return true;
++}
++
++void R_Free_Video( void )
++{
++}
++
++qboolean VID_SetMode( void )
++{
++	return true;
++}
++
++void VID_Info_f( void )
++{
++	Con_Printf( "visionOS: CompositorServices owns the present (no window)\n" );
++}
++
++void VID_RestoreScreenResolution( window_mode_t window_mode )
++{
++	(void)window_mode;
++}
++
++void VID_SaveWindowSize( int width, int height, qboolean maximized )
++{
++	(void)width; (void)height; (void)maximized;
++}
++
++rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
++{
++	(void)window_mode;
++	refState.width  = width;
++	refState.height = height;
++	return rserr_ok;
++}
++
++void *GL_GetProcAddress( const char *name )
++{
 +	if( !name ) return NULL;
 +	void *fn = eglGetProcAddress( name );
 +	if( !fn ) fn = dlsym( RTLD_DEFAULT, name );
 +	return fn;
- }
- 
- int GL_SetAttribute( int attr, int val )
++}
++
++int GL_SetAttribute( int attr, int val )
++{
++	(void)attr; (void)val;
++	return 0;
++}
++
++int GL_GetAttribute( int attr, int *val )
++{
++	(void)attr;
++	if( val ) *val = 0;
++	return 0;
++}
++
++void GL_SwapBuffers( void )
++{
++}
++
++void GL_UpdateSwapInterval( void )
++{
++}
++
++int R_MaxVideoModes( void )
++{
++	return 0;
++}
++
++struct vidmode_s *R_GetVideoMode( int num )
++{
++	(void)num;
++	return NULL;
++}
++
++ref_window_type_t R_GetWindowHandle( void **handle, ref_window_type_t type )
++{
++	(void)type;
++	if( handle ) *handle = NULL;
++	return REF_WINDOW_TYPE_NULL;
++}
++
++qboolean SW_CreateBuffer( int width, int height, uint *stride, uint *bpp, uint *r, uint *g, uint *b )
++{
++	(void)width; (void)height; (void)stride; (void)bpp; (void)r; (void)g; (void)b;
++	return false;
++}
++
++void *SW_LockBuffer( void )
++{
++	return NULL;
++}
++
++void SW_UnlockBuffer( void )
++{
++}
++
++platform_orientation_t Platform_GetDisplayOrientation( void )
++{
++	return ORIENTATION_LANDSCAPE;
++}
++
++void Platform_Minimize_f( void )
++{
++}
++
++#endif // XASH_VIDEO == VIDEO_VISIONOS
 diff --git a/engine/wscript b/engine/wscript
 index 5b5e3a6..c882802 100644
 --- a/engine/wscript
@@ -569,6 +649,41 @@ index 216039f..64f4303 100644
  	if( FBitSet( tex->flags, TF_DEPTHMAP ))
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
+diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
+index 0568486..08606eb 100644
+--- a/ref/gl/gl_rmain.c
++++ b/ref/gl/gl_rmain.c
+@@ -379,6 +379,13 @@ void R_SetupFrustum( void )
+ R_SetupProjectionMatrix
+ =============
+ */
++// Stereo projection override (visionOS): asymmetric off-axis frustum from
++// CompositorServices's per-eye tangents. The bridge sets these once per eye
++// before invoking R_RenderFrame; R_SetupProjectionMatrix below installs them
++// in place of the symmetric-FOV path.
++__attribute__((visibility("default"))) int   cl_stereo_proj_override_active = 0;
++__attribute__((visibility("default"))) float cl_stereo_proj_override[16];
++
+ static void R_SetupProjectionMatrix( matrix4x4 m )
+ {
+ 	GLfloat	xMin, xMax, yMin, yMax, zNear, zFar;
+@@ -390,6 +397,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
+ 		return;
+ 	}
+ 
++	if( cl_stereo_proj_override_active )
++	{
++		// Source matrix is column-major float[16]; xash matrix4x4 is
++		// row-major [r][c]. Transpose during copy.
++		for( int r = 0; r < 4; r++ )
++			for( int c = 0; c < 4; c++ )
++				m[r][c] = cl_stereo_proj_override[c * 4 + r];
++		return;
++	}
++
+ 	RI.farClip = R_GetFarClip();
+ 
+ 	zNear = 4.0f;
 diff --git a/ref/gl/wscript b/ref/gl/wscript
 index f085da6..9a9f280 100644
 --- a/ref/gl/wscript
@@ -598,660 +713,6 @@ index f085da6..9a9f280 100644
  			defines = v['defines'] + ['REF_DLL=1'],
 +			linkflags = extra_linkflags,
  			install_path = bld.env.LIBDIR)
-diff --git a/ref/vklite/r_context.c b/ref/vklite/r_context.c
-index 7f8314b..ee6890a 100644
---- a/ref/vklite/r_context.c
-+++ b/ref/vklite/r_context.c
-@@ -14,11 +14,18 @@ GNU General Public License for more details.
- */
- 
- #include <string.h>
-+#include <math.h>
- #include "xash3d_types.h"
- #include "const.h"
- #include "cvardef.h"
- #include "xash3d_mathlib.h"
- #include "ref_api.h"
-+#include "ref_params.h"
-+#include "com_model.h"
-+#include "render_api.h"
-+#include "cl_entity.h"
-+#include "entity_types.h"
-+#include <stdlib.h>
- 
- /*
-  * this initially was made to be able to run full client
-@@ -29,6 +36,130 @@ GNU General Public License for more details.
- static ref_api_t      gEngfuncs;
- static ref_globals_t *gpGlobals;
- 
-+// Stage B minimal present: ref_vklite drives the bridge's pooled VkImage
-+// render so the engine — not Renderer.swift — owns the IOSurface contents
-+// each frame. The bridge fn is provided by Lambda_Bridge.c in the app exec;
-+// undefined references here resolve at the final app link, same as the
-+// vcs_info globals.
-+//
-+// Must match Renderer.vulkanColorMapSize on the Swift side and POOL_SLOTS/EYES
-+// on the bridge side. Stage A used slot 0 / eye 0; we keep that until cp_view
-+// stereo wiring lands.
-+#define VKLITE_COLORMAP_SIZE 512
-+
-+extern int        lambda_bridge_begin_frame( int slot, int eye, int width, int height,
-+                                              float r, float g, float b );
-+extern const void *lambda_bridge_end_frame( void );
-+extern void        lambda_bridge_record_fill_rgba( float x, float y, float w, float h,
-+                                                   unsigned char r, unsigned char g,
-+                                                   unsigned char b, unsigned char a );
-+extern unsigned int lambda_bridge_create_texture( const void *rgba_bytes, int width, int height );
-+extern void        lambda_bridge_destroy_texture( unsigned int handle );
-+extern void        lambda_bridge_record_draw_stretch_pic( float x, float y, float w, float h,
-+                                                          float s1, float t1, float s2, float t2,
-+                                                          unsigned char r, unsigned char g,
-+                                                          unsigned char b, unsigned char a,
-+                                                          unsigned int texture_handle );
-+extern void        lambda_bridge_record_debug_axes( const float mvp[16] );
-+
-+typedef struct lambda_bridge_world_batch_s {
-+	unsigned int texture_handle;
-+	unsigned int first_vertex;
-+	unsigned int vertex_count;
-+} lambda_bridge_world_batch;
-+
-+extern void        lambda_bridge_world_upload( const float *verts_pos_uv,
-+                                                int vertex_count,
-+                                                const lambda_bridge_world_batch *batches,
-+                                                int batch_count );
-+extern void        lambda_bridge_world_clear( void );
-+extern void        lambda_bridge_record_world( const float mvp[16] );
-+extern void        lambda_bridge_record_world_range( const float mvp[16],
-+                                                     int first_batch, int batch_count );
-+
-+// ref_vklite texture table. Slot 0 reserved as "no texture"; engine treats
-+// texnum == 0 as invalid.
-+#define VKLITE_TEX_MAX 1024
-+typedef struct {
-+	qboolean     used;
-+	unsigned int bridge_handle;  // opaque from bridge; 0 == not uploaded
-+	int          width;
-+	int          height;
-+	char         name[64];
-+	byte        *original_buffer;  // optional cache for R_GetTextureOriginalBuffer
-+	size_t       original_size;
-+} VKLiteTexture;
-+static VKLiteTexture g_tex_table[VKLITE_TEX_MAX];
-+static int           g_tex_current = 0;
-+
-+static int vklite_alloc_texslot( void )
-+{
-+	for( int i = 1; i < VKLITE_TEX_MAX; ++i )
-+		if( !g_tex_table[i].used ) return i;
-+	return 0;
-+}
-+
-+// Convert engine rgbdata_t to a tightly-packed RGBA8 buffer. Returns NULL on
-+// unsupported format. Caller owns the returned buffer (Mem_Free... we use plain
-+// malloc here since engine helpers aren't available without gEngfuncs.memAlloc).
-+static byte *vklite_rgbdata_to_rgba8( rgbdata_t *pic, int *out_w, int *out_h )
-+{
-+	if( !pic || !pic->buffer ) return NULL;
-+	int w = pic->width, h = pic->height;
-+	*out_w = w; *out_h = h;
-+	size_t px = (size_t)w * (size_t)h;
-+	byte *out = (byte *)malloc( px * 4 );
-+	if( !out ) return NULL;
-+
-+	switch( pic->type )
-+	{
-+	case PF_RGBA_32:
-+		memcpy( out, pic->buffer, px * 4 );
-+		break;
-+	case PF_RGB_24:
-+		for( size_t i = 0; i < px; ++i ) {
-+			out[i*4+0] = pic->buffer[i*3+0];
-+			out[i*4+1] = pic->buffer[i*3+1];
-+			out[i*4+2] = pic->buffer[i*3+2];
-+			out[i*4+3] = 255;
-+		}
-+		break;
-+	case PF_INDEXED_24:
-+	case PF_INDEXED_32:
-+		if( !pic->palette ) { free( out ); return NULL; }
-+		for( size_t i = 0; i < px; ++i ) {
-+			byte idx = pic->buffer[i];
-+			out[i*4+0] = pic->palette[idx*3+0];
-+			out[i*4+1] = pic->palette[idx*3+1];
-+			out[i*4+2] = pic->palette[idx*3+2];
-+			out[i*4+3] = ( pic->flags & IMAGE_HAS_ALPHA ) && idx == 255 ? 0 : 255;
-+		}
-+		break;
-+	default:
-+		free( out );
-+		return NULL;
-+	}
-+	return out;
-+}
-+
-+static unsigned int g_vklite_frame_counter = 0;
-+
-+static void R_VKLite_BeginFrame( qboolean clearScene )
-+{
-+	(void)clearScene;
-+	float t  = (float)g_vklite_frame_counter * 0.04f;
-+	float bg = 0.05f + 0.05f * sinf( t );
-+	lambda_bridge_begin_frame( 0, 0,
-+		VKLITE_COLORMAP_SIZE, VKLITE_COLORMAP_SIZE,
-+		bg, bg, bg + 0.05f );
-+}
-+
-+static void R_VKLite_EndFrame( void )
-+{
-+	lambda_bridge_end_frame();
-+	g_vklite_frame_counter++;
-+}
-+
- static void R_SimpleStub( void )
- {
- 	;
-@@ -101,11 +232,6 @@ static void GL_SetupAttributes( int safegl )
- 	;
- }
- 
--static qboolean R_AddEntity( struct cl_entity_s *clent, int type )
--{
--	return true;
--}
--
- static void R_ProcessEntData( qboolean allocate, cl_entity_t *entities, unsigned int max_entities )
- {
- 	;
-@@ -118,7 +244,29 @@ static const byte *R_GetTextureOriginalBuffer( unsigned int idx )
- 
- static int GL_LoadTextureFromBuffer( const char *name, rgbdata_t *pic, texFlags_t flags, qboolean update )
- {
--	return 0;
-+	(void)flags; (void)update;
-+	if( !pic ) return 0;
-+	// Have the engine expand indexed/compressed formats to RGBA with the
-+	// proper transparent-index handling — our local converter only knows
-+	// the easy formats.
-+	gEngfuncs.Image_Process( &pic, 0, 0, IMAGE_FORCE_RGBA, 0.0f );
-+	int w = 0, h = 0;
-+	byte *rgba = vklite_rgbdata_to_rgba8( pic, &w, &h );
-+	if( !rgba ) return 0;
-+	int slot = vklite_alloc_texslot();
-+	if( slot == 0 ) { free( rgba ); return 0; }
-+	unsigned int bh = lambda_bridge_create_texture( rgba, w, h );
-+	free( rgba );
-+	if( bh == 0 ) return 0;
-+	g_tex_table[slot].used = true;
-+	g_tex_table[slot].bridge_handle = bh;
-+	g_tex_table[slot].width = w;
-+	g_tex_table[slot].height = h;
-+	if( name ) {
-+		strncpy( g_tex_table[slot].name, name, sizeof( g_tex_table[slot].name ) - 1 );
-+		g_tex_table[slot].name[sizeof( g_tex_table[slot].name ) - 1] = '\0';
-+	}
-+	return slot;
- }
- 
- static void GL_ProcessTexture( int texnum, float gamma, int topColor, int bottomColor )
-@@ -133,12 +281,25 @@ static void R_SetupSky( int *skytextures )
- 
- static void R_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, int texnum )
- {
--	;
-+	if( texnum <= 0 || texnum >= VKLITE_TEX_MAX ) return;
-+	VKLiteTexture *t = &g_tex_table[texnum];
-+	if( !t->used || !t->bridge_handle ) return;
-+	lambda_bridge_record_draw_stretch_pic( x, y, w, h, s1, t1, s2, t2,
-+		255, 255, 255, 255, t->bridge_handle );
- }
- 
- static void FillRGBA( int rendermode, float x, float y, float w, float h, byte r, byte g, byte b, byte a )
- {
--	;
-+	(void)rendermode;
-+	lambda_bridge_record_fill_rgba( x, y, w, h, r, g, b, a );
-+}
-+
-+static void R_VKLite_Set2DMode( qboolean enable )
-+{
-+	// No state tracked yet — the bridge's pipeline + viewport is set every
-+	// frame in begin_frame. Stage C3 may need real state when textured
-+	// quads land.
-+	(void)enable;
- }
- 
- static int  WorldToScreen( const vec3_t world, vec3_t screen )
-@@ -226,17 +387,32 @@ static void CL_DrawBeams( int fTrans, BEAM *beams )
- 
- static intptr_t RefGetParm( int parm, int arg )
- {
--	return 0;
-+	// PARM_TEX_WIDTH=1, PARM_TEX_HEIGHT=2 — engine derives UVs from these
-+	// in PIC_DrawGeneric, so returning 0 yields divide-by-zero UVs and
-+	// every glyph samples the same texel. Cover the two we need; other
-+	// parm queries can return 0 until they bite.
-+	if( arg <= 0 || arg >= VKLITE_TEX_MAX || !g_tex_table[arg].used ) return 0;
-+	switch( parm ) {
-+	case 1: return g_tex_table[arg].width;
-+	case 2: return g_tex_table[arg].height;
-+	default: return 0;
-+	}
- }
- 
- static int GL_FindTexture( const char *name )
- {
-+	if( !name || !*name ) return 0;
-+	for( int i = 1; i < VKLITE_TEX_MAX; ++i ) {
-+		if( g_tex_table[i].used && strcmp( g_tex_table[i].name, name ) == 0 )
-+			return i;
-+	}
- 	return 0;
- }
- 
- static const char *GL_TextureName( unsigned int texnum )
- {
--	return NULL;
-+	if( texnum >= VKLITE_TEX_MAX || !g_tex_table[texnum].used ) return "";
-+	return g_tex_table[texnum].name;
- }
- 
- static const byte *GL_TextureData( unsigned int texnum )
-@@ -246,12 +422,50 @@ static const byte *GL_TextureData( unsigned int texnum )
- 
- static int GL_LoadTexture( const char *name, const byte *buf, size_t size, int flags )
- {
--	return 0;
-+	// Reuse cache if the engine already loaded this name.
-+	int existing = GL_FindTexture( name );
-+	if( existing ) return existing;
-+
-+	rgbdata_t *pic = gEngfuncs.FS_LoadImage( name, buf, size );
-+	if( !pic ) return 0;
-+	int slot = GL_LoadTextureFromBuffer( name, pic, (texFlags_t)flags, false );
-+	// rgbdata is engine-owned and freed by the engine's image cache; we don't
-+	// FS_FreeImage here because the engine retains the rgbdata for reuse.
-+	return slot;
- }
- 
- static int GL_CreateTexture( const char *name, int width, int height, const void *buffer, texFlags_t flags )
- {
--	return 0;
-+	(void)flags;
-+	if( !buffer || width <= 0 || height <= 0 ) return 0;
-+	int slot = vklite_alloc_texslot();
-+	if( slot == 0 ) return 0;
-+	unsigned int bh = lambda_bridge_create_texture( buffer, width, height );
-+	if( bh == 0 ) return 0;
-+	g_tex_table[slot].used = true;
-+	g_tex_table[slot].bridge_handle = bh;
-+	g_tex_table[slot].width = width;
-+	g_tex_table[slot].height = height;
-+	if( name ) {
-+		strncpy( g_tex_table[slot].name, name, sizeof( g_tex_table[slot].name ) - 1 );
-+		g_tex_table[slot].name[sizeof( g_tex_table[slot].name ) - 1] = '\0';
-+	}
-+	return slot;
-+}
-+
-+static void GL_FreeTextureSlot( unsigned int texnum )
-+{
-+	if( texnum == 0 || texnum >= VKLITE_TEX_MAX ) return;
-+	VKLiteTexture *t = &g_tex_table[texnum];
-+	if( !t->used ) return;
-+	if( t->bridge_handle ) lambda_bridge_destroy_texture( t->bridge_handle );
-+	memset( t, 0, sizeof( *t ) );
-+}
-+
-+static void GL_Bind_VKLite( int tmu, unsigned int texnum )
-+{
-+	(void)tmu;
-+	g_tex_current = (int)texnum;
- }
- 
- static void R_OverrideTextureSourceSize( unsigned int textnum, unsigned int srcWidth, unsigned int srcHeight )
-@@ -264,14 +478,268 @@ static void GL_UpdateTexture( int texnum, int cols, int rows, int width, int hei
- 	;
- }
- 
--static void GL_Bind( int tmu, unsigned int texnum )
-+
-+// Build column-major MVP for ref_viewpass_t rvp. HL world convention:
-+// X forward, Y left, Z up. We map to a Vulkan camera that looks down its
-+// +Z, with +X right and +Y down (default NDC). Near/far chosen large
-+// enough to cover any HL map.
-+static void vklite_build_mvp( const struct ref_viewpass_s *rvp, float mvp[16] )
-+{
-+	vec3_t fwd, right, up;
-+	AngleVectors( rvp->viewangles, fwd, right, up );
-+
-+	// Camera basis in world space:
-+	//   camRight  =  right  (engine right = world -Y)
-+	//   camDown   = -up     (Vulkan +Y points down)
-+	//   camFwd    =  fwd
-+	float cr[3] = { right[0], right[1], right[2] };
-+	float cd[3] = { -up[0],   -up[1],   -up[2] };
-+	float cf[3] = { fwd[0],   fwd[1],   fwd[2] };
-+	const float *o = rvp->vieworigin;
-+
-+	// View matrix (world -> camera). Column-major.
-+	float V[16] = {
-+		cr[0], cd[0], cf[0], 0.0f,
-+		cr[1], cd[1], cf[1], 0.0f,
-+		cr[2], cd[2], cf[2], 0.0f,
-+		-(cr[0]*o[0] + cr[1]*o[1] + cr[2]*o[2]),
-+		-(cd[0]*o[0] + cd[1]*o[1] + cd[2]*o[2]),
-+		-(cf[0]*o[0] + cf[1]*o[1] + cf[2]*o[2]),
-+		1.0f
-+	};
-+
-+	// Perspective (Vulkan, depth [0,1]).
-+	float fovx = rvp->fov_x ? rvp->fov_x : 90.0f;
-+	float fovy = rvp->fov_y ? rvp->fov_y : 60.0f;
-+	float fx = 1.0f / tanf( fovx * 0.5f * (float)M_PI / 180.0f );
-+	float fy = 1.0f / tanf( fovy * 0.5f * (float)M_PI / 180.0f );
-+	const float zn = 4.0f, zf = 16384.0f;
-+	float a = zf / ( zf - zn );
-+	float b = -( zn * zf ) / ( zf - zn );
-+	float P[16] = {
-+		fx,  0,   0,   0,
-+		0,   fy,  0,   0,
-+		0,   0,   a,   1,
-+		0,   0,   b,   0
-+	};
-+
-+	// mvp = P * V  (column-major mul).
-+	for( int c = 0; c < 4; ++c )
-+	for( int r = 0; r < 4; ++r ) {
-+		float s = 0.0f;
-+		for( int k = 0; k < 4; ++k )
-+			s += P[k * 4 + r] * V[c * 4 + k];
-+		mvp[c * 4 + r] = s;
-+	}
-+}
-+
-+// === Stage D2: walk worldmodel BSP, emit textured triangles ==============
-+
-+static int vklite_surface_vert_count( const msurface_t *s )
-+{
-+	return ( s->numedges < 3 ) ? 0 : 3 * ( s->numedges - 2 );
-+}
-+
-+static void vklite_emit_surface( model_t *world, msurface_t *surf,
-+                                  qboolean qbsp2, float *out )
-+{
-+	mtexinfo_t *ti = surf->texinfo;
-+	texture_t *tex = ti ? ti->texture : NULL;
-+	float tw = ( tex && tex->width  ) ? (float)tex->width  : 1.0f;
-+	float th = ( tex && tex->height ) ? (float)tex->height : 1.0f;
-+
-+	int n = surf->numedges;
-+	// Resolve each surface vertex position by walking surfedges + edges.
-+	float positions[256][3];
-+	if( n > 256 ) n = 256; // pathological cap
-+	for( int i = 0; i < n; ++i ) {
-+		int se = world->surfedges[surf->firstedge + i];
-+		int abss = se < 0 ? -se : se;
-+		unsigned int vi;
-+		if( qbsp2 ) {
-+			medge32_t *e = &world->edges32[abss];
-+			vi = ( se > 0 ) ? e->v[0] : e->v[1];
-+		} else {
-+			medge16_t *e = &world->edges16[abss];
-+			vi = ( se > 0 ) ? e->v[0] : e->v[1];
-+		}
-+		if( (int)vi >= world->numvertexes ) { vi = 0; }
-+		positions[i][0] = world->vertexes[vi].position[0];
-+		positions[i][1] = world->vertexes[vi].position[1];
-+		positions[i][2] = world->vertexes[vi].position[2];
-+	}
-+
-+	float *w = out;
-+	for( int i = 1; i <= n - 2; ++i ) {
-+		int idx[3] = { 0, i, i + 1 };
-+		for( int k = 0; k < 3; ++k ) {
-+			int vi = idx[k];
-+			float *p = positions[vi];
-+			float s = p[0]*ti->vecs[0][0] + p[1]*ti->vecs[0][1] +
-+			          p[2]*ti->vecs[0][2] + ti->vecs[0][3];
-+			float t = p[0]*ti->vecs[1][0] + p[1]*ti->vecs[1][1] +
-+			          p[2]*ti->vecs[1][2] + ti->vecs[1][3];
-+			*w++ = p[0]; *w++ = p[1]; *w++ = p[2];
-+			*w++ = s / tw;
-+			*w++ = t / th;
-+		}
-+	}
-+}
-+
-+static model_t *vklite_get_worldmodel( void )
-+{
-+	// PARM_GET_WORLD_PTR returns world_static_t* (BSP-load metadata), NOT
-+	// the renderable model_t — name is misleading. The worldmodel lives at
-+	// gp_cl->models[1].
-+	ref_client_t *cl = (ref_client_t *)gEngfuncs.EngineGetParm( PARM_GET_CLIENT_PTR, 0 );
-+	if( cl && cl->nummodels > 1 ) return cl->models[1];
-+	return NULL;
-+}
-+
-+static void vklite_build_world( void )
- {
--	;
-+	lambda_bridge_world_clear();
-+	model_t *world = vklite_get_worldmodel();
-+	if( !world || world->numsurfaces <= 0 ) return;
-+	qboolean qbsp2 = ( world->flags & MODEL_QBSP2 ) != 0;
-+
-+	int total_verts = 0;
-+	for( int i = 0; i < world->numsurfaces; ++i )
-+		total_verts += vklite_surface_vert_count( &world->surfaces[i] );
-+	if( total_verts == 0 ) return;
-+
-+	float *verts = (float *)malloc( total_verts * 5 * sizeof( float ) );
-+	lambda_bridge_world_batch *batches = (lambda_bridge_world_batch *)
-+		malloc( world->numsurfaces * sizeof( *batches ) );
-+	if( !verts || !batches ) { free( verts ); free( batches ); return; }
-+
-+	// Emit batches 1:1 with surfaces so entity surface ranges
-+	// (firstmodelsurface, nummodelsurfaces) map directly to batch indices.
-+	// Zero-vertex slots are kept as empty batches.
-+	unsigned int first = 0;
-+	for( int i = 0; i < world->numsurfaces; ++i ) {
-+		msurface_t *surf = &world->surfaces[i];
-+		int vc = vklite_surface_vert_count( surf );
-+		if( vc > 0 )
-+			vklite_emit_surface( world, surf, qbsp2, verts + first * 5 );
-+
-+		unsigned int handle = 0;
-+		mtexinfo_t *ti = surf->texinfo;
-+		if( ti && ti->texture ) {
-+			int texnum = ti->texture->gl_texturenum;
-+			if( texnum > 0 && texnum < VKLITE_TEX_MAX && g_tex_table[texnum].used )
-+				handle = g_tex_table[texnum].bridge_handle;
-+		}
-+		batches[i].texture_handle = handle;
-+		batches[i].first_vertex   = first;
-+		batches[i].vertex_count   = (unsigned int)vc;
-+		first += (unsigned int)vc;
-+	}
-+
-+	lambda_bridge_world_upload( verts, (int)first, batches, world->numsurfaces );
-+	free( verts );
-+	free( batches );
-+}
-+
-+static qboolean g_vklite_world_built = false;
-+
-+// Per-frame brush entity list (doors, buttons, breakables, ...). Reset
-+// by R_ClearScene, populated by R_AddEntity, drained by GL_RenderFrame.
-+#define VKLITE_MAX_ENTS 256
-+static cl_entity_t *g_vklite_brush_ents[VKLITE_MAX_ENTS];
-+static int          g_vklite_brush_ent_count = 0;
-+
-+static void R_VKLite_ClearScene( void )
-+{
-+	g_vklite_brush_ent_count = 0;
-+}
-+
-+static qboolean R_AddEntity_VKLite( struct cl_entity_s *ent, int type )
-+{
-+	if( !ent || !ent->model ) return true;
-+	if( ent->model->type == mod_brush && g_vklite_brush_ent_count < VKLITE_MAX_ENTS )
-+		g_vklite_brush_ents[g_vklite_brush_ent_count++] = ent;
-+	(void)type;
-+	return true;
-+}
-+
-+// Build a column-major 4x4 from HL entity origin + angles (no scale).
-+// Same yaw/pitch/roll order as Matrix4x4_CreateFromEntity.
-+static void vklite_entity_model_matrix( const vec3_t origin, const vec3_t angles,
-+                                         float M[16] )
-+{
-+	float p = angles[0] * (float)M_PI / 180.0f;
-+	float y = angles[1] * (float)M_PI / 180.0f;
-+	float r = angles[2] * (float)M_PI / 180.0f;
-+	float sp = sinf( p ), cp = cosf( p );
-+	float sy = sinf( y ), cy = cosf( y );
-+	float sr = sinf( r ), cr = cosf( r );
-+
-+	// Row-major rotation, then write column-major.
-+	float R[3][3] = {
-+		{ cp*cy,           sr*sp*cy + cr*-sy,  cr*sp*cy + -sr*-sy },
-+		{ cp*sy,           sr*sp*sy + cr*cy,   cr*sp*sy + -sr*cy  },
-+		{ -sp,             sr*cp,              cr*cp              }
-+	};
-+	M[ 0] = R[0][0]; M[ 1] = R[1][0]; M[ 2] = R[2][0]; M[ 3] = 0.0f;
-+	M[ 4] = R[0][1]; M[ 5] = R[1][1]; M[ 6] = R[2][1]; M[ 7] = 0.0f;
-+	M[ 8] = R[0][2]; M[ 9] = R[1][2]; M[10] = R[2][2]; M[11] = 0.0f;
-+	M[12] = origin[0]; M[13] = origin[1]; M[14] = origin[2]; M[15] = 1.0f;
-+}
-+
-+static void vklite_mat4_mul( const float A[16], const float B[16], float out[16] )
-+{
-+	for( int c = 0; c < 4; ++c )
-+	for( int r = 0; r < 4; ++r ) {
-+		float s = 0.0f;
-+		for( int k = 0; k < 4; ++k )
-+			s += A[k * 4 + r] * B[c * 4 + k];
-+		out[c * 4 + r] = s;
-+	}
-+}
-+
-+static void R_VKLite_NewMap( void )
-+{
-+	vklite_build_world();
-+	g_vklite_world_built = true;
- }
- 
- static void GL_RenderFrame( const struct ref_viewpass_s *rvp )
- {
--	;
-+	if( !rvp ) return;
-+	// Belt-and-suspenders: if R_NewMap didn't fire (engine path drift) and
-+	// a world exists, build it lazily on first render.
-+	if( !g_vklite_world_built ) {
-+		model_t *w = vklite_get_worldmodel();
-+		if( w && w->numsurfaces > 0 ) {
-+			vklite_build_world();
-+			g_vklite_world_built = true;
-+		}
-+	}
-+
-+	float mvp[16];
-+	vklite_build_mvp( rvp, mvp );
-+
-+	// Draw worldmodel (submodel 0). cl->models[1]->firstmodelsurface = 0,
-+	// nummodelsurfaces = N — covers the static world but not brush ents.
-+	model_t *world = vklite_get_worldmodel();
-+	if( world ) {
-+		lambda_bridge_record_world_range( mvp,
-+			world->firstmodelsurface, world->nummodelsurfaces );
-+	}
-+
-+	// Draw each captured brush entity with its own transform.
-+	for( int i = 0; i < g_vklite_brush_ent_count; ++i ) {
-+		cl_entity_t *ent = g_vklite_brush_ents[i];
-+		if( !ent->model || ent->model->type != mod_brush ) continue;
-+		if( ent->model->nummodelsurfaces <= 0 ) continue;
-+
-+		float M_ent[16], mvp_ent[16];
-+		vklite_entity_model_matrix( ent->origin, ent->angles, M_ent );
-+		vklite_mat4_mul( mvp, M_ent, mvp_ent );
-+		lambda_bridge_record_world_range( mvp_ent,
-+			ent->model->firstmodelsurface, ent->model->nummodelsurfaces );
-+	}
- }
- 
- static void GL_OrthoBounds( const float *mins, const float *maxs )
-@@ -331,9 +799,9 @@ static const ref_interface_t gReffuncs =
- 	.GL_ClearExtensions = R_SimpleStub,
- 
- 	.R_GammaChanged       = R_SimpleStubBool,
--	.R_BeginFrame         = R_SimpleStubBool,
-+	.R_BeginFrame         = R_VKLite_BeginFrame,
- 	.R_RenderScene        = R_SimpleStub,
--	.R_EndFrame           = R_SimpleStub,
-+	.R_EndFrame           = R_VKLite_EndFrame,
- 	.R_PushScene          = R_SimpleStub,
- 	.R_PopScene           = R_SimpleStub,
- 	.GL_BackendStartFrame = R_SimpleStub,
-@@ -343,7 +811,7 @@ static const ref_interface_t gReffuncs =
- 	.R_AllowFog       = R_SimpleStubBool,
- 	.GL_SetRenderMode = R_SimpleStubInt,
- 
--	.R_AddEntity      = R_AddEntity,
-+	.R_AddEntity      = R_AddEntity_VKLite,
- 	.R_ProcessEntData = R_ProcessEntData,
- 
- 	.R_ShowTextures = R_SimpleStub,
-@@ -353,7 +821,7 @@ static const ref_interface_t gReffuncs =
- 	.GL_ProcessTexture          = GL_ProcessTexture,
- 	.R_SetupSky                 = R_SetupSky,
- 
--	.R_Set2DMode      = R_SimpleStubBool,
-+	.R_Set2DMode      = R_VKLite_Set2DMode,
- 	.R_DrawStretchPic = R_DrawStretchPic,
- 	.FillRGBA         = FillRGBA,
- 	.WorldToScreen    = WorldToScreen,
-@@ -395,19 +863,19 @@ static const ref_interface_t gReffuncs =
- 	.GL_TextureName  = GL_TextureName,
- 	.GL_TextureData  = GL_TextureData,
- 	.GL_LoadTexture  = GL_LoadTexture,
--	.GL_FreeTexture  = R_SimpleStubUInt,
-+	.GL_FreeTexture  = GL_FreeTextureSlot,
- 	.R_OverrideTextureSourceSize = R_OverrideTextureSourceSize,
- 
- 	.GL_UpdateTexture = GL_UpdateTexture,
- 
--	.GL_Bind = GL_Bind,
-+	.GL_Bind = GL_Bind_VKLite,
- 
- 	.GL_RenderFrame    = GL_RenderFrame,
- 	.GL_OrthoBounds    = GL_OrthoBounds,
- 	.R_SpeedsMessage   = R_SpeedsMessage,
- 	.Mod_GetCurrentVis = Mod_GetCurrentVis,
--	.R_NewMap          = R_SimpleStub,
--	.R_ClearScene      = R_SimpleStub,
-+	.R_NewMap          = R_VKLite_NewMap,
-+	.R_ClearScene      = R_VKLite_ClearScene,
- 
- 	.TriRenderMode = R_SimpleStubInt,
- 	.Begin         = R_SimpleStubInt,
-diff --git a/ref/vklite/wscript b/ref/vklite/wscript
-index 4ad0f74..624ac7a 100644
---- a/ref/vklite/wscript
-+++ b/ref/vklite/wscript
-@@ -14,5 +14,10 @@ def build(bld):
- 		target   = 'ref_vklite',
- 		defines  = 'REF_DLL',
- 		use      = 'engine_includes sdk_includes werror',
-+		# lambda_vulkan_render_eye_pooled is supplied by Lambda_Bridge.c in
-+		# the app exec at final-link time. The waf shlib link is just to
-+		# satisfy the build graph (we harvest .o files for libxash.a), so
-+		# permit undefined symbols here.
-+		linkflags = [ '-Wl,-undefined,dynamic_lookup' ],
- 		install_path = bld.env.LIBDIR
- 	)
 diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
 index 5733329..73de016 100644
 --- a/scripts/waifulib/xcompile.py

@@ -471,11 +471,14 @@ actor Renderer {
         // different moments in time — visible as per-eye divergent
         // transients (e.g. HUD glyphs, particles).
         ensureEngineInitialized()
-        // Step 2 of stereo: engine ticks once for the left eye (slice 0)
-        // with a negative IPD/2 offset; we then re-run only the renderer
-        // for the right eye (slice 1) with a positive offset. Half-Life
-        // world units are roughly inches, so ~1.25 unit per eye ≈ 6.4 cm
-        // interpupillary distance.
+        // Plane-based stereo: engine renders into a 2-layer colorMap (one
+        // slice per eye, with an IPD offset on the camera) and the Metal
+        // display pass samples each slice onto a flat plane the viewer
+        // looks at. Asymmetric-projection / direct-to-drawable rendering
+        // was explored (see git history around path B) but doesn't
+        // visibly composite — AVP's compositor expects specific render
+        // patterns we haven't matched yet.
+        lambda_engine_clear_projection_override()
         let halfIPD: Float = 1.25
         for eye in 0..<2 {
             let off: Float = (eye == 0) ? -halfIPD : halfIPD
@@ -568,9 +571,7 @@ actor Renderer {
         }
 
         renderEncoder.label = "Primary Render Encoder"
-        renderEncoder.pushDebugGroup("Draw Box (Vulkan-textured)")
-        // Plane is double-sided; disable culling so viewer sees it from
-        // either rotation direction.
+        renderEncoder.pushDebugGroup("Plane engine pass")
         renderEncoder.setCullMode(.none)
         renderEncoder.setFrontFacing(.counterClockwise)
         renderEncoder.setRenderPipelineState(pipelineState)
