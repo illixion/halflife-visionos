@@ -231,6 +231,16 @@ int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
                                          void *mtl_texture, int width, int height,
                                          float r, float g, float b);
 
+// Full per-eye render: AVP frustum + head-tracked viewangles installed
+// for the duration of the engine call. view_angles3 = pitch/yaw/roll in
+// xash degrees.
+int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
+                                     const float *tangents4,
+                                     float zNear, float zFar,
+                                     const float *view_angles3,
+                                     void *mtl_texture, int width, int height,
+                                     float r, float g, float b);
+
 // Step 3b.1: install/clear asymmetric per-eye projection. Call
 // lambda_engine_set_projection_tangents() before each per-eye render and
 // lambda_engine_clear_projection_override() once the pair is done (or leave

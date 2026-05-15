@@ -61,10 +61,10 @@ index 7cd9c1f..504f056 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
-index d4628f3..8abe446 100644
+index d4628f3..0f652ba 100644
 --- a/engine/client/cl_view.c
 +++ b/engine/client/cl_view.c
-@@ -22,6 +22,11 @@ GNU General Public License for more details.
+@@ -22,6 +22,13 @@ GNU General Public License for more details.
  #include "input.h" // touch
  #include "platform/platform.h" // GL_UpdateSwapInterval
  
@@ -72,14 +72,30 @@ index d4628f3..8abe446 100644
 +// flips its sign between the two per-eye render passes; mono callers leave
 +// it at 0. Public-by-extern; declared inline at the use site in V_RenderView.
 +float cl_stereo_eye_offset = 0.0f;
++int   cl_stereo_view_angles_override_active = 0;
++float cl_stereo_view_angles_override[3] = { 0.0f, 0.0f, 0.0f }; // pitch, yaw, roll
 +
  /*
  ===============
  V_CalcViewRect
-@@ -419,6 +424,18 @@ void V_RenderView( void )
+@@ -419,6 +426,32 @@ void V_RenderView( void )
  			ref.dllFuncs.R_ClearScreen();
  		}
  
++		// Head-tracked view angles: when active, replace the game's
++		// computed viewangles with AVP's head pose. Set externally by
++		// the visionOS bridge each frame before R_RenderFrame. Order
++		// matters: override viewangles FIRST so the IPD shift below
++		// computes view-right from the head pose, not the keyboard pose.
++		extern int   cl_stereo_view_angles_override_active;
++		extern float cl_stereo_view_angles_override[3]; // pitch, yaw, roll
++		if( cl_stereo_view_angles_override_active )
++		{
++			rvp.viewangles[0] = cl_stereo_view_angles_override[0];
++			rvp.viewangles[1] = cl_stereo_view_angles_override[1];
++			rvp.viewangles[2] = cl_stereo_view_angles_override[2];
++		}
++
 +		// Stereo: shift the camera along the view-right axis by the
 +		// caller-supplied half-IPD. Set externally by the visionOS
 +		// bridge between the two per-eye render passes; defaults to 0

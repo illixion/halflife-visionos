@@ -518,6 +518,47 @@ actor Renderer {
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
         // Apple→xash unit scale (HL inches per meter).
         let appleToXash: Float = 39.37
+
+        // Head-tracked viewangles. Query at the drawable's presentation
+        // time so the engine renders from where the head will be when
+        // photons hit the user, not where it was when we started this
+        // frame. queryDeviceAnchor may return nil during a tracking
+        // dropout; we skip the override in that case so mouse-look still
+        // works as a fallback.
+        let presentTime = primary.frameTiming.presentationTime.timeInterval
+        let headViewAngles: SIMD3<Float>? = {
+            guard worldTracking.state == .running,
+                  let anchor = worldTracking.queryDeviceAnchor(atTimestamp: presentTime)
+            else { return nil }
+            // Apple coords: +X right, +Y up, -Z forward.
+            // anchor.originFromAnchorTransform.columns.2 is the head's +Z
+            // basis (back-facing), so -col2 = forward-facing in Apple world.
+            let m = anchor.originFromAnchorTransform
+            let fwdApple = SIMD3<Float>(-m.columns.2.x, -m.columns.2.y, -m.columns.2.z)
+            let upApple  = SIMD3<Float>( m.columns.1.x,  m.columns.1.y,  m.columns.1.z)
+            // Convert to xash basis: +X forward, +Y left, +Z up.
+            // apple (x, y, z) → xash (-z, -x, y).
+            let fwdXash = SIMD3<Float>(-fwdApple.z, -fwdApple.x, fwdApple.y)
+            let upXash  = SIMD3<Float>(-upApple.z,  -upApple.x,  upApple.y)
+            // xash yaw = atan2(fwd.y, fwd.x); zero = looking +X.
+            // xash pitch = degrees DOWN from horizontal — i.e. asin(-fwd.z)
+            //   (positive pitch when fwd.z < 0, i.e. looking downward).
+            // xash roll = head tilt. Derive from where 'up' lands after
+            //   yaw+pitch: roll = atan2(rightComponent_of_up, upComponent_of_up)
+            //   computed in the view-aligned basis.
+            let rad2deg: Float = 180.0 / .pi
+            let yawDeg   = atan2f(fwdXash.y, fwdXash.x) * rad2deg
+            let horizLen = sqrtf(fwdXash.x * fwdXash.x + fwdXash.y * fwdXash.y)
+            let pitchDeg = atan2f(-fwdXash.z, horizLen) * rad2deg
+            // Roll: project 'up' onto the plane perpendicular to fwd, then
+            // measure rotation from world-up. world-up in xash is (0,0,1).
+            // For now leave roll at 0 (head tilt is rarely meaningful in
+            // first-person games and adds nausea risk).
+            _ = upXash
+            let rollDeg: Float = 0
+            return SIMD3<Float>(pitchDeg, yawDeg, rollDeg)
+        }()
+
         for eye in 0..<2 {
             // Per-eye position in head-local space, X = right (meters).
             // view[0] vs [1] left/right ordering isn't formally guaranteed,
@@ -527,13 +568,25 @@ actor Renderer {
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             var tang = primary.views[eye].tangents  // (left, right, top, bottom)
-            let rc = withUnsafePointer(to: &tang) { tp -> Int32 in
-                tp.withMemoryRebound(to: Float.self, capacity: 4) { fp in
-                    lambda_gl_worker_render_eye_tangents(
-                        Int32(eye), off,
-                        fp, zNear, zFar,
-                        eyePtr, Int32(colorMap.width), Int32(colorMap.height),
-                        0.1, 0.1, 0.1)
+            let rc: Int32 = withUnsafePointer(to: &tang) { tp in
+                tp.withMemoryRebound(to: Float.self, capacity: 4) { fp -> Int32 in
+                    if var hva = headViewAngles {
+                        return withUnsafePointer(to: &hva) { ap in
+                            ap.withMemoryRebound(to: Float.self, capacity: 3) { afp in
+                                lambda_gl_worker_render_eye_full(
+                                    Int32(eye), off,
+                                    fp, zNear, zFar, afp,
+                                    eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                                    0.1, 0.1, 0.1)
+                            }
+                        }
+                    } else {
+                        return lambda_gl_worker_render_eye_tangents(
+                            Int32(eye), off,
+                            fp, zNear, zFar,
+                            eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                            0.1, 0.1, 0.1)
+                    }
                 }
             }
             if rc != 0 {
