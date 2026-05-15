@@ -2901,6 +2901,11 @@ static float      g_w_r = 0, g_w_g = 0, g_w_b = 0;
 static char       g_w_cmd[256];
 // stereo offset for the current/upcoming render
 static float      g_w_eye_offset = 0.0f;
+// per-eye AVP frustum tangents (left, right, top, bottom) + depth range.
+// g_w_have_tangents == 0 means: do not override; engine uses its own projection.
+static int        g_w_have_tangents = 0;
+static float      g_w_tangents[4] = {0};
+static float      g_w_znear = 4.0f, g_w_zfar = 4096.0f;
 
 static void *gl_worker_main(void *arg) {
     (void)arg;
@@ -2932,7 +2937,11 @@ static void *gl_worker_main(void *arg) {
             int er = 0;
             if (br == 0) {
                 lambda_engine_set_stereo_offset(g_w_eye_offset);
+                if (g_w_have_tangents)
+                    lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
                 lambda_engine_frame();
+                if (g_w_have_tangents)
+                    lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 er = lambda_gl_end_frame();
             }
@@ -2948,7 +2957,11 @@ static void *gl_worker_main(void *arg) {
             int er = 0;
             if (br == 0) {
                 lambda_engine_set_stereo_offset(g_w_eye_offset);
+                if (g_w_have_tangents)
+                    lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
                 lambda_engine_render_view_only();
+                if (g_w_have_tangents)
+                    lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 er = lambda_gl_end_frame();
             }
@@ -3038,6 +3051,29 @@ int lambda_gl_worker_render_eye(int eye_index, float eye_offset,
     g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
     g_w_r = r; g_w_g = g; g_w_b = b;
     g_w_eye_offset = eye_offset;
+    g_w_have_tangents = 0;
+    int rc = worker_post_and_wait(eye_index == 0 ? WORK_FRAME : WORK_FRAME_EYE2);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return rc;
+}
+
+// Same as lambda_gl_worker_render_eye, but additionally installs AVP's
+// per-eye asymmetric projection for the duration of the engine call.
+// tangents4 = (tan_left, tan_right, tan_top, tan_bottom), all positive
+// magnitudes. zNear/zFar in xash world units (HL inches; ~39.37/m).
+int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
+                                         const float *tangents4,
+                                         float zNear, float zFar,
+                                         void *mtl_texture, int width, int height,
+                                         float r, float g, float b) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    g_w_mtl = mtl_texture; g_w_w = width; g_w_h = height;
+    g_w_r = r; g_w_g = g; g_w_b = b;
+    g_w_eye_offset = eye_offset;
+    g_w_tangents[0] = tangents4[0]; g_w_tangents[1] = tangents4[1];
+    g_w_tangents[2] = tangents4[2]; g_w_tangents[3] = tangents4[3];
+    g_w_znear = zNear; g_w_zfar = zFar;
+    g_w_have_tangents = 1;
     int rc = worker_post_and_wait(eye_index == 0 ? WORK_FRAME : WORK_FRAME_EYE2);
     pthread_mutex_unlock(&g_w_api_mtx);
     return rc;

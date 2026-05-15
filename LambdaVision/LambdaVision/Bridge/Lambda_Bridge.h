@@ -221,6 +221,16 @@ int lambda_gl_worker_render_eye(int eye_index, float eye_offset,
                                 void *mtl_texture, int width, int height,
                                 float r, float g, float b);
 
+// Same as lambda_gl_worker_render_eye, but additionally installs AVP's
+// per-eye asymmetric projection (via lambda_engine_set_projection_tangents)
+// around the engine call. tangents4 = (tan_left, tan_right, tan_top, tan_bottom),
+// all positive magnitudes; zNear/zFar in xash world units.
+int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
+                                         const float *tangents4,
+                                         float zNear, float zFar,
+                                         void *mtl_texture, int width, int height,
+                                         float r, float g, float b);
+
 // Step 3b.1: install/clear asymmetric per-eye projection. Call
 // lambda_engine_set_projection_tangents() before each per-eye render and
 // lambda_engine_clear_projection_override() once the pair is done (or leave

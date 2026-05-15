@@ -471,22 +471,34 @@ actor Renderer {
         // different moments in time — visible as per-eye divergent
         // transients (e.g. HUD glyphs, particles).
         ensureEngineInitialized()
-        // Plane-based stereo: engine renders into a 2-layer colorMap (one
-        // slice per eye, with an IPD offset on the camera) and the Metal
-        // display pass samples each slice onto a flat plane the viewer
-        // looks at. Asymmetric-projection / direct-to-drawable rendering
-        // was explored (see git history around path B) but doesn't
-        // visibly composite — AVP's compositor expects specific render
-        // patterns we haven't matched yet.
-        lambda_engine_clear_projection_override()
+        // Each eye is rendered with AVP's actual asymmetric frustum
+        // (drawable.views[i].tangents) so the engine output matches what
+        // the headset wants to display. The plane-display pass below still
+        // resamples colorMap onto a small floating plane — fixing the
+        // engine projection on its own won't make this immersive, but it's
+        // the foundation: once we swap the plane for a fullscreen blit,
+        // the per-eye images will stereo-fuse correctly only because each
+        // was rendered through the matching frustum.
+        // zNear/zFar in xash world units (HL inches ≈ 39.37/meter).
+        let zNear: Float = 4.0
+        let zFar:  Float = 4096.0
+        // Use the first drawable's tangents (built-in target). Capture
+        // target may have different tangents but for now match builtIn.
+        let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
         let halfIPD: Float = 1.25
         for eye in 0..<2 {
             let off: Float = (eye == 0) ? -halfIPD : halfIPD
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
-            let rc = lambda_gl_worker_render_eye(
-                Int32(eye), off,
-                eyePtr, Int32(colorMap.width), Int32(colorMap.height),
-                0.1, 0.1, 0.1)
+            var tang = primary.views[eye].tangents  // (left, right, top, bottom)
+            let rc = withUnsafePointer(to: &tang) { tp -> Int32 in
+                tp.withMemoryRebound(to: Float.self, capacity: 4) { fp in
+                    lambda_gl_worker_render_eye_tangents(
+                        Int32(eye), off,
+                        fp, zNear, zFar,
+                        eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                        0.1, 0.1, 0.1)
+                }
+            }
             if rc != 0 {
                 print("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
             }
