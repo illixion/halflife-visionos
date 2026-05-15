@@ -513,9 +513,15 @@ actor Renderer {
         // Use the first drawable's tangents (built-in target). Capture
         // target may have different tangents but for now match builtIn.
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
-        let halfIPD: Float = 1.25
+        // Apple→xash unit scale (HL inches per meter).
+        let appleToXash: Float = 39.37
         for eye in 0..<2 {
-            let off: Float = (eye == 0) ? -halfIPD : halfIPD
+            // Per-eye position in head-local space, X = right (meters).
+            // view[0] vs [1] left/right ordering isn't formally guaranteed,
+            // so reading the actual x value auto-derives the sign instead
+            // of assuming view[0] = left eye.
+            let eyeApple_x = primary.views[eye].transform.columns.3.x
+            let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             var tang = primary.views[eye].tangents  // (left, right, top, bottom)
             let rc = withUnsafePointer(to: &tang) { tp -> Int32 in

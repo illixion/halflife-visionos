@@ -32,12 +32,16 @@ struct ImmersiveSpaceContent: CompositorContent {
 
 extension ImmersiveSpaceContent: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities, configuration: inout LayerRenderer.Configuration) {
-        let foveationEnabled = capabilities.supportsFoveation
-        configuration.isFoveationEnabled = foveationEnabled
+        // Foveation off: the display pass is a fullscreen quad that resamples
+        // a flat colorMap. With foveation on, the rasterization rate map
+        // warps the sampling and the resulting image curves into a V shape
+        // toward the periphery. We're not pixel-bound at the engine's 1024²
+        // source resolution, so eating the extra fragments is the right
+        // trade. Re-enabling later requires either (a) baking the rate map
+        // into the engine render, or (b) doing an inverse warp at sample time.
+        configuration.isFoveationEnabled = false
 
-        let options: LayerRenderer.Capabilities.SupportedLayoutsOptions = foveationEnabled ? [.foveationEnabled] : []
-        let supportedLayouts = capabilities.supportedLayouts(options: options)
-
+        let supportedLayouts = capabilities.supportedLayouts(options: [])
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
 
         configuration.supportsMTL4 = true

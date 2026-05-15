@@ -65,7 +65,10 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                    mag_filter::linear,
                                    min_filter::linear);
 
-    float2 uv = float2(in.texCoord.x, 1.0 - in.texCoord.y);
+    // Fullscreen-quad UV: vertex emits texCoord = pos*0.5+0.5 in Metal NDC.
+    // ANGLE/GL writes the FBO with (0,0) at bottom-left and Metal samples
+    // textures with (0,0) at bottom-left too, so no flip needed here.
+    float2 uv = in.texCoord;
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
 
     return float4(colorSample);
