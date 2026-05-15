@@ -69,6 +69,7 @@ actor Renderer {
 
     let dynamicUniformBuffer: MTLBuffer
     let pipelineState: MTLRenderPipelineState
+    let fullscreenPipelineState: MTLRenderPipelineState
     let depthState: MTLDepthStencilState
     let colorMap: MTLTexture        // 2-layer array (layer 0 = left eye, 1 = right)
     let colorMapLayerViews: [MTLTexture] // per-slice 2D views handed to ANGLE
@@ -139,6 +140,13 @@ actor Renderer {
                                                          mtlVertexDescriptor: mtlVertexDescriptor)
         } catch {
             fatalError("Unable to compile render pipeline state.  Error info: \(error)")
+        }
+
+        do {
+            fullscreenPipelineState = try Self.buildFullscreenPipeline(device: device,
+                                                                       layerRenderer: layerRenderer)
+        } catch {
+            fatalError("Unable to compile fullscreen pipeline state. Error info: \(error)")
         }
 
         self.depthState = Self.buildDepthStencilState(device: device)
@@ -248,6 +256,26 @@ actor Renderer {
 
         pipelineDescriptor.maxVertexAmplificationCount = layerRenderer.properties.viewCount
 
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    // Fullscreen pipeline: 3-vertex triangle covering [-1,1]², no vertex
+    // buffers, no model uniforms. Samples colorMap per-eye via amp_id and
+    // writes to the drawable's color slice for that eye (via amplification).
+    // Replaces the plane-mesh sampler — colorMap now fills the entire
+    // headset eye viewport, which (combined with per-eye AVP tangents) is
+    // the fully-immersive path.
+    static func buildFullscreenPipeline(device: MTLDevice,
+                                        layerRenderer: LayerRenderer) throws -> MTLRenderPipelineState {
+        let library = device.makeDefaultLibrary()
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "FullscreenPipeline"
+        pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
+        pipelineDescriptor.fragmentFunction = library?.makeFunction(name: "fragmentShader")
+        pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
+        pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
+        pipelineDescriptor.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
+        pipelineDescriptor.maxVertexAmplificationCount = layerRenderer.properties.viewCount
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
 
@@ -583,10 +611,12 @@ actor Renderer {
         }
 
         renderEncoder.label = "Primary Render Encoder"
-        renderEncoder.pushDebugGroup("Plane engine pass")
+        renderEncoder.pushDebugGroup("Fullscreen engine pass")
         renderEncoder.setCullMode(.none)
-        renderEncoder.setFrontFacing(.counterClockwise)
-        renderEncoder.setRenderPipelineState(pipelineState)
+        renderEncoder.setRenderPipelineState(fullscreenPipelineState)
+        // Depth must still be set since the pass has a depth attachment;
+        // fullscreen triangle outputs z=1 which wins under reverse-Z
+        // (drawable cleared to 0, compareFunction = greater).
         renderEncoder.setDepthStencilState(depthState)
 
         let viewports = drawable.views.map { $0.textureMap.viewport }
@@ -600,34 +630,10 @@ actor Renderer {
             renderEncoder.setVertexAmplificationCount(viewMappings)
         }
 
-        renderEncoder.setArgumentTable(self.vertexArgumentTable, stages: .vertex)
         renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
-
-        self.vertexArgumentTable.setAddress(dynamicUniformBuffer.gpuAddress + UInt64(uniformBufferOffset),
-                                            index: BufferIndex.uniforms.rawValue)
-        self.vertexArgumentTable.setAddress(drawableTarget.viewProjectionBuffer.gpuAddress + UInt64(drawableTarget.viewProjectionBufferOffset),
-                                            index: BufferIndex.viewProjection.rawValue)
-
-        for (index, element) in mesh.vertexDescriptor.layouts.enumerated() {
-            guard let layout = element as? MDLVertexBufferLayout else {
-                fatalError("unsupported layout")
-            }
-            if layout.stride != 0 {
-                let buffer = mesh.vertexBuffers[index]
-                self.vertexArgumentTable.setAddress(buffer.buffer.gpuAddress + UInt64(buffer.offset),
-                                                    index: index)
-            }
-        }
-
         self.fragmentArgumentTable.setTexture(colorMap.gpuResourceID, index: TextureIndex.color.rawValue)
 
-        for submesh in mesh.submeshes {
-            renderEncoder.drawIndexedPrimitives(primitiveType: submesh.primitiveType,
-                                                indexCount: submesh.indexCount,
-                                                indexType: submesh.indexType,
-                                                indexBuffer: submesh.indexBuffer.buffer.gpuAddress + UInt64(submesh.indexBuffer.offset),
-                                                indexBufferLength: submesh.indexBuffer.buffer.length)
-        }
+        renderEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
