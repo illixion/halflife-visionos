@@ -322,10 +322,13 @@ actor Renderer {
         case wrapFailed
     }
 
-    // 1024² is large enough that each engine pixel maps to well below one
-    // fragment at viewer distance, so small high-frequency HUD content
-    // (text glyphs, single-texel decals) doesn't alias differently per eye.
-    static let vulkanColorMapSize = 1024
+    // Matches AVP drawable's native per-eye resolution (~2048² with some
+    // headroom). 1024² was the previous value, chosen when the engine was
+    // sampled onto a small floating plane; with the fullscreen-quad
+    // immersive display, every colorMap texel maps to roughly one
+    // drawable fragment, so we need the source at native resolution to
+    // avoid visible blur. 4× the fragment work for the engine GL renderer.
+    static let vulkanColorMapSize = 2048
 
     /// Phase 2 step 2/3: produce a colorMap whose pixels are rendered by
     /// Vulkan into an IOSurface (rgba16Float), imported by Metal. Uses the

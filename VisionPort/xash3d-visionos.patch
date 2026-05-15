@@ -333,7 +333,7 @@ index 72bafc2..973d9bd 100644
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
 new file mode 100644
-index 0000000..386cf5c
+index 0000000..97536bb
 --- /dev/null
 +++ b/engine/platform/visionos/vid_visionos.c
 @@ -0,0 +1,138 @@
@@ -364,8 +364,8 @@ index 0000000..386cf5c
 +{
 +	(void)type;
 +	host.renderinfo_changed = false;
-+	refState.width  = 1024;
-+	refState.height = 1024;
++	refState.width  = 2048;
++	refState.height = 2048;
 +	if( ref.dllFuncs.GL_InitExtensions )
 +		ref.dllFuncs.GL_InitExtensions();
 +	return true;
