@@ -1,0 +1,44 @@
+# Build & sign configuration — copy to build-signing.conf and edit.
+# build-signing.conf is gitignored and will never be committed.
+#
+# This configures signing for scripts/build-and-sign.sh. The script imports
+# the .p12 certs into a temporary keychain, so signing works over SSH without
+# any login-keychain setup. Nothing needs to be pre-installed on the machine.
+#
+# BUILD_BUNDLE_ID overrides PRODUCT_BUNDLE_IDENTIFIER at build time — this
+# is the app's identity on device.
+
+# --- Project ---
+PROJECT_PATH="LambdaVision/LambdaVision.xcodeproj"
+SCHEME_NAME="LambdaVision"
+TARGET_NAME="LambdaVision"   # used for IPA/Payload naming
+PLATFORM="visionOS"          # passed as generic/platform=$PLATFORM
+
+# --- Identity ---
+TEAM_ID="XXXXXXXXXX"
+BUILD_BUNDLE_ID="com.example.lambdavision"
+
+# --- Signing certificates (.p12 files) ---
+DEV_P12_PATH="$HOME/Downloads/Development.p12"
+DIST_P12_PATH="$HOME/Downloads/Distribution.p12"
+
+# Password used to open the .p12 files. Leave empty if the .p12 has no password.
+# Per-cert overrides (DEV_P12_PASSWORD / DIST_P12_PASSWORD) take precedence if set.
+P12_PASSWORD=""
+# DEV_P12_PASSWORD=""
+# DIST_P12_PASSWORD=""
+
+# --- Provisioning profiles (absolute paths to .mobileprovision files) ---
+DEV_PROFILE_PATH="$HOME/Downloads/Development.mobileprovision"
+DIST_PROFILE_PATH="$HOME/Downloads/Distribution.mobileprovision"
+
+# --- Deployment ---
+DEVICE_NAME="Apple Vision Pro"
+
+# --- Optional pre-build hook ---
+# Fetches xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework (idempotent).
+# Uncomment if building on a fresh clone.
+# PRE_BUILD_HOOK="./VisionPort/setup.sh"
+
+# --- Extra xcodebuild settings (bash array) ---
+# EXTRA_BUILD_SETTINGS=()
