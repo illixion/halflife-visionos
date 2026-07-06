@@ -76,7 +76,18 @@ xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
   --redefine-sym _gl_clear=_refgl_gl_clear \
   --redefine-sym _gl_vsync=_refgl_gl_vsync \
   --redefine-sym _host_allow_materials=_refgl_host_allow_materials \
+  --redefine-sym _gpGlobals=_refgl_gpGlobals \
+  --redefine-sym _glw_state=_refgl_glw_state \
   "$GL_OBJ" "$GL_OBJ"
+# _gpGlobals: the renderer's `ref_globals_t *gpGlobals` is a tentative
+# (common) definition; mainui's udll_int.cpp defines a STRONG _gpGlobals of
+# a completely different type (ui_globals_t*). The final link merges the
+# renderer's common into mainui's slot, so GetRefAPI's `gpGlobals = globals`
+# and mainui's own init write to the SAME cell — mainui wins, and the
+# renderer reads ui globals as ref globals: max_surfaces=0 → every brush
+# entity (doors, buttons, platforms) silently drops all surfaces.
+# _glw_state: same class — engine's vid_common.c has a 16-byte common
+# glw_state, the renderer an 8-byte one; they must not merge.
 XASH_OBJS+=("$GL_OBJ")
 
 # Pre-link filesystem (filesystem_stdio) into one .o with overlap symbols
