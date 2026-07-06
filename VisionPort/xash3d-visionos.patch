@@ -369,10 +369,10 @@ index 72bafc2..973d9bd 100644
  {
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
 new file mode 100644
-index 0000000..97536bb
+index 0000000..9da0b3f
 --- /dev/null
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,144 @@
 +/*
 +vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
 +
@@ -396,12 +396,18 @@ index 0000000..97536bb
 +
 +// ---- Video / VID -----------------------------------------------------------
 +
++// Render-target size chosen by the host app (Lambda_Bridge.c) from the
++// CompositorServices drawable properties. Defined in the app bridge; both
++// live in the single statically-linked binary.
++extern int lambda_vid_render_width;
++extern int lambda_vid_render_height;
++
 +qboolean R_Init_Video( ref_graphic_apis_t type )
 +{
 +	(void)type;
 +	host.renderinfo_changed = false;
-+	refState.width  = 2048;
-+	refState.height = 2048;
++	refState.width  = lambda_vid_render_width  > 0 ? lambda_vid_render_width  : 2048;
++	refState.height = lambda_vid_render_height > 0 ? lambda_vid_render_height : 2048;
 +	if( ref.dllFuncs.GL_InitExtensions )
 +		ref.dllFuncs.GL_InitExtensions();
 +	return true;

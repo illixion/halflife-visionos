@@ -32,14 +32,17 @@ struct ImmersiveSpaceContent: CompositorContent {
 
 extension ImmersiveSpaceContent: CompositorLayerConfiguration {
     func makeConfiguration(capabilities: LayerRenderer.Capabilities, configuration: inout LayerRenderer.Configuration) {
-        // Foveation off: the display pass is a fullscreen quad that resamples
-        // a flat colorMap. With foveation on, the rasterization rate map
-        // warps the sampling and the resulting image curves into a V shape
-        // toward the periphery. We're not pixel-bound at the engine's 1024²
-        // source resolution, so eating the extra fragments is the right
-        // trade. Re-enabling later requires either (a) baking the rate map
-        // into the engine render, or (b) doing an inverse warp at sample time.
-        configuration.isFoveationEnabled = false
+        // Foveation on: the compositor samples our drawable at panel density
+        // in the fovea, which is what lets the flat engine render reach
+        // native-looking sharpness where the user looks. The display pass
+        // binds drawable.rasterizationRateMaps.first and samples the colorMap
+        // through interpolated varyings — with a rate map bound, varyings
+        // interpolate in logical (screen) space, so each physical fragment
+        // fetches the correct colorMap texel and the compositor's unwarp
+        // reconstructs a straight image. (The V-shape artifact seen earlier
+        // came from foveated presentation WITHOUT the rate map bound at
+        // render time.)
+        configuration.isFoveationEnabled = capabilities.supportsFoveation
 
         let supportedLayouts = capabilities.supportedLayouts(options: [])
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated

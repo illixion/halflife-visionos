@@ -2253,6 +2253,18 @@ extern int GetRefAPI( int version, void *funcs, void *engfuncs, void *globals );
 __attribute__((used, visibility("default")))
 static void *const _anchor_GetRefAPI = (void *)GetRefAPI;
 
+// Engine render-target size, read by the engine's R_Init_Video
+// (engine/platform/visionos/vid_visionos.c) when the renderer comes up.
+// Must be set BEFORE lambda_engine_init; defaults keep the historical
+// 2048x2048 if the app never calls the setter.
+int lambda_vid_render_width  = 2048;
+int lambda_vid_render_height = 2048;
+
+void lambda_engine_set_render_size(int width, int height) {
+    if (width > 0)  lambda_vid_render_width  = width;
+    if (height > 0) lambda_vid_render_height = height;
+}
+
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
                        char *status_out, int status_cap) {
@@ -2409,7 +2421,7 @@ void lambda_engine_shutdown(void) {
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <EGL/eglext_angle.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 
 int lambda_gl_smoke_test(char *status_out, int status_cap) {
     // eglGetPlatformDisplay (EGL 1.5) takes EGLAttrib (intptr-sized), unlike
@@ -2744,11 +2756,15 @@ int lambda_gl_clear_mtl_texture(void *mtl_texture, int width, int height,
 
 // Per-frame state — kept across begin/end so engine code in between can
 // just issue GL calls.
-static GLuint    g_frame_fbo   = 0;
-static GLuint    g_frame_rbo   = 0;
+static GLuint    g_frame_fbo   = 0;     // FBO the engine renders into (MSAA when available)
+static GLuint    g_frame_resolve_fbo = 0; // single-sample FBO wrapping the target MTLTexture
+static GLuint    g_frame_rbo   = 0;     // EGLImage-backed RBO (the MTLTexture)
+static GLuint    g_frame_msaa_color = 0;
 static GLuint    g_frame_depth = 0;
 static int       g_frame_depth_w = 0;
 static int       g_frame_depth_h = 0;
+static int       g_frame_w = 0, g_frame_h = 0;
+static int       g_frame_samples = -1;  // -1 = not yet queried
 static EGLImage  g_frame_image = EGL_NO_IMAGE;
 
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
@@ -2778,18 +2794,45 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
     glBindRenderbuffer(GL_RENDERBUFFER, g_frame_rbo);
     pglEGLImg(GL_RENDERBUFFER, g_frame_image);
 
-    // Depth+stencil renderbuffer. xash's BSP/studio rendering relies on
-    // z-test and skybox/decals on stencil. Without this, every fragment
-    // passes depth → far geometry overwrites near geometry. Keep the
-    // depth RBO across frames if the size matches (colorMap is constant
-    // size today, so this allocates exactly once).
+    // Optional MSAA: render into multisampled renderbuffers, resolve into
+    // the MTLTexture at end_frame. OFF by default — measured on-device
+    // (M5, 2911×2332): 4× costs ~+7 ms per stereo pair, because ANGLE
+    // realizes ES MSAA renderbuffers as full memory store + blit resolve
+    // rather than Metal's free on-tile resolve. Edge smoothing comes from
+    // the MetalFX spatial upscale in the display path instead. Also note:
+    // glCopyTex*/glReadPixels from a multisample FBO is invalid in ES3
+    // (affects the engine's screen-copy effects, e.g. underwater warp).
+    static const int msaa_requested = 0;
+    if (g_frame_samples < 0) {
+        GLint max_samples = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+        g_frame_samples = (msaa_requested > 1 && max_samples >= 2)
+                        ? (msaa_requested < max_samples ? msaa_requested : max_samples)
+                        : 0;
+    }
+
+    // Multisampled color + depth-stencil renderbuffers, kept across frames
+    // while the size is stable (colorMap size is fixed after first frame).
+    // xash's BSP/studio rendering relies on z-test and skybox/decals on
+    // stencil; without depth every fragment passes and far geometry
+    // overwrites near geometry.
     if (g_frame_depth == 0
         || g_frame_depth_w != width
         || g_frame_depth_h != height) {
-        if (g_frame_depth) { glDeleteRenderbuffers(1, &g_frame_depth); g_frame_depth = 0; }
+        if (g_frame_depth)      { glDeleteRenderbuffers(1, &g_frame_depth);      g_frame_depth = 0; }
+        if (g_frame_msaa_color) { glDeleteRenderbuffers(1, &g_frame_msaa_color); g_frame_msaa_color = 0; }
         glGenRenderbuffers(1, &g_frame_depth);
         glBindRenderbuffer(GL_RENDERBUFFER, g_frame_depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, 0x88F0 /*GL_DEPTH24_STENCIL8*/, width, height);
+        if (g_frame_samples > 1) {
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_frame_samples,
+                                             GL_DEPTH24_STENCIL8, width, height);
+            glGenRenderbuffers(1, &g_frame_msaa_color);
+            glBindRenderbuffer(GL_RENDERBUFFER, g_frame_msaa_color);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_frame_samples,
+                                             GL_RGBA8, width, height);
+        } else {
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        }
         g_frame_depth_w = width;
         g_frame_depth_h = height;
     }
@@ -2797,18 +2840,32 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
     glGenFramebuffers(1, &g_frame_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                              GL_RENDERBUFFER, g_frame_rbo);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, 0x821A /*GL_DEPTH_STENCIL_ATTACHMENT*/,
+                              GL_RENDERBUFFER,
+                              g_frame_samples > 1 ? g_frame_msaa_color : g_frame_rbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                               GL_RENDERBUFFER, g_frame_depth);
+
+    if (g_frame_samples > 1) {
+        // Single-sample FBO wrapping the target texture; blit target for
+        // the resolve at end_frame.
+        glGenFramebuffers(1, &g_frame_resolve_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frame_resolve_fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, g_frame_rbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    }
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;
+        if (g_frame_resolve_fbo) { glDeleteFramebuffers(1, &g_frame_resolve_fbo); g_frame_resolve_fbo = 0; }
         glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
         eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
         return -5;
     }
 
+    g_frame_w = width;
+    g_frame_h = height;
     glViewport(0, 0, width, height);
     glClearColor(r, g, b, 1.0f);
     glClearDepthf(1.0f);
@@ -2821,6 +2878,15 @@ int lambda_gl_end_frame(void) {
     if (g_gl_disp == EGL_NO_DISPLAY) return -1;
     if (g_frame_fbo == 0)            return 0; // begin was never called
 
+    // Resolve the multisampled render into the target MTLTexture.
+    if (g_frame_samples > 1 && g_frame_resolve_fbo) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, g_frame_fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_frame_resolve_fbo);
+        glBlitFramebuffer(0, 0, g_frame_w, g_frame_h,
+                          0, 0, g_frame_w, g_frame_h,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+
     // Force a real GPU fence: ANGLE renders on its OWN internal MTLCommand-
     // Queue, while CompositorServices' encoder runs on a separate queue
     // (layerRenderer.commandQueue). eglWaitUntilWorkScheduledANGLE only
@@ -2832,6 +2898,7 @@ int lambda_gl_end_frame(void) {
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;
+    if (g_frame_resolve_fbo) { glDeleteFramebuffers(1, &g_frame_resolve_fbo); g_frame_resolve_fbo = 0; }
     glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
     eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
     return 0;

@@ -266,6 +266,11 @@ void lambda_engine_set_view_angles(float pitch_abs, float yaw_delta, float roll_
 void lambda_engine_set_view_offset(float x, float y, float z);
 void lambda_engine_clear_view_angles(void);
 
+// Engine render-target size (the colorMap the engine draws each eye into).
+// Must be called BEFORE lambda_gl_worker_engine_init — R_Init_Video reads
+// it once at renderer bring-up. Defaults to 2048x2048.
+void lambda_engine_set_render_size(int width, int height);
+
 // Posts an engine console command (Cbuf_AddText) onto the worker thread.
 // Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.
 int lambda_gl_worker_cmd(const char *cmd);

@@ -7,6 +7,7 @@
 
 import CompositorServices
 import Metal
+import MetalFX
 import MetalKit
 import simd
 
@@ -70,9 +71,22 @@ actor Renderer {
     let dynamicUniformBuffer: MTLBuffer
     let pipelineState: MTLRenderPipelineState
     let fullscreenPipelineState: MTLRenderPipelineState
+    let fxaaPipelineState: MTLRenderPipelineState
+    let fxaaArgumentTable: MTL4ArgumentTable
     let depthState: MTLDepthStencilState
-    let colorMap: MTLTexture        // 2-layer array (layer 0 = left eye, 1 = right)
-    let colorMapLayerViews: [MTLTexture] // per-slice 2D views handed to ANGLE
+    // Engine render target: 2-layer array (layer 0 = left eye, 1 = right).
+    // Allocated on the first frame from the actual drawable's dimensions
+    // (see ensureColorMap) rather than at init — the size isn't known until
+    // CompositorServices hands us a drawable.
+    var colorMap: MTLTexture!
+    var colorMapLayerViews: [MTLTexture] = [] // per-slice 2D views handed to ANGLE
+    // AA + upscale chain: colorMap (engine render, sub-logical)
+    // → FXAA → fxaaMap → MetalFX spatial → displayMap (full logical).
+    // The display pass samples displayMap when the chain is active,
+    // colorMap directly when MetalFX is unavailable.
+    var fxaaMap: MTLTexture!
+    var displayMap: MTLTexture!
+    private var spatialScalers: [any MTL4FXSpatialScaler] = []
     private var engineInited = false
 
     let endFrameEvent: MTLSharedEvent
@@ -119,6 +133,10 @@ actor Renderer {
         argTableDesc.maxBufferBindCount = 0
         argTableDesc.maxTextureBindCount = 1
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
+        // Separate table for the FXAA pass: MTL4 argument tables are live
+        // GPU state, so sharing one table across two encoders that bind
+        // different textures in the same frame would race.
+        self.fxaaArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
 
         #if !targetEnvironment(simulator)
         let residencySetDesc = MTLResidencySetDescriptor()
@@ -158,6 +176,12 @@ actor Renderer {
             fatalError("Unable to compile fullscreen pipeline state. Error info: \(error)")
         }
 
+        do {
+            fxaaPipelineState = try Self.buildFXAAPipeline(device: device)
+        } catch {
+            fatalError("Unable to compile FXAA pipeline state. Error info: \(error)")
+        }
+
         self.depthState = Self.buildDepthStencilState(device: device)
 
         do {
@@ -167,32 +191,19 @@ actor Renderer {
         }
 
         do {
-            colorMap = try Self.makeVulkanColorMap(device: device)
+            try Self.setupGLWorker()
         } catch {
-            fatalError("Unable to build Vulkan colorMap. Error info: \(error)")
-        }
-
-        // 2D slice views (one per eye) over the 2D-array colorMap. ANGLE/Metal
-        // interop wraps these as plain 2D MTLTextures so the existing
-        // EGL_METAL_TEXTURE_ANGLE path keeps working unchanged. Writes through
-        // a view land in the underlying array slice, which the display shader
-        // samples via texture2d_array.
-        let cm = colorMap
-        colorMapLayerViews = (0..<2).map { slice in
-            cm.makeTextureView(pixelFormat: cm.pixelFormat,
-                               textureType: .type2D,
-                               levels: 0..<1,
-                               slices: slice..<(slice + 1))!
+            fatalError("Unable to set up GL worker. Error info: \(error)")
         }
 
         #if !targetEnvironment(simulator)
-        // Add all persistent resources to the command queue residency set,
-        // must be done after loading all resources.
+        // Add all persistent resources to the command queue residency set.
+        // colorMap joins later (ensureColorMap) once its size is known.
         residencySetDesc.initialCapacity = mesh.vertexBuffers.count + mesh.submeshes.count + 2 // color map + uniforms buffer
         let residencySet = try! self.device.makeResidencySet(descriptor: residencySetDesc)
         residencySet.addAllocations(mesh.vertexBuffers.map { $0.buffer })
         residencySet.addAllocations(mesh.submeshes.map { $0.indexBuffer.buffer })
-        residencySet.addAllocations([colorMap, dynamicUniformBuffer])
+        residencySet.addAllocations([dynamicUniformBuffer])
         residencySet.commit()
         commandQueueResidencySet = residencySet
         commandQueue.addResidencySet(residencySet)
@@ -288,6 +299,20 @@ actor Renderer {
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
 
+    // FXAA pass: fullscreen triangle colorMap → fxaaMap (both eye slices
+    // via vertex amplification). No depth attachment; runs at engine
+    // resolution before the MetalFX upscale.
+    static func buildFXAAPipeline(device: MTLDevice) throws -> MTLRenderPipelineState {
+        let library = device.makeDefaultLibrary()
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.label = "FXAAPipeline"
+        pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
+        pipelineDescriptor.fragmentFunction = library?.makeFunction(name: "fxaaFragmentShader")
+        pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        pipelineDescriptor.maxVertexAmplificationCount = 2
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
     static func buildDepthStencilState(device: MTLDevice) -> MTLDepthStencilState {
         let depthStateDescriptor = MTLDepthStencilDescriptor()
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.greater
@@ -331,19 +356,8 @@ actor Renderer {
         case wrapFailed
     }
 
-    // Matches AVP drawable's native per-eye resolution (~2048² with some
-    // headroom). 1024² was the previous value, chosen when the engine was
-    // sampled onto a small floating plane; with the fullscreen-quad
-    // immersive display, every colorMap texel maps to roughly one
-    // drawable fragment, so we need the source at native resolution to
-    // avoid visible blur. 4× the fragment work for the engine GL renderer.
-    static let vulkanColorMapSize = 2048
-
-    /// Phase 2 step 2/3: produce a colorMap whose pixels are rendered by
-    /// Vulkan into an IOSurface (rgba16Float), imported by Metal. Uses the
-    /// pooled bridge API at (slot=0, eye=0) so render() can re-render the
-    /// same IOSurface in-place each frame.
-    static func makeVulkanColorMap(device: MTLDevice) throws -> MTLTexture {
+    /// One-time GL bring-up, independent of render-target size.
+    static func setupGLWorker() throws {
         // Smoke test removed: its eglTerminate appears to poison ANGLE's
         // process-global state on visionOS, breaking the subsequent
         // persistent context. The persistent setup below is itself a
@@ -364,27 +378,151 @@ actor Renderer {
             lambda_vulkan_create_device(buf.baseAddress, Int32(buf.count))
         }
         if rc != 0 { throw VulkanColorMapError.deviceInit(rc) }
+    }
 
-        // Option A: drop the Vulkan colorMap entirely. ANGLE renders into a
-        // Swift-allocated MTLTexture each frame; the existing Metal pipeline
-        // samples it just like before. Same scaffolding, GL is now the only
-        // pixel producer for the colorMap.
+    /// Allocate the engine colorMap on the first frame, sized from the
+    /// actual drawable. With foveation on, the rasterization rate map's
+    /// logical (screen-space) size is the resolution the compositor samples
+    /// our content at in the fovea — matching it makes an engine pixel ≈ a
+    /// panel pixel where the user is looking. Without foveation, the
+    /// drawable's physical size is the effective ceiling. Must run before
+    /// engine init: R_Init_Video reads the size at renderer bring-up.
+    private func ensureColorMap(drawable: LayerRenderer.Drawable) {
+        guard colorMap == nil else { return }
+
+        let physW = drawable.colorTextures[0].width
+        let physH = drawable.colorTextures[0].height
+        var w = physW
+        var h = physH
+        if let rateMap = drawable.rasterizationRateMaps.first {
+            w = rateMap.screenSize.width
+            h = rateMap.screenSize.height
+            let p0 = rateMap.physicalSize(layer: 0)
+            print("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) "
+                  + "logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
+        }
+        let logicalW = w
+        let logicalH = h
+        // Scale the engine render below the logical size: the GL world pass
+        // cost is fill-bound and nearly linear in pixels — measured on the
+        // M5 device, full logical (capped 4096×3282, 13.4 Mpx) costs
+        // p50 13.3 ms/stereo pair (misses the 11.1 ms 90 Hz budget), while
+        // 2048² (4.2 Mpx) costs ~6 ms. 0.6× logical ≈ 6.8 Mpx lands at
+        // ~8 ms with p95 headroom. Preserves the drawable's aspect.
+        // MetalFX below upscales the result back to full logical.
+        let engineScale = 0.6
+        let maxDim = 4096
+        var s = engineScale
+        if Double(max(w, h)) * s > Double(maxDim) {
+            s = Double(maxDim) / Double(max(w, h))
+        }
+        w = Int((Double(w) * s).rounded())
+        h = Int((Double(h) * s).rounded())
+        print("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) bgra8Unorm via ANGLE")
+
+        // ANGLE renders into this Swift-allocated MTLTexture each frame; the
+        // display pass samples it. GL is the only pixel producer.
         let desc = MTLTextureDescriptor()
         desc.textureType = .type2DArray
         desc.pixelFormat = .bgra8Unorm
-        desc.width = vulkanColorMapSize
-        desc.height = vulkanColorMapSize
+        desc.width = w
+        desc.height = h
         desc.arrayLength = 2
         desc.mipmapLevelCount = 1
         desc.usage = [.renderTarget, .shaderRead, .pixelFormatView]
         desc.storageMode = .private
-
         guard let tex = device.makeTexture(descriptor: desc) else {
-            throw VulkanColorMapError.wrapFailed
+            fatalError("Unable to allocate \(w)x\(h) colorMap")
         }
         tex.label = "AngleColorMap"
-        print("[LambdaVision] GL colorMap: \(vulkanColorMapSize)x\(vulkanColorMapSize) bgra8Unorm via ANGLE")
-        return tex
+        colorMap = tex
+
+        // 2D slice views (one per eye) over the 2D-array colorMap. ANGLE/Metal
+        // interop wraps these as plain 2D MTLTextures so the existing
+        // EGL_METAL_TEXTURE_ANGLE path keeps working unchanged. Writes through
+        // a view land in the underlying array slice, which the display shader
+        // samples via texture2d_array.
+        colorMapLayerViews = (0..<2).map { slice in
+            tex.makeTextureView(pixelFormat: tex.pixelFormat,
+                                textureType: .type2D,
+                                levels: 0..<1,
+                                slices: slice..<(slice + 1))!
+        }
+
+        #if !targetEnvironment(simulator)
+        commandQueueResidencySet.addAllocations([tex])
+        commandQueueResidencySet.commit()
+        #endif
+
+        lambda_engine_set_render_size(Int32(w), Int32(h))
+
+        // MetalFX spatial upscale back to full logical resolution. Its
+        // edge-directed reconstruction doubles as edge smoothing — the
+        // engine render has no AA of its own (GL MSAA through ANGLE
+        // measured +7 ms/pair; see Lambda_Bridge.c).
+        if logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
+           let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
+            let sd = MTLFXSpatialScalerDescriptor()
+            sd.inputWidth = w
+            sd.inputHeight = h
+            sd.outputWidth = logicalW
+            sd.outputHeight = logicalH
+            sd.colorTextureFormat = .bgra8Unorm
+            sd.outputTextureFormat = .bgra8Unorm
+            sd.colorProcessingMode = .perceptual
+            let scalers = (0..<2).compactMap { _ in
+                sd.makeSpatialScaler(device: device, compiler: compiler)
+            }
+            if scalers.count == 2 {
+                // Intermediate FXAA target at engine resolution — the
+                // scaler reads this instead of the raw colorMap.
+                let fd = MTLTextureDescriptor()
+                fd.textureType = .type2DArray
+                fd.pixelFormat = .bgra8Unorm
+                fd.width = w
+                fd.height = h
+                fd.arrayLength = 2
+                fd.mipmapLevelCount = 1
+                fd.usage = scalers[0].colorTextureUsage.union([.renderTarget, .shaderRead, .pixelFormatView])
+                fd.storageMode = .private
+
+                let dd = MTLTextureDescriptor()
+                dd.textureType = .type2DArray
+                dd.pixelFormat = .bgra8Unorm
+                dd.width = logicalW
+                dd.height = logicalH
+                dd.arrayLength = 2
+                dd.mipmapLevelCount = 1
+                dd.usage = scalers[0].outputTextureUsage.union([.shaderRead, .pixelFormatView])
+                dd.storageMode = .private
+                if let fm = device.makeTexture(descriptor: fd),
+                   let dm = device.makeTexture(descriptor: dd) {
+                    fm.label = "FXAAMap"
+                    dm.label = "UpscaledDisplayMap"
+                    for (i, scaler) in scalers.enumerated() {
+                        scaler.colorTexture = fm.makeTextureView(
+                            pixelFormat: fm.pixelFormat, textureType: .type2D,
+                            levels: 0..<1, slices: i..<(i + 1))!
+                        scaler.outputTexture = dm.makeTextureView(
+                            pixelFormat: dm.pixelFormat, textureType: .type2D,
+                            levels: 0..<1, slices: i..<(i + 1))!
+                        scaler.inputContentWidth = w
+                        scaler.inputContentHeight = h
+                    }
+                    fxaaMap = fm
+                    displayMap = dm
+                    spatialScalers = scalers
+                    #if !targetEnvironment(simulator)
+                    commandQueueResidencySet.addAllocations([fm, dm])
+                    commandQueueResidencySet.commit()
+                    #endif
+                    print("[LambdaVision] FXAA + MetalFX spatial upscale \(w)x\(h) → \(logicalW)x\(logicalH)")
+                }
+            }
+        }
+        if displayMap == nil {
+            print("[LambdaVision] MetalFX upscale inactive — displaying colorMap directly")
+        }
     }
 
     static func loadTexture(device: MTLDevice,
@@ -510,7 +648,6 @@ actor Renderer {
         // engine (running it at 2× speed) and the eyes would sample
         // different moments in time — visible as per-eye divergent
         // transients (e.g. HUD glyphs, particles).
-        ensureEngineInitialized()
         // Each eye is rendered with AVP's actual asymmetric frustum
         // (drawable.views[i].tangents) so the engine output matches what
         // the headset wants to display. The plane-display pass below still
@@ -525,6 +662,11 @@ actor Renderer {
         // Use the first drawable's tangents (built-in target). Capture
         // target may have different tangents but for now match builtIn.
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
+        // Size the colorMap from the first real drawable, then bring the
+        // engine up at that resolution. Order matters: engine init reads
+        // the size ensureColorMap publishes.
+        ensureColorMap(drawable: primary)
+        ensureEngineInitialized()
         // Apple→xash unit scale (HL inches per meter).
         let appleToXash: Float = 39.37
 
@@ -604,6 +746,18 @@ actor Renderer {
             headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
         }
 
+        // colorMap is written by ANGLE on its own MTLCommandQueue; glFinish
+        // in the GL worker fences only that queue. OUR queue's reads of
+        // colorMap from the previous frame (FXAA/upscale/display) must have
+        // completed before the engine overwrites it, or the reader picks up
+        // tiles of the new frame mid-pass — visible as per-eye flicker and
+        // stale rectangular patches during head motion. endFrameEvent is
+        // signaled after each frame's queue work, so waiting for the
+        // previous frame's value closes the race.
+        guard self.endFrameEvent.wait(untilSignaledValue: committedFrameIndex, timeoutMS: 10000) else {
+            return
+        }
+
         for eye in 0..<2 {
             // Per-eye position in head-local space, X = right (meters).
             // view[0] vs [1] left/right ordering isn't formally guaranteed,
@@ -644,9 +798,11 @@ actor Renderer {
             }
         }
 
-        for drawable in drawables {
+        for (i, drawable) in drawables.enumerated() {
+            // FXAA + upscale are encoded once, into the first drawable's
+            // command buffer; further drawables (capture) reuse displayMap.
             render(drawable: drawable, frameIndex: frame.frameIndex,
-                   deviceAnchor: frameDeviceAnchor)
+                   deviceAnchor: frameDeviceAnchor, encodeUpscale: i == 0)
         }
 
         committedFrameIndex += 1
@@ -657,7 +813,7 @@ actor Renderer {
     }
 
     func render(drawable: LayerRenderer.Drawable, frameIndex: UInt64,
-                deviceAnchor: DeviceAnchor?) {
+                deviceAnchor: DeviceAnchor?, encodeUpscale: Bool) {
         // Must be the SAME anchor the engine camera rendered with — the
         // compositor reprojects the image from this pose to display time.
         drawable.deviceAnchor = deviceAnchor
@@ -719,12 +875,51 @@ actor Renderer {
         commandBuffer.beginCommandBuffer(allocator: commandAllocator)
         commandBuffer.useResidencySet(residencySet)
 
+        if encodeUpscale && !spatialScalers.isEmpty {
+            // FXAA: colorMap → fxaaMap, both eye slices in one pass via
+            // vertex amplification.
+            let fxaaPassDescriptor = MTL4RenderPassDescriptor()
+            fxaaPassDescriptor.colorAttachments[0].texture = fxaaMap
+            fxaaPassDescriptor.colorAttachments[0].loadAction = .dontCare
+            fxaaPassDescriptor.colorAttachments[0].storeAction = .store
+            fxaaPassDescriptor.renderTargetArrayLength = 2
+            guard let fxaaEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: fxaaPassDescriptor) else {
+                fatalError("Failed to create FXAA encoder")
+            }
+            fxaaEncoder.label = "FXAA Encoder"
+            fxaaEncoder.setRenderPipelineState(fxaaPipelineState)
+            fxaaEncoder.setVertexAmplificationCount((0..<2).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: 0,
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            })
+            fxaaEncoder.setArgumentTable(fxaaArgumentTable, stages: .fragment)
+            fxaaArgumentTable.setTexture(colorMap.gpuResourceID, index: TextureIndex.color.rawValue)
+            fxaaEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+            // Producer barrier: fxaaMap writes must be visible to the
+            // MetalFX scaler encoded next (MTL4 = no hazard tracking).
+            fxaaEncoder.barrier(afterStages: .fragment, beforeQueueStages: .all,
+                                visibilityOptions: .device)
+            fxaaEncoder.endEncoding()
+
+            // MetalFX spatial upscale: fxaaMap → displayMap, per eye.
+            for scaler in spatialScalers {
+                scaler.encode(commandBuffer: commandBuffer)
+            }
+        }
+
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             fatalError("Failed to create render encoder")
         }
 
         renderEncoder.label = "Primary Render Encoder"
         renderEncoder.pushDebugGroup("Fullscreen engine pass")
+        // Metal 4 does no automatic hazard tracking: order this pass's
+        // displayMap reads after the MetalFX upscale encoded above on the
+        // same queue.
+        if !spatialScalers.isEmpty {
+            renderEncoder.barrier(afterQueueStages: .all, beforeStages: .fragment,
+                                  visibilityOptions: .device)
+        }
         renderEncoder.setCullMode(.none)
         renderEncoder.setRenderPipelineState(fullscreenPipelineState)
         // Depth must still be set since the pass has a depth attachment;
@@ -744,7 +939,8 @@ actor Renderer {
         }
 
         renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
-        self.fragmentArgumentTable.setTexture(colorMap.gpuResourceID, index: TextureIndex.color.rawValue)
+        let displayTexture: MTLTexture = displayMap ?? colorMap
+        self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
 
         renderEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
 
