@@ -2767,6 +2767,21 @@ static int       g_frame_w = 0, g_frame_h = 0;
 static int       g_frame_samples = -1;  // -1 = not yet queried
 static EGLImage  g_frame_image = EGL_NO_IMAGE;
 
+// GPU-side frame fence (EGL_ANGLE_metal_shared_event_sync). When the app
+// supplies an MTLSharedEvent + value, end_frame encodes a signal of that
+// value on ANGLE's internal command queue instead of blocking the CPU in
+// glFinish. The app's own MTLCommandQueue then waits for the value before
+// reading colorMap — same ordering guarantee as glFinish, but the GL
+// worker keeps running while the GPU finishes the eye: CPU sim/submission
+// and GPU render overlap instead of serializing (~4-6 ms/frame saved).
+static void              *g_frame_fence_event = NULL; // id<MTLSharedEvent>, borrowed
+static unsigned long long g_frame_fence_value = 0;
+
+void lambda_gl_set_frame_fence(void *mtl_shared_event, unsigned long long signal_value) {
+    g_frame_fence_event = mtl_shared_event;
+    g_frame_fence_value = signal_value;
+}
+
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            int width, int height,
                                            float r, float g, float b) {
@@ -2887,14 +2902,43 @@ int lambda_gl_end_frame(void) {
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
     }
 
-    // Force a real GPU fence: ANGLE renders on its OWN internal MTLCommand-
-    // Queue, while CompositorServices' encoder runs on a separate queue
-    // (layerRenderer.commandQueue). eglWaitUntilWorkScheduledANGLE only
-    // schedules ANGLE's work and returns immediately — when the consumer
-    // queue reads the shared MTLTexture, it can race and pick up the
-    // previous frame's contents. glFinish blocks until the GPU has
-    // actually completed the writes.
-    glFinish();
+    // ANGLE renders on its OWN internal MTLCommandQueue, while the app's
+    // FXAA/upscale/display passes run on a separate queue — without a
+    // fence the consumer races the producer and reads the previous
+    // frame's contents. Preferred path: encode an MTLSharedEvent signal
+    // on ANGLE's queue (EGL_ANGLE_metal_shared_event_sync) that the app
+    // queue waits on GPU-side. Only when the app never registered a
+    // fence event do we fall back to the old CPU-blocking glFinish.
+    if (g_frame_fence_event) {
+        const EGLAttrib sync_attribs[] = {
+            EGL_SYNC_METAL_SHARED_EVENT_OBJECT_ANGLE,
+            (EGLAttrib)g_frame_fence_event,
+            EGL_SYNC_METAL_SHARED_EVENT_SIGNAL_VALUE_LO_ANGLE,
+            (EGLAttrib)(g_frame_fence_value & 0xffffffffull),
+            EGL_SYNC_METAL_SHARED_EVENT_SIGNAL_VALUE_HI_ANGLE,
+            (EGLAttrib)(g_frame_fence_value >> 32),
+            EGL_NONE
+        };
+        EGLSync sync = eglCreateSync(g_gl_disp, EGL_SYNC_METAL_SHARED_EVENT_ANGLE,
+                                     sync_attribs);
+        if (sync != EGL_NO_SYNC) {
+            // Fence syncs signal when the commands issued so far complete;
+            // make sure those commands are actually committed to the GPU.
+            typedef EGLBoolean (*PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)(EGLDisplay);
+            static PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC pegl_sched = NULL;
+            if (!pegl_sched)
+                pegl_sched = (PFNEGLWAITUNTILWORKSCHEDULEDANGLEPROC)
+                    eglGetProcAddress("eglWaitUntilWorkScheduledANGLE");
+            if (pegl_sched) pegl_sched(g_gl_disp);
+            else            glFlush();
+            eglDestroySync(g_gl_disp, sync);
+        } else {
+            // Sync creation failed (extension missing?) — stay correct.
+            glFinish();
+        }
+    } else {
+        glFinish();
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDeleteFramebuffers(1, &g_frame_fbo);   g_frame_fbo = 0;

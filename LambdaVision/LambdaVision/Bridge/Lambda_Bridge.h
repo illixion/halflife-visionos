@@ -293,6 +293,15 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            float r, float g, float b);
 int lambda_gl_end_frame(void);
 
+// GPU-side frame fence. Register an MTLSharedEvent (borrowed, unretained)
+// and the value end_frame should signal on ANGLE's command queue when the
+// current eye's GPU work completes. The caller's MTLCommandQueue must
+// waitForEvent(event, value) before reading the rendered texture. While a
+// fence event is registered, end_frame no longer blocks in glFinish —
+// call before EACH eye render with a strictly increasing value.
+void lambda_gl_set_frame_fence(void *mtl_shared_event,
+                               unsigned long long signal_value);
+
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
 // 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,

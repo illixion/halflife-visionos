@@ -92,6 +92,14 @@ actor Renderer {
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
 
+    // Signaled by ANGLE's command queue when an eye's GL render completes
+    // (EGL_ANGLE_metal_shared_event_sync, registered with the bridge before
+    // each eye). Our queue waits on it GPU-side before FXAA/display reads
+    // colorMap — replaces the per-eye glFinish so the GL worker's CPU work
+    // overlaps the GPU instead of serializing with it.
+    let angleFenceEvent: MTLSharedEvent
+    var angleFenceValue: UInt64 = 0
+
     var uniformBufferOffset = 0
 
     var uniformBufferIndex = 0
@@ -145,6 +153,7 @@ actor Renderer {
         #endif
 
         self.endFrameEvent = device.makeSharedEvent()!
+        self.angleFenceEvent = device.makeSharedEvent()!
         // Start the signal value + committed frames index at
         // max buffers in flight to avoid negative values
         self.endFrameEvent.signaledValue = UInt64(maxBuffersInFlight)
@@ -759,6 +768,13 @@ actor Renderer {
         }
 
         for eye in 0..<2 {
+            // GPU-side fence for this eye: the bridge signals angleFenceEvent
+            // with this value on ANGLE's queue when the eye's render
+            // completes, instead of blocking the GL worker in glFinish.
+            angleFenceValue += 1
+            lambda_gl_set_frame_fence(
+                Unmanaged.passUnretained(angleFenceEvent).toOpaque(),
+                angleFenceValue)
             // Per-eye position in head-local space, X = right (meters).
             // view[0] vs [1] left/right ordering isn't formally guaranteed,
             // so reading the actual x value auto-derives the sign instead
@@ -797,6 +813,12 @@ actor Renderer {
                 print("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
             }
         }
+
+        // Order our queue after ANGLE's colorMap writes for both eyes. The
+        // wait is GPU-side (queue stalls, not the CPU), pairing with the
+        // per-eye fence signals above; angleFenceValue is the last (eye 1)
+        // value, which implies eye 0's earlier value on the same event.
+        commandQueue.waitForEvent(angleFenceEvent, value: angleFenceValue)
 
         for (i, drawable) in drawables.enumerated() {
             // FXAA + upscale are encoded once, into the first drawable's
