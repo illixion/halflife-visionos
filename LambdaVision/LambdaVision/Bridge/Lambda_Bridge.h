@@ -231,13 +231,19 @@ int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
                                          void *mtl_texture, int width, int height,
                                          float r, float g, float b);
 
-// Full per-eye render: AVP frustum + head-tracked viewangles installed
-// for the duration of the engine call. view_angles3 = pitch/yaw/roll in
-// xash degrees.
+// Full per-eye render: AVP frustum + head-tracked viewangles + head
+// translation installed for the duration of the engine call.
+// view_angles3 = (absolute pitch, yaw DELTA added to the game's yaw,
+// absolute roll) in xash degrees — see lambda_engine_set_view_angles for
+// why pitch/roll are absolute. view_offset3 = head translation since
+// baseline in the baseline-forward frame (x forward, y left, z up; xash
+// units); the engine rotates it by the game's yaw and adds it to the view
+// origin (camera detaches from the player entity). NULL for none.
 int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
                                      const float *tangents4,
                                      float zNear, float zFar,
                                      const float *view_angles3,
+                                     const float *view_offset3,
                                      void *mtl_texture, int width, int height,
                                      float r, float g, float b);
 
@@ -252,6 +258,13 @@ int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
 void lambda_engine_set_projection_tangents(const float *tangents4,
                                            float zNear, float zFar);
 void lambda_engine_clear_projection_override(void);
+
+// Head-tracked view: absolute pitch/roll + yaw delta (xash degrees), and
+// head translation since baseline (baseline-forward frame, xash units).
+// Normally driven via lambda_gl_worker_render_eye_full.
+void lambda_engine_set_view_angles(float pitch_abs, float yaw_delta, float roll_abs);
+void lambda_engine_set_view_offset(float x, float y, float z);
+void lambda_engine_clear_view_angles(void);
 
 // Posts an engine console command (Cbuf_AddText) onto the worker thread.
 // Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.

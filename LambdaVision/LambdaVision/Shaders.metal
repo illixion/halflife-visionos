@@ -50,9 +50,13 @@ vertex ColorInOut fullscreenVertexShader(uint vid [[vertex_id]],
     ColorInOut out;
     float2 pos = float2((vid == 1) ? 3.0 : -1.0,
                         (vid == 2) ? 3.0 : -1.0);
-    // Reverse-Z depth (drawable clear=0, compare=greater): emit z=1 so the
-    // fullscreen pass always wins the depth test.
-    out.position = float4(pos, 1.0, 1.0);
+    // Reverse-Z depth (drawable clear=0, compare=greater). The compositor
+    // uses the drawable's depth buffer for positional reprojection: z=1
+    // (near plane) tells it the whole image sits millimeters from the
+    // viewer's face, so every head translation produces a huge corrective
+    // warp — visible as pulsating/jelly. Emit a small value (≈far) instead;
+    // TODO: resolve the engine's real per-pixel depth for exact reprojection.
+    out.position = float4(pos, 0.0001, 1.0);
     out.texCoord = pos * 0.5 + 0.5;
     out.eye = amp_id;
     return out;

@@ -61,10 +61,10 @@ index 7cd9c1f..504f056 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
-index d4628f3..0f652ba 100644
+index d4628f3..4c4c225 100644
 --- a/engine/client/cl_view.c
 +++ b/engine/client/cl_view.c
-@@ -22,6 +22,13 @@ GNU General Public License for more details.
+@@ -22,6 +22,14 @@ GNU General Public License for more details.
  #include "input.h" // touch
  #include "platform/platform.h" // GL_UpdateSwapInterval
  
@@ -74,26 +74,46 @@ index d4628f3..0f652ba 100644
 +float cl_stereo_eye_offset = 0.0f;
 +int   cl_stereo_view_angles_override_active = 0;
 +float cl_stereo_view_angles_override[3] = { 0.0f, 0.0f, 0.0f }; // pitch, yaw, roll
++float cl_stereo_view_origin_offset[3] = { 0.0f, 0.0f, 0.0f }; // head translation, baseline-yaw frame
 +
  /*
  ===============
  V_CalcViewRect
-@@ -419,6 +426,32 @@ void V_RenderView( void )
+@@ -419,6 +427,51 @@ void V_RenderView( void )
  			ref.dllFuncs.R_ClearScreen();
  		}
  
-+		// Head-tracked view angles: when active, replace the game's
-+		// computed viewangles with AVP's head pose. Set externally by
-+		// the visionOS bridge each frame before R_RenderFrame. Order
-+		// matters: override viewangles FIRST so the IPD shift below
-+		// computes view-right from the head pose, not the keyboard pose.
++		// Head-tracked view angles. Pitch and roll REPLACE the game's
++		// values with the headset's absolute orientation, decomposed in
++		// the engine's own Euler order (yaw·pitch·roll) — mixing game
++		// pitch with head pitch, or composing per-axis deltas, makes
++		// compound head moves (yaw then pitch) pick up spurious roll.
++		// Yaw alone is a DELTA added to the game's yaw: yaw composes on
++		// the left in this Euler order, so spawn orientation and
++		// keyboard/mouse turning still work and the result is exact.
++		// Set externally by the visionOS bridge each frame. Order
++		// matters: apply viewangles FIRST so the IPD shift below
++		// computes view-right from the final (head-rotated) view.
 +		extern int   cl_stereo_view_angles_override_active;
-+		extern float cl_stereo_view_angles_override[3]; // pitch, yaw, roll
++		extern float cl_stereo_view_angles_override[3]; // abs pitch, delta yaw, abs roll
++		extern float cl_stereo_view_origin_offset[3];   // head translation, baseline-yaw frame
 +		if( cl_stereo_view_angles_override_active )
 +		{
-+			rvp.viewangles[0] = cl_stereo_view_angles_override[0];
-+			rvp.viewangles[1] = cl_stereo_view_angles_override[1];
-+			rvp.viewangles[2] = cl_stereo_view_angles_override[2];
++			// Positional tracking: the headset's translation since baseline,
++			// expressed in the baseline-forward frame (xash units), rotated
++			// into the world by the game's yaw so physical movement maps to
++			// the direction the player entity faces. Must use the yaw BEFORE
++			// the head delta below — the head's own yaw is already part of
++			// the room-space measurement.
++			float yawrad = DEG2RAD( rvp.viewangles[1] );
++			float ys = sinf( yawrad ), yc = cosf( yawrad );
++			rvp.vieworigin[0] += yc * cl_stereo_view_origin_offset[0] - ys * cl_stereo_view_origin_offset[1];
++			rvp.vieworigin[1] += ys * cl_stereo_view_origin_offset[0] + yc * cl_stereo_view_origin_offset[1];
++			rvp.vieworigin[2] += cl_stereo_view_origin_offset[2];
++
++			rvp.viewangles[0]  = cl_stereo_view_angles_override[0];
++			rvp.viewangles[1] += cl_stereo_view_angles_override[1];
++			rvp.viewangles[2]  = cl_stereo_view_angles_override[2];
 +		}
 +
 +		// Stereo: shift the camera along the view-right axis by the
@@ -591,6 +611,61 @@ index 4e1d5b8..fab0449 100644
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !WORLDMODEL )
  		return false;
  
+diff --git a/ref/gl/gl_frustum.c b/ref/gl/gl_frustum.c
+index e3aa897..6b1871f 100644
+--- a/ref/gl/gl_frustum.c
++++ b/ref/gl/gl_frustum.c
+@@ -69,6 +69,38 @@ void GL_FrustumInitProj( gl_frustum_t *out, float flZNear, float flZFar, float f
+ 	GL_FrustumSetPlane( out, FRUSTUM_NEAR, RI.cull_vforward, DotProduct( RI.cull_vforward, nearpoint ));
+ }
+ 
++// Asymmetric (off-axis) frustum from per-side view-space tangents, for
++// stereo eye views whose projection is not centered on the view axis.
++// Tangent magnitudes: how far the frustum extends past forward on each side.
++static void GL_FrustumSetSidePlane( gl_frustum_t *out, int side, float tangent, const vec3_t axis, float axisSign )
++{
++	float	inv = 1.0f / sqrtf( 1.0f + tangent * tangent );
++	float	xs = tangent * inv; // sin of the half-angle
++	float	xc = inv;           // cos of the half-angle
++	vec3_t	normal;
++
++	VectorMAM( xs, RI.cull_vforward, xc * axisSign, axis, normal );
++	GL_FrustumSetPlane( out, side, normal, DotProduct( RI.cullorigin, normal ));
++}
++
++void GL_FrustumInitProjAsym( gl_frustum_t *out, float flZFar, float tanLeft, float tanRight, float tanTop, float tanBottom )
++{
++	vec3_t	farpoint, iforward;
++
++	// each inward-pointing plane normal is sin(a)*forward ± cos(a)*axis;
++	// the plane built with -right bounds the RIGHT edge, +right the LEFT,
++	// -up the TOP, +up the BOTTOM (matching GL_FrustumInitProj's layout).
++	GL_FrustumSetSidePlane( out, FRUSTUM_LEFT, tanRight, RI.cull_vright, -1.0f );
++	GL_FrustumSetSidePlane( out, FRUSTUM_RIGHT, tanLeft, RI.cull_vright, 1.0f );
++	GL_FrustumSetSidePlane( out, FRUSTUM_BOTTOM, tanTop, RI.cull_vup, -1.0f );
++	GL_FrustumSetSidePlane( out, FRUSTUM_TOP, tanBottom, RI.cull_vup, 1.0f );
++
++	// setup far plane
++	VectorNegate( RI.cull_vforward, iforward );
++	VectorMA( RI.cullorigin, flZFar, RI.cull_vforward, farpoint );
++	GL_FrustumSetPlane( out, FRUSTUM_FAR, iforward, DotProduct( iforward, farpoint ));
++}
++
+ void GL_FrustumInitOrtho( gl_frustum_t *out, float xLeft, float xRight, float yTop, float yBottom, float flZNear, float flZFar )
+ {
+ 	vec3_t	iforward, iright, iup;
+diff --git a/ref/gl/gl_frustum.h b/ref/gl/gl_frustum.h
+index d54ee49..302b1a4 100644
+--- a/ref/gl/gl_frustum.h
++++ b/ref/gl/gl_frustum.h
+@@ -32,6 +32,7 @@ typedef struct gl_frustum_s
+ } gl_frustum_t;
+ 
+ void GL_FrustumInitProj( gl_frustum_t *out, float flZNear, float flZFar, float flFovX, float flFovY );
++void GL_FrustumInitProjAsym( gl_frustum_t *out, float flZFar, float tanLeft, float tanRight, float tanTop, float tanBottom );
+ void GL_FrustumInitOrtho( gl_frustum_t *out, float xLeft, float xRight, float yTop, float yBottom, float flZNear, float flZFar );
+ 
+ // cull methods
 diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
 index 216039f..64f4303 100644
 --- a/ref/gl/gl_image.c
@@ -666,24 +741,39 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..08606eb 100644
+index 0568486..8e47124 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
-@@ -379,6 +379,13 @@ void R_SetupFrustum( void )
- R_SetupProjectionMatrix
- =============
- */
+@@ -345,6 +345,16 @@ static float R_GetFarClip( void )
+ 	return 2048.0f;
+ }
+ 
 +// Stereo projection override (visionOS): asymmetric off-axis frustum from
 +// CompositorServices's per-eye tangents. The bridge sets these once per eye
-+// before invoking R_RenderFrame; R_SetupProjectionMatrix below installs them
-+// in place of the symmetric-FOV path.
++// before invoking R_RenderFrame; R_SetupProjectionMatrix installs the matrix
++// in place of the symmetric-FOV path, and R_SetupFrustum builds the culling
++// planes from the same tangents so nothing visible in the wider eye frustum
++// gets frustum-culled against the game's narrower symmetric FOV.
 +__attribute__((visibility("default"))) int   cl_stereo_proj_override_active = 0;
 +__attribute__((visibility("default"))) float cl_stereo_proj_override[16];
++__attribute__((visibility("default"))) float cl_stereo_cull_tangents[4]; // left, right, top, bottom
 +
- static void R_SetupProjectionMatrix( matrix4x4 m )
- {
- 	GLfloat	xMin, xMax, yMin, yMax, zNear, zFar;
-@@ -390,6 +397,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
+ /*
+ ===============
+ R_SetupFrustum
+@@ -368,6 +378,11 @@ void R_SetupFrustum( void )
+ 		const ref_overview_t	*ov = gEngfuncs.GetOverviewParms();
+ 		GL_FrustumInitOrtho( &RI.frustum, ov->xLeft, ov->xRight, ov->yTop, ov->yBottom, ov->zNear, ov->zFar );
+ 	}
++	else if( cl_stereo_proj_override_active )
++	{
++		GL_FrustumInitProjAsym( &RI.frustum, R_GetFarClip(), cl_stereo_cull_tangents[0],
++			cl_stereo_cull_tangents[1], cl_stereo_cull_tangents[2], cl_stereo_cull_tangents[3] );
++	}
+ 	else
+ 	{
+ 		GL_FrustumInitProj( &RI.frustum, 0.0f, R_GetFarClip(), RI.rvp.fov_x, RI.rvp.fov_y ); // NOTE: we ignore nearplane here (mirrors only)
+@@ -390,6 +405,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
  		return;
  	}
  

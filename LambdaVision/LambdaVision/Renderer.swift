@@ -93,6 +93,15 @@ actor Renderer {
     let worldTracking: WorldTrackingProvider
     let layerRenderer: LayerRenderer
     let appModel: AppModel
+    // Head yaw at the first valid sample. Only yaw needs a baseline:
+    // pitch and roll are sent to the engine as absolute values (they
+    // replace the game's), while yaw is sent as a delta from this
+    // baseline so the game's spawn orientation and keyboard turning
+    // remain in effect.
+    private var headBaselineYaw: Float? = nil
+    // Head position (xash basis, meters) captured together with the yaw
+    // baseline; physical movement is delivered as a delta from here.
+    private var headBaselinePos: SIMD3<Float>? = nil
 
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -525,39 +534,75 @@ actor Renderer {
         // frame. queryDeviceAnchor may return nil during a tracking
         // dropout; we skip the override in that case so mouse-look still
         // works as a fallback.
+        // Build the head's rotation matrix in xash basis (+X forward,
+        // +Y left, +Z up). Columns are head's forward/left/up vectors,
+        // each derived from the head transform's basis vectors in Apple
+        // coords and converted via apple(x,y,z) → xash(-z,-x,y).
+        // Query the anchor ONCE and use it for both the game camera and
+        // drawable.deviceAnchor. Re-querying at present time yields a
+        // fresher estimate for the same target timestamp; the compositor
+        // then reprojects assuming the image matches the newer pose, and
+        // the mismatch shows up as overshoot/snap-back during head motion.
         let presentTime = primary.frameTiming.presentationTime.timeInterval
-        let headViewAngles: SIMD3<Float>? = {
-            guard worldTracking.state == .running,
-                  let anchor = worldTracking.queryDeviceAnchor(atTimestamp: presentTime)
-            else { return nil }
-            // Apple coords: +X right, +Y up, -Z forward.
-            // anchor.originFromAnchorTransform.columns.2 is the head's +Z
-            // basis (back-facing), so -col2 = forward-facing in Apple world.
+        let frameDeviceAnchor: DeviceAnchor? =
+            worldTracking.state == .running
+                ? worldTracking.queryDeviceAnchor(atTimestamp: presentTime)
+                : nil
+        let headPose: (rot: simd_float3x3, pos: SIMD3<Float>)? = {
+            guard let anchor = frameDeviceAnchor else { return nil }
             let m = anchor.originFromAnchorTransform
-            let fwdApple = SIMD3<Float>(-m.columns.2.x, -m.columns.2.y, -m.columns.2.z)
-            let upApple  = SIMD3<Float>( m.columns.1.x,  m.columns.1.y,  m.columns.1.z)
-            // Convert to xash basis: +X forward, +Y left, +Z up.
-            // apple (x, y, z) → xash (-z, -x, y).
-            let fwdXash = SIMD3<Float>(-fwdApple.z, -fwdApple.x, fwdApple.y)
-            let upXash  = SIMD3<Float>(-upApple.z,  -upApple.x,  upApple.y)
-            // xash yaw = atan2(fwd.y, fwd.x); zero = looking +X.
-            // xash pitch = degrees DOWN from horizontal — i.e. asin(-fwd.z)
-            //   (positive pitch when fwd.z < 0, i.e. looking downward).
-            // xash roll = head tilt. Derive from where 'up' lands after
-            //   yaw+pitch: roll = atan2(rightComponent_of_up, upComponent_of_up)
-            //   computed in the view-aligned basis.
-            let rad2deg: Float = 180.0 / .pi
-            let yawDeg   = atan2f(fwdXash.y, fwdXash.x) * rad2deg
-            let horizLen = sqrtf(fwdXash.x * fwdXash.x + fwdXash.y * fwdXash.y)
-            let pitchDeg = atan2f(-fwdXash.z, horizLen) * rad2deg
-            // Roll: project 'up' onto the plane perpendicular to fwd, then
-            // measure rotation from world-up. world-up in xash is (0,0,1).
-            // For now leave roll at 0 (head tilt is rarely meaningful in
-            // first-person games and adds nausea risk).
-            _ = upXash
-            let rollDeg: Float = 0
-            return SIMD3<Float>(pitchDeg, yawDeg, rollDeg)
+            // Apple-basis head axes: forward = -col2, up = +col1, right = +col0.
+            let fwdA   = SIMD3<Float>(-m.columns.2.x, -m.columns.2.y, -m.columns.2.z)
+            let upA    = SIMD3<Float>( m.columns.1.x,  m.columns.1.y,  m.columns.1.z)
+            let rightA = SIMD3<Float>( m.columns.0.x,  m.columns.0.y,  m.columns.0.z)
+            func a2x(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-v.z, -v.x, v.y) }
+            let fwdX  = a2x(fwdA)
+            let upX   = a2x(upA)
+            let leftX = -a2x(rightA)  // xash +Y = left
+            let posX  = a2x(SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z))
+            return (simd_float3x3(fwdX, leftX, upX), posX)
         }()
+
+        // Decompose the ABSOLUTE head orientation into the engine's own
+        // Euler order. xash builds its view as R = Rz(yaw)·Ry(pitch)·Rx(roll)
+        // with fwd = (cp·cy, cp·sy, -sp), left.z = sr·cp, up.z = cr·cp
+        // (see AngleVectors in xash3d_mathlib.h), which inverts exactly to:
+        //   yaw   = atan2(fwd.y, fwd.x)
+        //   pitch = atan2(-fwd.z, |fwd.xy|)
+        //   roll  = atan2(left.z, up.z)
+        // Pitch and roll are fed to the engine as absolutes; yaw as a
+        // delta from the baseline. Because yaw composes on the left in
+        // this Euler order, gameYaw + Δyaw reproduces the head rotation
+        // exactly — compound moves (turn left, then look up) stay pure,
+        // with no roll leakage and nothing to drift.
+        var headAngles: SIMD3<Float>? = nil  // (abs pitch, delta yaw, abs roll) deg
+        var headOffset = SIMD3<Float>(0, 0, 0)  // baseline-forward frame, xash units
+        if let cur = headPose {
+            let fwd  = cur.rot.columns.0
+            let left = cur.rot.columns.1
+            let up   = cur.rot.columns.2
+            let rad2deg: Float = 180.0 / .pi
+            let horizLen = sqrtf(fwd.x * fwd.x + fwd.y * fwd.y)
+            let pitchDeg = atan2f(-fwd.z, horizLen) * rad2deg
+            let yawDeg   = atan2f(fwd.y, fwd.x) * rad2deg
+            let rollDeg  = atan2f(left.z, up.z) * rad2deg
+            if headBaselineYaw == nil {
+                headBaselineYaw = yawDeg
+                headBaselinePos = cur.pos
+            }
+            var dyaw = yawDeg - headBaselineYaw!
+            if dyaw > 180 { dyaw -= 360 } else if dyaw < -180 { dyaw += 360 }
+            headAngles = SIMD3<Float>(pitchDeg, dyaw, rollDeg)
+
+            // Positional tracking: room-space translation since baseline,
+            // re-expressed in the baseline-forward frame (rotate by
+            // -baselineYaw about Z) so the engine can map it into the game
+            // world with the player's yaw. Scaled meters → xash units.
+            let d = (cur.pos - headBaselinePos!) * appleToXash
+            let baseRad = headBaselineYaw! * .pi / 180.0
+            let s = sinf(baseRad), c = cosf(baseRad)
+            headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
+        }
 
         for eye in 0..<2 {
             // Per-eye position in head-local space, X = right (meters).
@@ -570,14 +615,19 @@ actor Renderer {
             var tang = primary.views[eye].tangents  // (left, right, top, bottom)
             let rc: Int32 = withUnsafePointer(to: &tang) { tp in
                 tp.withMemoryRebound(to: Float.self, capacity: 4) { fp -> Int32 in
-                    if var hva = headViewAngles {
-                        return withUnsafePointer(to: &hva) { ap in
+                    if var angles = headAngles {
+                        var offset = headOffset
+                        return withUnsafePointer(to: &angles) { ap in
                             ap.withMemoryRebound(to: Float.self, capacity: 3) { afp in
-                                lambda_gl_worker_render_eye_full(
-                                    Int32(eye), off,
-                                    fp, zNear, zFar, afp,
-                                    eyePtr, Int32(colorMap.width), Int32(colorMap.height),
-                                    0.1, 0.1, 0.1)
+                                withUnsafePointer(to: &offset) { op in
+                                    op.withMemoryRebound(to: Float.self, capacity: 3) { ofp in
+                                        lambda_gl_worker_render_eye_full(
+                                            Int32(eye), off,
+                                            fp, zNear, zFar, afp, ofp,
+                                            eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                                            0.1, 0.1, 0.1)
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -595,7 +645,8 @@ actor Renderer {
         }
 
         for drawable in drawables {
-            render(drawable: drawable, frameIndex: frame.frameIndex)
+            render(drawable: drawable, frameIndex: frame.frameIndex,
+                   deviceAnchor: frameDeviceAnchor)
         }
 
         committedFrameIndex += 1
@@ -605,10 +656,10 @@ actor Renderer {
         frame.endSubmission()
     }
 
-    func render(drawable: LayerRenderer.Drawable, frameIndex: UInt64) {
-        let time = drawable.frameTiming.presentationTime.timeInterval
-        let deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: time)
-
+    func render(drawable: LayerRenderer.Drawable, frameIndex: UInt64,
+                deviceAnchor: DeviceAnchor?) {
+        // Must be the SAME anchor the engine camera rendered with — the
+        // compositor reprojects the image from this pose to display time.
         drawable.deviceAnchor = deviceAnchor
 
         if perDrawableTarget[drawable.target] == nil {

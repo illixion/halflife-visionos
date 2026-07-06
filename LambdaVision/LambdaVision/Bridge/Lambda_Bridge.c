@@ -2296,7 +2296,20 @@ int lambda_engine_init(const char *writable_dir,
 
     g_engine_inited = 1;
     // Enable cheats so debug binds (e.g. V → noclip) work.
-    { extern void Cbuf_AddText( const char *text ); Cbuf_AddText("sv_cheats 1\n"); }
+    // fps_max 0: the compositor paces Host_DoFrame externally (90 Hz);
+    // with the default cap (72) Host_FilterTime silently drops ~1 in 5
+    // frames, presenting a cleared texture for that eye — visible judder.
+    {
+        extern void Cbuf_AddText( const char *text );
+        Cbuf_AddText("sv_cheats 1\n");
+        Cbuf_AddText("fps_max 0\n");
+        // gl_vbo 1: the immediate-mode world path costs thousands of tiny
+        // GL2-shim→ANGLE draws per eye per frame — measured p50 7-13 ms for
+        // the stereo pair (misses the 11.1 ms 90 Hz budget in busy scenes).
+        // The VBO path halves that (p50 5-7 ms, <15% frames over budget)
+        // with no observed glitches on ANGLE/Metal.
+        Cbuf_AddText("gl_vbo 1\n");
+    }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
     return 0;
@@ -2320,16 +2333,29 @@ void lambda_engine_set_stereo_offset(float off) {
     cl_stereo_eye_offset = off;
 }
 
-// Head-tracked view angles (pitch/yaw/roll, degrees in xash convention).
-// xash AngleVectors expects: yaw=0 → looking +X; +yaw → counterclockwise
-// (toward +Y / left); pitch=+ → looking down; roll=+ → head tilt right.
+// Head-tracked view angles, degrees in xash convention (yaw=0 → +X;
+// +yaw → left; +pitch → down; +roll → tilt right). Semantics match the
+// engine-side override in cl_view.c: pitch and roll are ABSOLUTE (they
+// replace the game's values with the headset orientation, decomposed in
+// the engine's own yaw·pitch·roll Euler order), yaw is a DELTA added to
+// the game's yaw so spawn orientation and keyboard turning still apply.
 extern int   cl_stereo_view_angles_override_active;
 extern float cl_stereo_view_angles_override[3];
-void lambda_engine_set_view_angles(float pitch, float yaw, float roll) {
-    cl_stereo_view_angles_override[0] = pitch;
-    cl_stereo_view_angles_override[1] = yaw;
-    cl_stereo_view_angles_override[2] = roll;
+extern float cl_stereo_view_origin_offset[3];
+void lambda_engine_set_view_angles(float pitch_abs, float yaw_delta, float roll_abs) {
+    cl_stereo_view_angles_override[0] = pitch_abs;
+    cl_stereo_view_angles_override[1] = yaw_delta;
+    cl_stereo_view_angles_override[2] = roll_abs;
     cl_stereo_view_angles_override_active = 1;
+}
+// Positional tracking: head translation since baseline, xash units, expressed
+// in the baseline-forward frame (x = toward where the user faced at start,
+// y = left, z = up). The engine rotates it by the game's yaw and adds it to
+// vieworigin, detaching the camera from the player origin.
+void lambda_engine_set_view_offset(float x, float y, float z) {
+    cl_stereo_view_origin_offset[0] = x;
+    cl_stereo_view_origin_offset[1] = y;
+    cl_stereo_view_origin_offset[2] = z;
 }
 void lambda_engine_clear_view_angles(void) {
     cl_stereo_view_angles_override_active = 0;
@@ -2341,8 +2367,10 @@ void lambda_engine_clear_view_angles(void) {
 // at the near plane. Forward-Z OpenGL convention (xash's depth pipeline).
 extern int   cl_stereo_proj_override_active;
 extern float cl_stereo_proj_override[16];
+extern float cl_stereo_cull_tangents[4];
 void lambda_engine_set_projection_tangents(const float *tangents4,
                                            float zNear, float zFar) {
+    memcpy(cl_stereo_cull_tangents, tangents4, sizeof cl_stereo_cull_tangents);
     float l = -tangents4[0] * zNear;
     float r =  tangents4[1] * zNear;
     float t =  tangents4[2] * zNear;
@@ -2921,10 +2949,12 @@ static float      g_w_eye_offset = 0.0f;
 static int        g_w_have_tangents = 0;
 static float      g_w_tangents[4] = {0};
 static float      g_w_znear = 4.0f, g_w_zfar = 4096.0f;
-// Head-tracked viewangles override (pitch/yaw/roll, xash degrees).
-// Same set/clear-around-engine pattern as tangents.
+// Head-tracked viewangles override (abs pitch, delta yaw, abs roll —
+// xash degrees). Same set/clear-around-engine pattern as tangents.
 static int        g_w_have_view_angles = 0;
 static float      g_w_view_angles[3] = {0};
+// Head translation since baseline (baseline-forward frame, xash units).
+static float      g_w_view_offset[3] = {0};
 
 static void *gl_worker_main(void *arg) {
     (void)arg;
@@ -2958,10 +2988,14 @@ static void *gl_worker_main(void *arg) {
                 lambda_engine_set_stereo_offset(g_w_eye_offset);
                 if (g_w_have_tangents)
                     lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
-                if (g_w_have_view_angles)
+                if (g_w_have_view_angles) {
                     lambda_engine_set_view_angles(g_w_view_angles[0],
                                                   g_w_view_angles[1],
                                                   g_w_view_angles[2]);
+                    lambda_engine_set_view_offset(g_w_view_offset[0],
+                                                  g_w_view_offset[1],
+                                                  g_w_view_offset[2]);
+                }
                 lambda_engine_frame();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
@@ -2984,10 +3018,14 @@ static void *gl_worker_main(void *arg) {
                 lambda_engine_set_stereo_offset(g_w_eye_offset);
                 if (g_w_have_tangents)
                     lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
-                if (g_w_have_view_angles)
+                if (g_w_have_view_angles) {
                     lambda_engine_set_view_angles(g_w_view_angles[0],
                                                   g_w_view_angles[1],
                                                   g_w_view_angles[2]);
+                    lambda_engine_set_view_offset(g_w_view_offset[0],
+                                                  g_w_view_offset[1],
+                                                  g_w_view_offset[2]);
+                }
                 lambda_engine_render_view_only();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
@@ -3112,12 +3150,15 @@ int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
     return rc;
 }
 
-// Full per-eye render: AVP frustum (tangents) + head-tracked viewangles.
-// view_angles3 = (pitch, yaw, roll) in xash degrees.
+// Full per-eye render: AVP frustum (tangents) + head-tracked viewangles +
+// head translation. view_angles3 = (pitch, yaw, roll) in xash degrees;
+// view_offset3 = head translation since baseline (baseline-forward frame,
+// xash units), NULL for none.
 int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
                                      const float *tangents4,
                                      float zNear, float zFar,
                                      const float *view_angles3,
+                                     const float *view_offset3,
                                      void *mtl_texture, int width, int height,
                                      float r, float g, float b) {
     pthread_mutex_lock(&g_w_api_mtx);
@@ -3131,6 +3172,9 @@ int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
     g_w_view_angles[0] = view_angles3[0];
     g_w_view_angles[1] = view_angles3[1];
     g_w_view_angles[2] = view_angles3[2];
+    g_w_view_offset[0] = view_offset3 ? view_offset3[0] : 0.0f;
+    g_w_view_offset[1] = view_offset3 ? view_offset3[1] : 0.0f;
+    g_w_view_offset[2] = view_offset3 ? view_offset3[2] : 0.0f;
     g_w_have_view_angles = 1;
     int rc = worker_post_and_wait(eye_index == 0 ? WORK_FRAME : WORK_FRAME_EYE2);
     pthread_mutex_unlock(&g_w_api_mtx);
