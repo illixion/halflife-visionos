@@ -171,12 +171,16 @@ sign_app() {
 
     # Sign nested app extensions before the outer bundle (inside-out rule).
     # Same profile entitlements as the app — sideload profiles carry one
-    # application-identifier for everything.
-    find "$app_path/PlugIns" -maxdepth 1 -name '*.appex' -type d 2>/dev/null | while read -r appex; do
-        echo "  Signing: $(basename "$appex") (with entitlements)"
-        codesign --force --sign "$identity" --keychain "$keychain" \
-            --entitlements "$entitlements" --timestamp=none "$appex"
-    done
+    # application-identifier for everything. Guard the directory: apps that
+    # ship no extensions have no PlugIns/, and `find` on a missing path
+    # exits 1, which `set -euo pipefail` turns into a silent mid-sign abort.
+    if [[ -d "$app_path/PlugIns" ]]; then
+        find "$app_path/PlugIns" -maxdepth 1 -name '*.appex' -type d | while read -r appex; do
+            echo "  Signing: $(basename "$appex") (with entitlements)"
+            codesign --force --sign "$identity" --keychain "$keychain" \
+                --entitlements "$entitlements" --timestamp=none "$appex"
+        done
+    fi
 
     # Sign the main app bundle with entitlements
     echo "  Signing: $(basename "$app_path") (with entitlements)"
@@ -272,7 +276,12 @@ fi
 # IDs are patched per-bundle here instead.
 echo "==> Setting bundle identifiers..."
 plutil -replace CFBundleIdentifier -string "$BUILD_BUNDLE_ID" "$APP_BUNDLE/Info.plist"
-APPEX_BUNDLE=$(find "$APP_BUNDLE/PlugIns" -maxdepth 1 -name '*.appex' -type d 2>/dev/null | head -1)
+# No PlugIns/ (app ships no extensions) must not abort the script: `find`
+# exits 1 on a missing path and this assignment runs under `set -e`.
+APPEX_BUNDLE=""
+if [[ -d "$APP_BUNDLE/PlugIns" ]]; then
+    APPEX_BUNDLE=$(find "$APP_BUNDLE/PlugIns" -maxdepth 1 -name '*.appex' -type d | head -1)
+fi
 if [[ -n "$APPEX_BUNDLE" ]]; then
     plutil -replace CFBundleIdentifier -string "${BUILD_BUNDLE_ID}.broadcast" "$APPEX_BUNDLE/Info.plist"
     echo "  App:       $BUILD_BUNDLE_ID"
