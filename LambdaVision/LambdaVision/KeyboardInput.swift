@@ -84,6 +84,7 @@ final class KeyboardInput {
         switch code {
         case .keyV: return "noclip"
         case .keyF: return "impulse 100" // flashlight
+        case .keyK: return "impulse 101" // give all weapons (cheat)
         case .keyQ: return "lastinv"     // quick weapon switch
         default:    return nil
         }

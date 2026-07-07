@@ -841,10 +841,74 @@ index 5b5e3a6..c882802 100644
  		if bld.get_define('HAVE_FFMPEG'):
  			libs.append('SWRESAMPLE')
 diff --git a/filesystem/filesystem.c b/filesystem/filesystem.c
-index 302548a..399a05a 100644
+index 302548a..f7e0033 100644
 --- a/filesystem/filesystem.c
 +++ b/filesystem/filesystem.c
-@@ -1601,6 +1601,7 @@ static void *Sys_GetNativeObjectStub( const char *object )
+@@ -1293,6 +1293,33 @@ static uint32_t FS_PathExecFlag( const char *dir )
+ #endif // !XASH_ANDROID
+ }
+ 
++/*
++================
++FS_AddGameDirectoryOverlay
++
++Mount a SteamPipe overlay directory (valve_hd, valve_addon, ...). The
++gamedir itself is mirrored into fs_rodir by FS_AddGameHierarchy, but the
++overlays were only ever added relative to the working directory — an
++overlay living in the read-only tree (e.g. -rodir pointing at a Steam
++install with valve_hd next to valve) was silently never mounted.
++================
++*/
++static void FS_AddGameDirectoryOverlay( const char *dir, uint flags )
++{
++	char buf[MAX_VA_STRING];
++
++	if( !COM_StringEmpty( fs_rodir ))
++	{
++		Q_snprintf( buf, sizeof( buf ), "%s/%s", fs_rodir, dir );
++
++		FS_AllowDirectPaths( true );
++		FS_AddGameDirectory( buf, flags | FS_NOWRITE_PATH );
++		FS_AllowDirectPaths( false );
++	}
++
++	FS_AddGameDirectory( dir, flags );
++}
++
+ /*
+ ================
+ FS_AddGameHierarchy
+@@ -1373,25 +1400,25 @@ void FS_AddGameHierarchy( const char *dir, uint flags )
+ 	if( FBitSet( mount_flags, FS_MOUNT_HD ))
+ 	{
+ 		Q_snprintf( buf, sizeof( buf ), "%s_hd/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddGameDirectoryOverlay( buf, flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_ADDON ))
+ 	{
+ 		Q_snprintf( buf, sizeof( buf ), "%s_addon/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddGameDirectoryOverlay( buf, flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_LV ))
+ 	{
+ 		Q_snprintf( buf, sizeof( buf ), "%s_lv/", dir );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddGameDirectoryOverlay( buf, flags );
+ 	}
+ 
+ 	if( FBitSet( mount_flags, FS_MOUNT_L10N ))
+ 	{
+ 		Q_snprintf( buf, sizeof( buf ), "%s_%s/", dir, fs_language );
+-		FS_AddGameDirectory( buf, flags );
++		FS_AddGameDirectoryOverlay( buf, flags );
+ 	}
+ 
+ 	if( is_game_dir )
+@@ -1601,6 +1628,7 @@ static void *Sys_GetNativeObjectStub( const char *object )
  static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qboolean *has_game_dir )
  {
  	stringlist_t dirs;
@@ -852,7 +916,7 @@ index 302548a..399a05a 100644
  	int i;
  
  	stringlistinit( &dirs );
-@@ -1609,7 +1610,11 @@ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qb
+@@ -1609,7 +1637,11 @@ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qb
  
  	for( i = 0; i < dirs.numstrings; i++ )
  	{
