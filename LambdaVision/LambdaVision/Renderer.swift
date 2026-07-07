@@ -7,6 +7,7 @@
 
 import CompositorServices
 import Metal
+import QuartzCore
 import MetalFX
 import MetalKit
 import simd
@@ -36,6 +37,46 @@ extension LayerRenderer.Clock.Instant {
         let components = LayerRenderer.Clock.Instant.epoch.duration(to: self).components
         let nanoseconds = TimeInterval(components.attoseconds / 1_000_000_000)
         return TimeInterval(components.seconds) + (nanoseconds / TimeInterval(NSEC_PER_SEC))
+    }
+}
+
+/// Frame-time percentile logging (app side): where the milliseconds go
+/// when the headset drops below 90 Hz. Pairs with the GL worker's
+/// "[FT] cpu(ms)" line (per-eye engine CPU). Columns, ms, p50/p95/max:
+///   wait0    — backpressure: GPU still busy maxBuffersInFlight ago
+///   wait1    — colorMap race guard: previous frame's GPU not done
+///   eyes     — CPU submit of both eyes (engine tick + GL, worker RTT)
+///   angleGPU — eye-submit end → ANGLE's queue finished both eyes
+///   frameGPU — eye-submit end → our compositor pass finished too
+///   total    — whole renderFrame
+final class FrameTimingStats {
+    static let shared = FrameTimingStats()
+    private let lock = NSLock()
+    private var cols: [String: [Double]] = [:]
+    private var frames = 0
+    private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
+
+    func add(_ name: String, _ ms: Double) {
+        lock.lock()
+        cols[name, default: []].append(ms)
+        lock.unlock()
+    }
+
+    func frameDone() {
+        lock.lock()
+        defer { lock.unlock() }
+        frames += 1
+        guard frames >= 512 else { return }
+        var line = "[FT] app(ms)"
+        for key in FrameTimingStats.order {
+            guard var v = cols[key], !v.isEmpty else { continue }
+            v.sort()
+            let p95 = v[min(Int(Double(v.count) * 0.95), v.count - 1)]
+            line += String(format: " %@ %.1f/%.1f/%.1f", key, v[v.count / 2], p95, v.last!)
+        }
+        print(line)
+        cols.removeAll(keepingCapacity: true)
+        frames = 0
     }
 }
 
@@ -99,6 +140,9 @@ actor Renderer {
     // overlaps the GPU instead of serializing with it.
     let angleFenceEvent: MTLSharedEvent
     var angleFenceValue: UInt64 = 0
+    // GPU-completion timestamps for FrameTimingStats (MTL4 command
+    // buffers expose no gpuStart/EndTime; shared-event listeners do).
+    let ftListener = MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "LambdaVision.ft"))
 
     var uniformBufferOffset = 0
 
@@ -502,7 +546,14 @@ actor Renderer {
         // edge-directed reconstruction doubles as edge smoothing — the
         // engine render has no AA of its own (GL MSAA through ANGLE
         // measured +7 ms/pair; see Lambda_Bridge.c).
-        if logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
+        // DISABLED: frame timing showed the FXAA+MetalFX+composite chain
+        // costs ~13-14 ms GPU/frame (angleGPU p50 0.7 ms vs frameGPU p50
+        // 14-16 ms) — the whole app was GPU-bound at ~50 FPS on the post
+        // chain alone. At 0.75x engine scale the scaler's win over the
+        // composite pass's bilinear sample doesn't justify two extra
+        // full-res passes per eye.
+        let useMetalFXChain = false
+        if useMetalFXChain, logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
            let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
             let sd = MTLFXSpatialScalerDescriptor()
             sd.inputWidth = w
@@ -663,9 +714,11 @@ actor Renderer {
 
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
+        let ftFrameStart = CACurrentMediaTime()
         guard self.endFrameEvent.wait(untilSignaledValue: committedFrameIndex - UInt64(maxBuffersInFlight), timeoutMS: 10000) else {
             return
         }
+        FrameTimingStats.shared.add("wait0", (CACurrentMediaTime() - ftFrameStart) * 1000)
 
         frame.startUpdate()
 
@@ -833,9 +886,12 @@ actor Renderer {
         // stale rectangular patches during head motion. endFrameEvent is
         // signaled after each frame's queue work, so waiting for the
         // previous frame's value closes the race.
+        let ftWait1Start = CACurrentMediaTime()
         guard self.endFrameEvent.wait(untilSignaledValue: committedFrameIndex, timeoutMS: 10000) else {
             return
         }
+        let ftEyesStart = CACurrentMediaTime()
+        FrameTimingStats.shared.add("wait1", (ftEyesStart - ftWait1Start) * 1000)
 
         for eye in 0..<2 {
             // GPU-side fence for this eye: the bridge signals angleFenceEvent
@@ -911,6 +967,12 @@ actor Renderer {
         // value, which implies eye 0's earlier value on the same event.
         commandQueue.waitForEvent(angleFenceEvent, value: angleFenceValue)
 
+        let ftEyesEnd = CACurrentMediaTime()
+        FrameTimingStats.shared.add("eyes", (ftEyesEnd - ftEyesStart) * 1000)
+        angleFenceEvent.notify(ftListener, atValue: angleFenceValue) { _, _ in
+            FrameTimingStats.shared.add("angleGPU", (CACurrentMediaTime() - ftEyesEnd) * 1000)
+        }
+
         for (i, drawable) in drawables.enumerated() {
             // FXAA + upscale are encoded once, into the first drawable's
             // command buffer; further drawables (capture) reuse displayMap.
@@ -922,7 +984,13 @@ actor Renderer {
 
         commandQueue.signalEvent(self.endFrameEvent, value: committedFrameIndex)
 
+        endFrameEvent.notify(ftListener, atValue: committedFrameIndex) { _, _ in
+            FrameTimingStats.shared.add("frameGPU", (CACurrentMediaTime() - ftEyesEnd) * 1000)
+        }
+
         frame.endSubmission()
+        FrameTimingStats.shared.add("total", (CACurrentMediaTime() - ftFrameStart) * 1000)
+        FrameTimingStats.shared.frameDone()
     }
 
     func render(drawable: LayerRenderer.Drawable, frameIndex: UInt64,

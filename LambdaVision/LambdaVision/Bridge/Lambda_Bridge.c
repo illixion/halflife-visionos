@@ -3167,6 +3167,48 @@ static float      g_w_2d_rect[4] = {0};
 // Head translation since baseline (baseline-forward frame, xash units).
 static float      g_w_view_offset[3] = {0};
 
+// --- Frame timing instrumentation --------------------------------------
+// Always-on, cheap (~one sorted copy every FT_WINDOW frames). Answers
+// "where do the milliseconds go" when the headset drops below 90 Hz.
+// Columns, all worker-thread CPU wall time in ms:
+//   eng  = eye-0 Host frame (sim tick + client + scene GL submission)
+//   end0 = eye-0 lambda_gl_end_frame (flush + GPU fence signal)
+//   view = eye-1 V_RenderView + V_PostRender resubmission
+//   end1 = eye-1 flush
+#include <time.h>
+#define FT_WINDOW 512
+static double g_ft[4][FT_WINDOW];
+static double g_ft_cur[4];
+static int    g_ft_n = 0;
+
+static double ft_now_ms(void) {
+    return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) * 1e-6;
+}
+static int ft_cmp(const void *a, const void *b) {
+    double d = *(const double *)a - *(const double *)b;
+    return (d > 0) - (d < 0);
+}
+// Called after the eye-1 columns are filled: commits the row, and every
+// FT_WINDOW frames prints p50/p95/max per column to stderr.
+static void ft_commit_row(void) {
+    for (int c = 0; c < 4; c++) g_ft[c][g_ft_n] = g_ft_cur[c];
+    if (++g_ft_n < FT_WINDOW) return;
+    g_ft_n = 0;
+    static const char *names[4] = { "eng", "end0", "view", "end1" };
+    char line[256];
+    int off = snprintf(line, sizeof(line), "[FT] cpu(ms)");
+    for (int c = 0; c < 4; c++) {
+        double tmp[FT_WINDOW];
+        memcpy(tmp, g_ft[c], sizeof(tmp));
+        qsort(tmp, FT_WINDOW, sizeof(double), ft_cmp);
+        off += snprintf(line + off, sizeof(line) - (size_t)off,
+                        " %s %.1f/%.1f/%.1f", names[c],
+                        tmp[FT_WINDOW / 2], tmp[(int)(FT_WINDOW * 0.95)],
+                        tmp[FT_WINDOW - 1]);
+    }
+    fprintf(stderr, "%s\n", line);
+}
+
 static void *gl_worker_main(void *arg) {
     (void)arg;
     pthread_setname_np("LambdaVision.gl-worker");
@@ -3210,13 +3252,17 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[2]);
                 }
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
+                double t0 = ft_now_ms();
                 lambda_engine_frame();
+                double t1 = ft_now_ms();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
                 if (g_w_have_tangents)
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 er = lambda_gl_end_frame();
+                g_ft_cur[0] = t1 - t0;
+                g_ft_cur[1] = ft_now_ms() - t1;
             }
             g_w_result = (br != 0) ? br : er;
             break;
@@ -3241,13 +3287,18 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[2]);
                 }
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
+                double t0 = ft_now_ms();
                 lambda_engine_render_view_only();
+                double t1 = ft_now_ms();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
                 if (g_w_have_tangents)
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 er = lambda_gl_end_frame();
+                g_ft_cur[2] = t1 - t0;
+                g_ft_cur[3] = ft_now_ms() - t1;
+                ft_commit_row();
             }
             g_w_result = (br != 0) ? br : er;
             break;
