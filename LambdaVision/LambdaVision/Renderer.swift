@@ -703,8 +703,11 @@ actor Renderer {
         // the per-eye images will stereo-fuse correctly only because each
         // was rendered through the matching frustum.
         // zNear/zFar in xash world units (HL inches ≈ 39.37/meter).
+        // zFar matches the engine's culling far clip (R_GetFarClip floors
+        // zmax at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era
+        // maps) clips into view as gray in long halls like the tram ride.
         let zNear: Float = 4.0
-        let zFar:  Float = 4096.0
+        let zFar:  Float = 16384.0 * 1.73
         // Use the first drawable's tangents (built-in target). Capture
         // target may have different tangents but for now match builtIn.
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]

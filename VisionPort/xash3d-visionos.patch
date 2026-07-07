@@ -1010,10 +1010,21 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..8e47124 100644
+index 0568486..5f29075 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
-@@ -345,6 +345,16 @@ static float R_GetFarClip( void )
+@@ -341,10 +341,26 @@ R_GetFarClip
+ static float R_GetFarClip( void )
+ {
+ 	if( WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+-		return gp_movevars->zmax * 1.73f;
++	{
++		// visionOS: worldspawn MaxRange (typically 4096 on GoldSrc-era
++		// maps) was tuned for 4:3 monitors; in VR the far clip pops into
++		// view as gray in long halls (c0a0 tram ride). Renderer-side
++		// floor only — sv_zmax itself stays untouched for gameplay.
++		return Q_max( gp_movevars->zmax, 16384.0f ) * 1.73f;
++	}
  	return 2048.0f;
  }
  
@@ -1030,7 +1041,7 @@ index 0568486..8e47124 100644
  /*
  ===============
  R_SetupFrustum
-@@ -368,6 +378,11 @@ void R_SetupFrustum( void )
+@@ -368,6 +384,11 @@ void R_SetupFrustum( void )
  		const ref_overview_t	*ov = gEngfuncs.GetOverviewParms();
  		GL_FrustumInitOrtho( &RI.frustum, ov->xLeft, ov->xRight, ov->yTop, ov->yBottom, ov->zNear, ov->zFar );
  	}
@@ -1042,7 +1053,7 @@ index 0568486..8e47124 100644
  	else
  	{
  		GL_FrustumInitProj( &RI.frustum, 0.0f, R_GetFarClip(), RI.rvp.fov_x, RI.rvp.fov_y ); // NOTE: we ignore nearplane here (mirrors only)
-@@ -390,6 +405,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
+@@ -390,6 +411,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
  		return;
  	}
  
