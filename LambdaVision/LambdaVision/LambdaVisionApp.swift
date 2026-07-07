@@ -6,6 +6,7 @@
 //
 
 import ARKit
+import AVFAudio
 import CompositorServices
 import SwiftUI
 
@@ -23,6 +24,18 @@ struct ImmersiveSpaceContent: CompositorContent {
                 let path = docs.appendingPathComponent("crash.log").path
                 path.withCString { lambda_set_crash_log_path($0) }
                 print("[LambdaVision] crash log path: \(path)")
+            }
+            // The engine's AudioQueue backend (snd_visionos.c) plays into
+            // the app's audio session; without an explicitly activated
+            // .playback session the system can leave the queue's I/O
+            // thread suspended (observed on device: the first render
+            // callback never completes).
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, options: [.mixWithOthers])
+                try session.setActive(true)
+            } catch {
+                print("[LambdaVision] AVAudioSession activation failed: \(error)")
             }
             KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())

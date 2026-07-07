@@ -11,19 +11,30 @@ diff --git a/3rdparty/mainui b/3rdparty/mainui
 -Subproject commit a4ec67f28037583617c05222e54e04777f677041
 +Subproject commit a4ec67f28037583617c05222e54e04777f677041-dirty
 diff --git a/common/backends.h b/common/backends.h
-index e0cc14b..527bdc4 100644
+index e0cc14b..751e398 100644
 --- a/common/backends.h
 +++ b/common/backends.h
-@@ -21,6 +21,7 @@ GNU General Public License for more details.
+@@ -21,12 +21,14 @@ GNU General Public License for more details.
  #define VIDEO_PSP     2
  #define VIDEO_FBDEV   3
  #define VIDEO_DOS     4
 +#define VIDEO_VISIONOS 5
  
  // audio backends (XASH_SOUND)
- #define SOUND_NULL     0
+-#define SOUND_NULL     0
+-#define SOUND_SDL      1
+-#define SOUND_PSP      2
+-#define SOUND_ALSA     3
++#define SOUND_NULL      0
++#define SOUND_SDL       1
++#define SOUND_PSP       2
++#define SOUND_ALSA      3
++#define SOUND_COREAUDIO 4
+ 
+ // input (XASH_INPUT)
+ #define INPUT_NULL    0
 diff --git a/common/defaults.h b/common/defaults.h
-index 7cd9c1f..504f056 100644
+index 7cd9c1f..b0b9759 100644
 --- a/common/defaults.h
 +++ b/common/defaults.h
 @@ -30,7 +30,11 @@ SETUP BACKENDS DEFINITIONS
@@ -34,7 +45,7 @@ index 7cd9c1f..504f056 100644
 +	#if XASH_VISIONOS
 +		#define XASH_VIDEO     VIDEO_VISIONOS
 +		#define XASH_INPUT     INPUT_NULL  // GameController.framework + ARKit feed events through bridge (Phase 3)
-+		#define XASH_SOUND     SOUND_NULL  // AVAudioEngine wiring TBD
++		#define XASH_SOUND     SOUND_COREAUDIO  // AudioQueue (snd_visionos.c)
 +	#elif XASH_SDL // we are building with SDL
  		#define XASH_VIDEO     VIDEO_SDL
  		#define XASH_INPUT     INPUT_SDL
@@ -367,6 +378,258 @@ index 72bafc2..973d9bd 100644
  
  void Posix_Daemonize( void )
  {
+diff --git a/engine/platform/visionos/snd_visionos.c b/engine/platform/visionos/snd_visionos.c
+new file mode 100644
+index 0000000..3e77a9e
+--- /dev/null
++++ b/engine/platform/visionos/snd_visionos.c
+@@ -0,0 +1,246 @@
++/*
++snd_visionos.c - AudioQueue sound output for visionOS
++Copyright (C) 2026 Ixion
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++*/
++
++#ifndef XASH_DEDICATED
++#include "common.h"
++#if XASH_SOUND == SOUND_COREAUDIO
++
++#include "platform/platform.h"
++#include "sound.h"
++
++#include <AudioToolbox/AudioQueue.h>
++
++// AudioQueue pulls fixed-size buffers from its own render thread while the
++// engine mixes into the snd.buffer ring on the GL worker. Same
++// producer/consumer contract as the SDL2 backend: the callback advances
++// snd.samplepos, the mixer paints ahead of it. LOCK-FREE by design: the
++// callback runs on a real-time audio thread that the system can suspend
++// at any moment (session interruptions, headset doffed, app background) —
++// a mutex shared with the mixer would leave the GL worker blocked forever
++// if the callback is suspended while holding it (observed on device).
++// This mirrors real DMA hardware, which the engine's mixer was written
++// for: the consumer streams the ring concurrently with the producer, no
++// lock exists, and a race costs at worst one torn buffer (~23 ms click).
++// samplepos is published with a release store and read with plain aligned
++// loads (atomic on arm64).
++#define AQ_BUFFER_COUNT   3
++#define AQ_FRAMES_PER_BUF 1024 // ~23 ms @ 44100 Hz; xash paints ~100 ms ahead
++
++static AudioQueueRef s_aq;
++static qboolean      s_aq_running;
++
++static void AQ_Callback( void *userdata, AudioQueueRef aq, AudioQueueBufferRef buf )
++{
++	int   len = (int)buf->mAudioDataBytesCapacity;
++	byte *stream = buf->mAudioData;
++	const int size = snd.samples << 1;
++	int   pos, wrapped;
++
++	pos = snd.samplepos << 1;
++	if( pos >= size )
++		pos = 0;
++
++	wrapped = pos + len - size;
++
++	if( wrapped < 0 )
++	{
++		memcpy( stream, snd.buffer + pos, len );
++		pos += len;
++	}
++	else
++	{
++		int remaining = size - pos;
++
++		memcpy( stream, snd.buffer + pos, remaining );
++		memcpy( stream + remaining, snd.buffer, wrapped );
++		pos = wrapped;
++	}
++
++	if( pos >= size )
++		pos = 0;
++
++	__atomic_store_n( &snd.samplepos, pos >> 1, __ATOMIC_RELEASE );
++
++	buf->mAudioDataByteSize = buf->mAudioDataBytesCapacity;
++	AudioQueueEnqueueBuffer( aq, buf, 0, NULL );
++}
++
++/*
++==================
++SNDDMA_Init
++
++Try to find a sound device to mix for.
++Returns false if nothing is found.
++==================
++*/
++qboolean SNDDMA_Init( void )
++{
++	AudioStreamBasicDescription fmt = { 0 };
++	OSStatus err;
++	int      samplecount, i;
++
++	fmt.mSampleRate       = SOUND_DMA_SPEED;
++	fmt.mFormatID         = kAudioFormatLinearPCM;
++	fmt.mFormatFlags      = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
++	fmt.mChannelsPerFrame = 2;
++	fmt.mBitsPerChannel   = 16;
++	fmt.mBytesPerFrame    = 4; // 2 ch × 16 bit
++	fmt.mFramesPerPacket  = 1;
++	fmt.mBytesPerPacket   = 4;
++
++	err = AudioQueueNewOutput( &fmt, AQ_Callback, NULL, NULL, NULL, 0, &s_aq );
++	if( err != noErr )
++	{
++		Con_Printf( "Couldn't open AudioQueue output (err=%d)\n", (int)err );
++		return false;
++	}
++
++	snd.format.speed    = SOUND_DMA_SPEED;
++	snd.format.channels = 2;
++	snd.format.width    = 2;
++	samplecount = s_samplecount.value;
++	if( !samplecount )
++		samplecount = 0x8000;
++	snd.samples         = samplecount * snd.format.channels;
++	snd.buffer          = Mem_Calloc( sndpool, snd.samples * 2 );
++	snd.samplepos       = 0;
++
++	// Prime and enqueue silence so the queue has buffers in rotation
++	// before the first mix.
++	for( i = 0; i < AQ_BUFFER_COUNT; i++ )
++	{
++		AudioQueueBufferRef buf = NULL;
++
++		err = AudioQueueAllocateBuffer( s_aq, AQ_FRAMES_PER_BUF * fmt.mBytesPerFrame, &buf );
++		if( err != noErr )
++		{
++			Con_Printf( "AudioQueueAllocateBuffer failed (err=%d)\n", (int)err );
++			SNDDMA_Shutdown( );
++			return false;
++		}
++
++		memset( buf->mAudioData, 0, buf->mAudioDataBytesCapacity );
++		buf->mAudioDataByteSize = buf->mAudioDataBytesCapacity;
++		AudioQueueEnqueueBuffer( s_aq, buf, 0, NULL );
++	}
++
++	snd.initialized  = true;
++	snd.backend_name = "AudioQueue";
++
++	Con_Printf( "Using AudioQueue audio @ %d Hz\n", (int)SOUND_DMA_SPEED );
++
++	SNDDMA_Activate( true );
++
++	return true;
++}
++
++/*
++==============
++SNDDMA_BeginPainting
++
++Makes sure snd.buffer is valid
++===============
++*/
++void SNDDMA_BeginPainting( void )
++{
++	// Lock-free ring (see AQ_Callback) — nothing to acquire.
++}
++
++/*
++==============
++SNDDMA_Submit
++
++Send sound to device if buffer isn't really the dma buffer
++Also unlocks the dsound buffer
++===============
++*/
++void SNDDMA_Submit( void )
++{
++	// Lock-free ring (see AQ_Callback) — nothing to release.
++}
++
++/*
++==============
++SNDDMA_Shutdown
++
++Reset the sound device for exiting
++===============
++*/
++void SNDDMA_Shutdown( void )
++{
++	Con_Printf( "Shutting down audio.\n" );
++	snd.initialized = false;
++
++	if( s_aq )
++	{
++		// true = stop synchronously; the callback can't fire after this,
++		// so freeing snd.buffer below is safe. Also frees queue buffers.
++		AudioQueueStop( s_aq, true );
++		AudioQueueDispose( s_aq, true );
++		s_aq = NULL;
++		s_aq_running = false;
++	}
++
++	if( snd.buffer )
++	{
++		Mem_Free( snd.buffer );
++		snd.buffer = NULL;
++	}
++}
++
++/*
++===========
++SNDDMA_Activate
++Called when the app gains or loses focus.
++===========
++*/
++void SNDDMA_Activate( qboolean active )
++{
++	if( !s_aq )
++		return;
++
++	if( active && !s_aq_running )
++	{
++		if( AudioQueueStart( s_aq, NULL ) == noErr )
++			s_aq_running = true;
++	}
++	else if( !active && s_aq_running )
++	{
++		AudioQueuePause( s_aq );
++		s_aq_running = false;
++	}
++}
++
++qboolean VoiceCapture_Init( void )
++{
++	return false;
++}
++
++qboolean VoiceCapture_Activate( qboolean activate )
++{
++	return false;
++}
++
++qboolean VoiceCapture_Lock( qboolean lock )
++{
++	return false;
++}
++
++void VoiceCapture_Shutdown( void )
++{
++}
++
++#endif // XASH_SOUND == SOUND_COREAUDIO
++#endif // XASH_DEDICATED
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
 new file mode 100644
 index 0000000..9da0b3f
