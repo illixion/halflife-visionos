@@ -53,6 +53,7 @@ typedef struct
 // Lambda engine bridge — only visible to Swift/ObjC, not to Metal shaders.
 #ifndef __METAL_VERSION__
 #include "Bridge/Lambda_Bridge.h"
+#include "Bridge/Lambda_SpatialAudio.h"
 #endif
 
 #endif /* ShaderTypes_h */

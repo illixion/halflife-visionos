@@ -252,6 +252,16 @@ actor Renderer {
     @MainActor
     static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, arSession: ARKitSession) {
         Task(executorPreference: RendererTaskExecutor.shared) {
+            // Per-source spatial audio is parked until the PHASE rewrite:
+            // AVAudioEnvironmentNode renders silence on visionOS despite a
+            // provably correct graph (see SpatialAudioEngine.swift). When
+            // disabled, HUD_GetSoundInterface declines and the engine uses
+            // its stock stereo mixer for everything.
+            // Must precede engine init (first renderFrame): the engine
+            // captures the spatial-audio SoundAPI callbacks during S_Init.
+            if SpatialAudioEngine.enabled {
+                SpatialAudioEngine.shared.register()
+            }
             let renderer = Renderer(layerRenderer, appModel: appModel)
             await renderer.startARSession(arSession)
             await renderer.renderLoop()

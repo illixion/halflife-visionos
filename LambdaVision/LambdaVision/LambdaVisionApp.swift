@@ -11,6 +11,40 @@ import CompositorServices
 import GameController
 import SwiftUI
 
+// Audio-session interruption recovery. visionOS interrupts the session on
+// events as mundane as closing the app's 2D window, and the matching
+// `.ended` notification is NOT guaranteed to arrive (observed: repeated
+// `began` with no `ended` → permanent silence). So on interruption, poll:
+// try to reclaim the session every second and restart the AudioQueue as
+// soon as the system permits.
+@MainActor
+enum AudioSessionRecovery {
+    private static var retry: Task<Void, Never>?
+
+    static func interruptionBegan() {
+        lambda_snd_activate(0)
+        retry?.cancel()
+        retry = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                if Task.isCancelled { return }
+                if (try? AVAudioSession.sharedInstance().setActive(true)) != nil {
+                    print("[LambdaVision] audio session reclaimed — restarting queue")
+                    lambda_snd_activate(1)
+                    return
+                }
+            }
+        }
+    }
+
+    static func interruptionEnded() {
+        retry?.cancel()
+        retry = nil
+        try? AVAudioSession.sharedInstance().setActive(true)
+        lambda_snd_activate(1)
+    }
+}
+
 struct ImmersiveSpaceContent: CompositorContent {
 
     var appModel: AppModel
@@ -38,6 +72,38 @@ struct ImmersiveSpaceContent: CompositorContent {
             } catch {
                 print("[LambdaVision] AVAudioSession activation failed: \(error)")
             }
+            // System interruptions (Siri, alerts, route changes) stop the
+            // AudioQueue and nothing restarts it — the game goes silent
+            // until the user hides/shows the immersive space. Drive the
+            // same pause/resume machinery from the session notifications.
+            NotificationCenter.default.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: nil, queue: .main) { note in
+                    guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                          let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+                    switch type {
+                    case .began:
+                        print("[LambdaVision] audio interruption began — pausing queue")
+                        Task { @MainActor in AudioSessionRecovery.interruptionBegan() }
+                    case .ended:
+                        print("[LambdaVision] audio interruption ended — restarting queue")
+                        Task { @MainActor in AudioSessionRecovery.interruptionEnded() }
+                    @unknown default:
+                        break
+                    }
+                }
+            // Media services daemon crash/reset: the session and queue are
+            // both orphaned — reactivate and restart.
+            NotificationCenter.default.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: nil, queue: .main) { _ in
+                    print("[LambdaVision] media services reset — restarting audio")
+                    let session = AVAudioSession.sharedInstance()
+                    try? session.setCategory(.playback, options: [.mixWithOthers])
+                    try? session.setActive(true)
+                    lambda_snd_activate(0)
+                    lambda_snd_activate(1)
+                }
             KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
         }

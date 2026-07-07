@@ -266,6 +266,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Vendor/MoltenVK_include",
 					"$(SRCROOT)/Vendor/angle/include",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/common",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/public",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/3rdparty/library_suffix/include",
 				);
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -319,6 +322,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/Vendor/MoltenVK_include",
 					"$(SRCROOT)/Vendor/angle/include",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/common",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/public",
+					"$(SRCROOT)/../VisionPort/xash3d-fwgs/3rdparty/library_suffix/include",
 				);
 				INFOPLIST_FILE = "$(TARGET_NAME)/Info.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
