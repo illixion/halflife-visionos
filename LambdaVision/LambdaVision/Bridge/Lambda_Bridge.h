@@ -302,6 +302,12 @@ void lambda_snd_activate(int active);
 // 1=FWD, 2=PITCH, 3=YAW, 4=RT, 5=LT. Value: SDL-style -32768..32767.
 void lambda_joy_set_axis(int axis, int value);
 
+// Snap turn: add degrees to the engine's own view yaw (cl.viewangles,
+// xash convention: +yaw = CCW/left) so the movement basis turns with the
+// view. Thread-safe; accumulated and applied on the GL worker before the
+// next tick.
+void lambda_add_view_yaw(float yaw_deg);
+
 // GPU-side frame fence. Register an MTLSharedEvent (borrowed, unretained)
 // and the value end_frame should signal on ANGLE's command queue when the
 // current eye's GPU work completes. The caller's MTLCommandQueue must

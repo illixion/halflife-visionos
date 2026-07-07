@@ -122,10 +122,10 @@ actor Renderer {
     // remain in effect.
     private var headBaselineYaw: Float? = nil
 
-    // Snap turn: inputs (gamepad right stick, Q/E keys) accumulate degrees
-    // here from any thread; renderFrame consumes them by rotating the yaw
-    // baseline. +30° baseline shift = view turns right (xash yaw is
-    // CCW-positive).
+    // Snap turn: inputs (gamepad right stick, Z/X keys) accumulate degrees
+    // here from any thread; renderFrame consumes them by rotating the
+    // engine's own view yaw (lambda_add_view_yaw) and re-anchoring the
+    // position baseline. +30° = turn right.
     nonisolated(unsafe) private static var pendingSnapDeg: Float = 0
     private static let snapLock = NSLock()
     static let snapTurnDegrees: Float = 30
@@ -782,27 +782,30 @@ actor Renderer {
                 headBaselinePos = cur.pos
             }
 
-            // Snap turn: rotate the room→game yaw mapping. Re-anchor the
-            // position baseline so the CURRENT head position maps to the
-            // same in-game offset before and after the snap — otherwise a
-            // player standing away from the baseline origin would swing
-            // along an arc instead of turning in place.
+            // Snap turn: hand the turn to the ENGINE as a change to its own
+            // view yaw (cl.viewangles) so the movement basis turns with the
+            // view — rotating only the render-side yaw baseline (the old
+            // approach) turned the picture but left WASD moving along the
+            // stale engine yaw. The yaw baseline stays put; the view turns
+            // because gameYaw itself changes. +snap = turn right, xash yaw
+            // is CCW-positive, hence the negation.
+            //
+            // The position baseline is still re-anchored so the CURRENT
+            // head position maps to the same in-game offset before and
+            // after the snap (the composite room→world rotation
+            // gameYaw − baselineYaw changes by −snap, and Z-rotations
+            // commute, so the fix is simply dNew = Rz(+snap)·dOld) —
+            // otherwise a snap while standing away from the baseline
+            // origin would swing the camera along an arc.
             let snap = Renderer.takePendingSnap()
             if snap != 0 {
-                let bOld = headBaselineYaw!
-                let bNew = bOld + snap
-                let dOld = (cur.pos - headBaselinePos!) * appleToXash
-                let ro = bOld * Float.pi / 180, rn = bNew * Float.pi / 180
-                // Offset in the baseline-forward frame (invariant across the snap).
-                let off = SIMD3<Float>(dOld.x * cosf(ro) + dOld.y * sinf(ro),
-                                       -dOld.x * sinf(ro) + dOld.y * cosf(ro),
-                                       dOld.z)
-                // Room delta that reproduces the same offset under the new yaw.
-                let dNew = SIMD3<Float>(off.x * cosf(rn) - off.y * sinf(rn),
-                                        off.x * sinf(rn) + off.y * cosf(rn),
-                                        off.z)
-                headBaselinePos = cur.pos - dNew / appleToXash
-                headBaselineYaw = bNew
+                lambda_add_view_yaw(-snap)
+                let sr = snap * Float.pi / 180
+                let dOld = cur.pos - headBaselinePos!
+                let dNew = SIMD3<Float>(dOld.x * cosf(sr) - dOld.y * sinf(sr),
+                                        dOld.x * sinf(sr) + dOld.y * cosf(sr),
+                                        dOld.z)
+                headBaselinePos = cur.pos - dNew
             }
 
             var dyaw = yawDeg - headBaselineYaw!

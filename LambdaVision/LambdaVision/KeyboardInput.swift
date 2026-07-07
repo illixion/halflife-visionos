@@ -38,8 +38,8 @@ final class KeyboardInput {
     private func attach(_ kb: GCKeyboard) {
         guard let input = kb.keyboardInput else { return }
         input.keyChangedHandler = { _, _, code, pressed in
-            // Snap turn (Z/X), 30° per press — handled by the renderer's
-            // yaw baseline, not the engine's +left/right smooth turn.
+            // Snap turn (Z/X), 30° per press — an exact step added to the
+            // engine's view yaw, not the frametime-dependent +left/right.
             // (Q/E stay on their HL meanings: lastinv / use.)
             if pressed, code == .keyZ { Renderer.requestSnapTurn(-1); return }
             if pressed, code == .keyX { Renderer.requestSnapTurn(1); return }

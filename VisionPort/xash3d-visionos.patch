@@ -71,11 +71,31 @@ index 7cd9c1f..b0b9759 100644
  	#else // !XASH_MOBILE_PLATFORM
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
+diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
+index cb7aa9c..b006ef0 100644
+--- a/engine/client/cl_main.c
++++ b/engine/client/cl_main.c
+@@ -509,8 +509,13 @@ static void CL_ApplyAddAngle( void )
+ 
+ 	amove = addangletotal - cl.prevaddangletotal;
+ 
+-	// update input angles
+-	cl.viewangles[YAW] += amove;
++	// update input angles (VR keeps the compass heading fixed on
++	// rotating pushers — see cl_stereo_no_addangle in cl_view.c)
++	{
++		extern int cl_stereo_no_addangle;
++		if( !cl_stereo_no_addangle )
++			cl.viewangles[YAW] += amove;
++	}
+ 
+ 	// remember last total
+ 	cl.prevaddangletotal = addangletotal;
 diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
-index d4628f3..4c4c225 100644
+index d4628f3..295b93d 100644
 --- a/engine/client/cl_view.c
 +++ b/engine/client/cl_view.c
-@@ -22,6 +22,14 @@ GNU General Public License for more details.
+@@ -22,6 +22,30 @@ GNU General Public License for more details.
  #include "input.h" // touch
  #include "platform/platform.h" // GL_UpdateSwapInterval
  
@@ -87,10 +107,26 @@ index d4628f3..4c4c225 100644
 +float cl_stereo_view_angles_override[3] = { 0.0f, 0.0f, 0.0f }; // pitch, yaw, roll
 +float cl_stereo_view_origin_offset[3] = { 0.0f, 0.0f, 0.0f }; // head translation, baseline-yaw frame
 +
++// VR: when set, CL_ApplyAddAngle drops the server's incremental yaw
++// rotation (svc_addangle, sent while riding rotating pushers such as
++// func_tracktrain). A headset view must keep its compass heading fixed
++// while the vehicle turns; svc_setangle (teleports, spawns) still applies.
++int   cl_stereo_no_addangle = 0;
++
++// VR snap turn: rotate the player's actual input yaw so the movement
++// basis and the rendered view (game yaw + head delta) turn together.
++// Rotating only the platform-side head baseline turns the picture but
++// leaves cl.viewangles behind, desyncing +forward/+moveleft from what
++// the user sees.
++void CL_StereoAddViewYaw( float deg )
++{
++	cl.viewangles[YAW] += deg;
++}
++
  /*
  ===============
  V_CalcViewRect
-@@ -419,6 +427,51 @@ void V_RenderView( void )
+@@ -419,6 +443,51 @@ void V_RenderView( void )
  			ref.dllFuncs.R_ClearScreen();
  		}
  

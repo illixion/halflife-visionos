@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -2307,6 +2308,13 @@ int lambda_engine_init(const char *writable_dir,
     }
 
     g_engine_inited = 1;
+    // Keep the compass heading fixed while riding rotating pushers
+    // (func_tracktrain sends svc_addangle to yaw the rider's view — in
+    // a headset the world must not rotate under the user's head).
+    {
+        extern int cl_stereo_no_addangle;
+        cl_stereo_no_addangle = 1;
+    }
     // Enable cheats so debug binds (e.g. V → noclip) work.
     // fps_max 0: the compositor paces Host_DoFrame externally (90 Hz);
     // with the default cap (72) Host_FilterTime silently drops ~1 in 5
@@ -2357,6 +2365,23 @@ static void lambda_joy_apply(void) {
     if (!atomic_exchange(&g_joy_dirty, 0)) return;
     for (int i = 0; i < LAMBDA_JOY_AXES; i++)
         Joy_AxisMotionEvent(i, (short)atomic_load(&g_joy_axis[i]));
+}
+
+// Snap turn: exact yaw steps added to the engine's own view yaw
+// (cl.viewangles, xash convention: +yaw = CCW/left) so the movement basis
+// turns together with the rendered view. Accumulated from any thread in
+// centidegrees (atomics are integer-only), consumed on the GL worker
+// before each tick.
+static _Atomic int g_pending_view_yaw_centideg;
+
+void lambda_add_view_yaw(float yaw_deg) {
+    atomic_fetch_add(&g_pending_view_yaw_centideg, (int)lroundf(yaw_deg * 100.0f));
+}
+
+static void lambda_view_yaw_apply(void) {
+    extern void CL_StereoAddViewYaw(float deg);
+    int cd = atomic_exchange(&g_pending_view_yaw_centideg, 0);
+    if (cd) CL_StereoAddViewYaw((float)cd / 100.0f);
 }
 
 // Pause/resume the engine's audio output. The AudioQueue backend
@@ -3130,6 +3155,7 @@ static void *gl_worker_main(void *arg) {
             break;
         case WORK_FRAME: {
             lambda_joy_apply();
+            lambda_view_yaw_apply();
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
