@@ -293,6 +293,10 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            float r, float g, float b);
 int lambda_gl_end_frame(void);
 
+// Pause (0) / resume (1) the engine's audio output. Call when the render
+// loop stops/resumes so the AudioQueue doesn't loop stale ring contents.
+void lambda_snd_activate(int active);
+
 // GPU-side frame fence. Register an MTLSharedEvent (borrowed, unretained)
 // and the value end_frame should signal on ANGLE's command queue when the
 // current eye's GPU work completes. The caller's MTLCommandQueue must

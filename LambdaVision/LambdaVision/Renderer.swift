@@ -980,6 +980,10 @@ actor Renderer {
         while true {
             if layerRenderer.state == .invalidated {
                 print("Layer is invalidated")
+                // The engine stops ticking here but the AudioQueue would
+                // keep streaming the DMA ring — the last painted samples
+                // loop audibly forever. Pause output with the renderer.
+                lambda_snd_activate(0)
                 Task { @MainActor in
                     appModel.immersiveSpaceState = .closed
                 }
@@ -988,7 +992,9 @@ actor Renderer {
                 Task { @MainActor in
                     appModel.immersiveSpaceState = .inTransition
                 }
+                lambda_snd_activate(0)
                 layerRenderer.waitUntilRunning()
+                lambda_snd_activate(1)
                 continue
             } else {
                 Task { @MainActor in

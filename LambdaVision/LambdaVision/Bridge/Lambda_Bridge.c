@@ -2332,6 +2332,16 @@ int lambda_engine_frame(void) {
     return Host_DoFrame();
 }
 
+// Pause/resume the engine's audio output. The AudioQueue backend
+// (snd_visionos.c) streams the DMA ring on its own thread — when the
+// render loop stops ticking (immersive space closed/paused) the mixer
+// stops painting and the queue would loop the last ~0.4 s of stale
+// samples forever. SNDDMA_Activate is a no-op before audio init.
+void lambda_snd_activate(int active) {
+    extern void SNDDMA_Activate(int active); // engine qboolean == int
+    SNDDMA_Activate(active);
+}
+
 // Re-render the current world state without ticking the sim. Used by the
 // stereo path: Host_DoFrame produces eye 0, then we rebind the FBO to the
 // other slice and call this to produce eye 1 from the same simulation tick.
