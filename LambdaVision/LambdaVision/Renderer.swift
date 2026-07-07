@@ -121,6 +121,26 @@ actor Renderer {
     // baseline so the game's spawn orientation and keyboard turning
     // remain in effect.
     private var headBaselineYaw: Float? = nil
+
+    // Snap turn: inputs (gamepad right stick, Q/E keys) accumulate degrees
+    // here from any thread; renderFrame consumes them by rotating the yaw
+    // baseline. +30° baseline shift = view turns right (xash yaw is
+    // CCW-positive).
+    nonisolated(unsafe) private static var pendingSnapDeg: Float = 0
+    private static let snapLock = NSLock()
+    static let snapTurnDegrees: Float = 30
+
+    nonisolated static func requestSnapTurn(_ direction: Float) {
+        snapLock.lock()
+        pendingSnapDeg += direction * snapTurnDegrees
+        snapLock.unlock()
+    }
+
+    private static func takePendingSnap() -> Float {
+        snapLock.lock()
+        defer { pendingSnapDeg = 0; snapLock.unlock() }
+        return pendingSnapDeg
+    }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
     private var headBaselinePos: SIMD3<Float>? = nil
@@ -560,7 +580,7 @@ actor Renderer {
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
         let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
         let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
-                     "+map", "c1a0"]
+                     "+map", "c0a0"] // tram ride (Black Mesa Inbound)
         let cArgs = extra.map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
         var buf = [CChar](repeating: 0, count: 384)
@@ -637,6 +657,13 @@ actor Renderer {
         frame.startUpdate()
 
         // Perform frame independent work
+
+        // Poll the gamepad once per frame: sticks stage engine joystick
+        // axes (applied on the GL worker at tick start), buttons dispatch
+        // commands, right-stick X requests snap turns consumed below.
+        GamepadInput.shared.poll { direction in
+            Renderer.requestSnapTurn(direction)
+        }
 
         self.updateDynamicBufferState(frameIndex: frame.frameIndex)
 
@@ -741,6 +768,30 @@ actor Renderer {
                 headBaselineYaw = yawDeg
                 headBaselinePos = cur.pos
             }
+
+            // Snap turn: rotate the room→game yaw mapping. Re-anchor the
+            // position baseline so the CURRENT head position maps to the
+            // same in-game offset before and after the snap — otherwise a
+            // player standing away from the baseline origin would swing
+            // along an arc instead of turning in place.
+            let snap = Renderer.takePendingSnap()
+            if snap != 0 {
+                let bOld = headBaselineYaw!
+                let bNew = bOld + snap
+                let dOld = (cur.pos - headBaselinePos!) * appleToXash
+                let ro = bOld * Float.pi / 180, rn = bNew * Float.pi / 180
+                // Offset in the baseline-forward frame (invariant across the snap).
+                let off = SIMD3<Float>(dOld.x * cosf(ro) + dOld.y * sinf(ro),
+                                       -dOld.x * sinf(ro) + dOld.y * cosf(ro),
+                                       dOld.z)
+                // Room delta that reproduces the same offset under the new yaw.
+                let dNew = SIMD3<Float>(off.x * cosf(rn) - off.y * sinf(rn),
+                                        off.x * sinf(rn) + off.y * cosf(rn),
+                                        off.z)
+                headBaselinePos = cur.pos - dNew / appleToXash
+                headBaselineYaw = bNew
+            }
+
             var dyaw = yawDeg - headBaselineYaw!
             if dyaw > 180 { dyaw -= 360 } else if dyaw < -180 { dyaw += 360 }
             headAngles = SIMD3<Float>(pitchDeg, dyaw, rollDeg)

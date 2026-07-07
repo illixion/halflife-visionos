@@ -2332,6 +2332,33 @@ int lambda_engine_frame(void) {
     return Host_DoFrame();
 }
 
+// ---- Gamepad → engine joystick axes ----------------------------------------
+// Swift polls GCController on the render thread; the engine's joystick
+// state (joyaxis[], in_joy.c) is only safe to touch on the GL worker that
+// runs the tick. Values are staged here atomically and applied by the
+// worker right before each Host_DoFrame. Axis ids match engineAxis_t:
+// 0=SIDE 1=FWD 2=PITCH 3=YAW 4=RT 5=LT; values are SDL-style -32768..32767.
+#include <stdatomic.h>
+#define LAMBDA_JOY_AXES 6
+static _Atomic int g_joy_axis[LAMBDA_JOY_AXES];
+static _Atomic int g_joy_dirty;
+
+void lambda_joy_set_axis(int axis, int value) {
+    if (axis < 0 || axis >= LAMBDA_JOY_AXES) return;
+    if (value < -32768) value = -32768;
+    if (value >  32767) value =  32767;
+    atomic_store(&g_joy_axis[axis], value);
+    atomic_store(&g_joy_dirty, 1);
+}
+
+// Called on the GL worker before each engine tick.
+static void lambda_joy_apply(void) {
+    extern void Joy_AxisMotionEvent(int engineAxis, short value);
+    if (!atomic_exchange(&g_joy_dirty, 0)) return;
+    for (int i = 0; i < LAMBDA_JOY_AXES; i++)
+        Joy_AxisMotionEvent(i, (short)atomic_load(&g_joy_axis[i]));
+}
+
 // Pause/resume the engine's audio output. The AudioQueue backend
 // (snd_visionos.c) streams the DMA ring on its own thread — when the
 // render loop stops ticking (immersive space closed/paused) the mixer
@@ -3102,6 +3129,7 @@ static void *gl_worker_main(void *arg) {
                                             g_w_status, g_w_status_cap);
             break;
         case WORK_FRAME: {
+            lambda_joy_apply();
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;

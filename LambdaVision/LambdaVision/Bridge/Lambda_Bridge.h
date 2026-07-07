@@ -297,6 +297,11 @@ int lambda_gl_end_frame(void);
 // loop stops/resumes so the AudioQueue doesn't loop stale ring contents.
 void lambda_snd_activate(int active);
 
+// Stage a gamepad axis value for the engine's joystick input. Thread-safe;
+// applied on the GL worker before the next tick. Axis: 0=SIDE (strafe),
+// 1=FWD, 2=PITCH, 3=YAW, 4=RT, 5=LT. Value: SDL-style -32768..32767.
+void lambda_joy_set_axis(int axis, int value);
+
 // GPU-side frame fence. Register an MTLSharedEvent (borrowed, unretained)
 // and the value end_frame should signal on ANGLE's command queue when the
 // current eye's GPU work completes. The caller's MTLCommandQueue must

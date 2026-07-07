@@ -8,6 +8,7 @@
 import ARKit
 import AVFAudio
 import CompositorServices
+import GameController
 import SwiftUI
 
 struct ImmersiveSpaceContent: CompositorContent {
@@ -73,6 +74,10 @@ struct LambdaVisionApp: App {
         WindowGroup {
             ContentView()
                 .environment(appModel)
+                // Route gamepad input to the app instead of system focus
+                // navigation — without this, polled GCController values
+                // freeze after a stick release (a known GCController quirk).
+                .handlesGameControllerEvents(matching: .gamepad)
         }
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
