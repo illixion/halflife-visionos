@@ -23,6 +23,7 @@ final class KeyboardInput {
                                     "c1a0", "c1a0a", "c1a0b", "c1a0c",
                                     "c1a0d", "c1a0e", "c1a1", "c1a1a"]
     private var debugMapIndex = 0
+    private var netGraphMode = 0
 
     func start() {
         // Hook any keyboard that's already connected, plus future connects.
@@ -53,6 +54,17 @@ final class KeyboardInput {
                     let shared = KeyboardInput.shared
                     shared.debugMapIndex = (shared.debugMapIndex + 1) % KeyboardInput.debugMaps.count
                     let cmd = "map \(KeyboardInput.debugMaps[shared.debugMapIndex])"
+                    _ = cmd.withCString { lambda_gl_worker_cmd($0) }
+                }
+                return
+            }
+            // Debug: G cycles net_graph (0 off → 1 full → 2 frame-time
+            // graph → 3 compact) — the in-headset frame pacing readout.
+            if pressed, code == .keyG {
+                Task { @MainActor in
+                    let shared = KeyboardInput.shared
+                    shared.netGraphMode = (shared.netGraphMode + 1) % 4
+                    let cmd = "net_graph \(shared.netGraphMode)"
                     _ = cmd.withCString { lambda_gl_worker_cmd($0) }
                 }
                 return

@@ -2329,6 +2329,21 @@ int lambda_engine_init(const char *writable_dir,
         // The VBO path halves that (p50 5-7 ms, <15% frames over budget)
         // with no observed glitches on ANGLE/Metal.
         Cbuf_AddText("gl_vbo 1\n");
+        // Max anisotropic filtering: ANGLE/Metal exposes
+        // GL_EXT_texture_filter_anisotropic and Apple GPUs do 16x nearly
+        // free — HL's oblique floors/walls smear badly without it.
+        Cbuf_AddText("gl_anisotropy 16\n");
+        // The 2D virtual screen is the eye render target (~3000 px wide);
+        // HL HUD art and engine fonts draw at pixel sizes designed for
+        // 640-1024-wide screens and are microscopic without scaling.
+        // hud_scale 4 gives the HUD a ~768 px virtual screen.
+        Cbuf_AddText("hud_scale 4\n");
+        Cbuf_AddText("con_fontscale 3\n");
+        // net_graph draws in raw virtual-screen pixels; at ~3000 px wide
+        // (further minified into the angular 2D box) the 192x64 default is
+        // an unreadable postage stamp.
+        Cbuf_AddText("net_graphwidth 512\n");
+        Cbuf_AddText("net_graphheight 160\n");
     }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
@@ -2397,11 +2412,17 @@ void lambda_snd_activate(int active) {
 // Re-render the current world state without ticking the sim. Used by the
 // stereo path: Host_DoFrame produces eye 0, then we rebind the FBO to the
 // other slice and call this to produce eye 1 from the same simulation tick.
+// V_PostRender draws the 2D layer (HUD, console, menu, debug graphs) —
+// without it the right eye had no HUD at all. Its logic side effects
+// (screenshot capture, extra sound mix) are idempotent within a frame:
+// eye 0's full Host frame already consumed any pending one-shot actions.
 extern void V_RenderView( void );
+extern void V_PostRender( void );
 extern float cl_stereo_eye_offset;
 void lambda_engine_render_view_only(void) {
     if (!g_engine_inited) return;
     V_RenderView();
+    V_PostRender();
 }
 void lambda_engine_set_stereo_offset(float off) {
     cl_stereo_eye_offset = off;
@@ -2433,6 +2454,19 @@ void lambda_engine_set_view_offset(float x, float y, float z) {
 }
 void lambda_engine_clear_view_angles(void) {
     cl_stereo_view_angles_override_active = 0;
+}
+
+// Per-eye 2D-layer viewport (GL pixels, origin bottom-left). NULL disables
+// (2D layer spans the full render target, desktop behavior).
+extern int   cl_stereo_2d_viewport_active;
+extern float cl_stereo_2d_viewport[4];
+static void lambda_engine_set_2d_viewport(const float *rect4) {
+    if (rect4) {
+        memcpy(cl_stereo_2d_viewport, rect4, sizeof(cl_stereo_2d_viewport));
+        cl_stereo_2d_viewport_active = 1;
+    } else {
+        cl_stereo_2d_viewport_active = 0;
+    }
 }
 
 // Step 3b.1: asymmetric per-eye projection from CompositorServices.
@@ -3126,6 +3160,10 @@ static float      g_w_znear = 4.0f, g_w_zfar = 4096.0f;
 // xash degrees). Same set/clear-around-engine pattern as tangents.
 static int        g_w_have_view_angles = 0;
 static float      g_w_view_angles[3] = {0};
+// Per-eye 2D-layer viewport (GL pixels, origin bottom-left) — where the
+// engine's HUD/console/menu overlay lands within this eye's render target.
+static int        g_w_have_2d_rect = 0;
+static float      g_w_2d_rect[4] = {0};
 // Head translation since baseline (baseline-forward frame, xash units).
 static float      g_w_view_offset[3] = {0};
 
@@ -3171,6 +3209,7 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[1],
                                                   g_w_view_offset[2]);
                 }
+                lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
                 lambda_engine_frame();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
@@ -3201,6 +3240,7 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[1],
                                                   g_w_view_offset[2]);
                 }
+                lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
                 lambda_engine_render_view_only();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
@@ -3323,6 +3363,21 @@ int lambda_gl_worker_render_eye_tangents(int eye_index, float eye_offset,
     int rc = worker_post_and_wait(eye_index == 0 ? WORK_FRAME : WORK_FRAME_EYE2);
     pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
+}
+
+// Stage the 2D-layer viewport for subsequent per-eye renders (GL pixels,
+// origin bottom-left). Call before each render_eye with that eye's rect;
+// pass w<=0 to disable (full-target 2D, desktop behavior).
+void lambda_gl_worker_set_2d_viewport(float x, float y, float w, float h) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    if (w > 0.0f && h > 0.0f) {
+        g_w_2d_rect[0] = x; g_w_2d_rect[1] = y;
+        g_w_2d_rect[2] = w; g_w_2d_rect[3] = h;
+        g_w_have_2d_rect = 1;
+    } else {
+        g_w_have_2d_rect = 0;
+    }
+    pthread_mutex_unlock(&g_w_api_mtx);
 }
 
 // Full per-eye render: AVP frustum (tangents) + head-tracked viewangles +

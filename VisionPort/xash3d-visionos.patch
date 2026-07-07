@@ -866,7 +866,7 @@ index 302548a..399a05a 100644
  
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
 diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
-index 3fa5df3..395283b 100644
+index 3fa5df3..6490f31 100644
 --- a/ref/gl/gl2_shim/gl2_shim.c
 +++ b/ref/gl/gl2_shim/gl2_shim.c
 @@ -577,7 +577,13 @@ int GL2_ShimInit( void )
@@ -883,6 +883,44 @@ index 3fa5df3..395283b 100644
  	if( gEngfuncs.Sys_CheckParm( "-minshaders" ))
  		gl2wrap_config.version = 100;
  	if( gl2wrap_config.buf_storage )
+@@ -923,7 +929,13 @@ static void GL2_FlushPrims( void )
+ 		// simple case, one quad may draw like polygon(4)
+ 		if( count == 4 )
+ 			rpglDrawArrays( GL_TRIANGLE_FAN, startindex, count );
+-		else if( pglDrawRangeElementsBaseVertex )
++		// Prefer plain DrawRangeElements whenever the batch is quad-aligned
++		// (basevertex would be 0): ANGLE's Metal backend advertises
++		// GL_OES_draw_elements_base_vertex but DrawRangeElementsBaseVertex
++		// intermittently fails with GL_INVALID_OPERATION (observed on
++		// visionOS with beam/spark quad batches; the identical draw
++		// succeeds through the non-BaseVertex entry point).
++		else if( pglDrawRangeElementsBaseVertex && startindex % 4 != 0 )
+ 		{
+ 			/*
+ 			 * OpenGL deprecated QUADS, but made some workarounds availiable
+@@ -933,7 +945,12 @@ static void GL2_FlushPrims( void )
+ 			 * or just put 0-4 offset when it's availiable
+ 			 * */
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, gl2wrap.triquads_ibo[0] );
+-			pglDrawRangeElementsBaseVertex( GL_TRIANGLES, startindex, startindex + count,
++			// end is the maximum index, INCLUSIVE: startindex + count - 1.
++			// Passing one past it makes strict validators (ANGLE) demand
++			// vertex data for an index that's never referenced and fail
++			// with GL_INVALID_OPERATION once the buffer is sized exactly
++			// to the batch (large flushes). Desktop drivers didn't check.
++			pglDrawRangeElementsBaseVertex( GL_TRIANGLES, startindex, startindex + count - 1,
+ 				Q_min( count / 4 * 6, TRIQUADS_SIZE * 6 - startindex ), GL_UNSIGNED_SHORT,
+ 				(void *)(size_t)( startindex / 4 * 6 * 2 ), startindex % 4 );
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, 0 );
+@@ -941,7 +958,7 @@ static void GL2_FlushPrims( void )
+ 		else if( rpglDrawRangeElements )
+ 		{
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, gl2wrap.triquads_ibo[startindex % 4] );
+-			rpglDrawRangeElements( GL_TRIANGLES, startindex, startindex + count,
++			rpglDrawRangeElements( GL_TRIANGLES, startindex, startindex + count - 1,
+ 				Q_min( count / 4 * 6, TRIQUADS_SIZE * 6 - startindex ), GL_UNSIGNED_SHORT,
+ 				(void *)(size_t)( startindex / 4 * 6 * 2 ));
+ 			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, 0 );
 diff --git a/ref/gl/gl_backend.c b/ref/gl/gl_backend.c
 index 4e1d5b8..fab0449 100644
 --- a/ref/gl/gl_backend.c
@@ -916,6 +954,50 @@ index 4e1d5b8..fab0449 100644
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !WORLDMODEL )
  		return false;
  
+diff --git a/ref/gl/gl_draw.c b/ref/gl/gl_draw.c
+index 26974c1..b5b4b4a 100644
+--- a/ref/gl/gl_draw.c
++++ b/ref/gl/gl_draw.c
+@@ -121,6 +121,12 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
+ 	GL_ApplyTextureParams( tex );
+ }
+ 
++// VR 2D-layer placement, set per-eye by the platform bridge around each
++// render (same set/clear pattern as the projection override). The ref
++// module builds with -fvisibility=hidden; the bridge links these by name.
++__attribute__((visibility("default"))) int   cl_stereo_2d_viewport_active = 0;
++__attribute__((visibility("default"))) float cl_stereo_2d_viewport[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++
+ /*
+ ===============
+ R_Set2DMode
+@@ -151,10 +157,25 @@ void R_Set2DMode( qboolean enable )
+ 			Matrix4x4_ConcatTranslate( projection_matrix, -gpGlobals->width, 0, 0 );
+ 			break;
+ 		default:
+-			pglViewport( 0, 0, gpGlobals->width, gpGlobals->height );
++		{
++			// VR: the platform supplies a per-eye viewport rect for the 2D
++			// layer, computed from that eye's frustum tangents so the
++			// overlay occupies the SAME angular box in both eyes, with a
++			// convergence shift so it fuses at a comfortable depth. Naive
++			// texture-centered placement double-images: the per-eye
++			// frustums are asymmetric, so the texture center is a
++			// different view direction in each eye. The ortho matrix keeps
++			// the full virtual screen, so 2D draw code is unaffected.
++			if( cl_stereo_2d_viewport_active )
++			{
++				pglViewport( (int)cl_stereo_2d_viewport[0], (int)cl_stereo_2d_viewport[1],
++					     (int)cl_stereo_2d_viewport[2], (int)cl_stereo_2d_viewport[3] );
++			}
++			else pglViewport( 0, 0, gpGlobals->width, gpGlobals->height );
+ 			Matrix4x4_CreateOrtho( projection_matrix, 0, gpGlobals->width, gpGlobals->height, 0, -99999, 99999 );
+ 			break;
+ 		}
++		}
+ 
+ 		pglMatrixMode( GL_PROJECTION );
+ 		GL_LoadMatrix( projection_matrix );
 diff --git a/ref/gl/gl_frustum.c b/ref/gl/gl_frustum.c
 index e3aa897..6b1871f 100644
 --- a/ref/gl/gl_frustum.c

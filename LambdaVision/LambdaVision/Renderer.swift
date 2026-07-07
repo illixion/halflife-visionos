@@ -449,7 +449,10 @@ actor Renderer {
         // 2048² (4.2 Mpx) costs ~6 ms. 0.6× logical ≈ 6.8 Mpx lands at
         // ~8 ms with p95 headroom. Preserves the drawable's aspect.
         // MetalFX below upscales the result back to full logical.
-        let engineScale = 0.6
+        // 0.75× (+56% pixels over 0.6×) projects to p50 ~10-11 ms by the
+        // same linear model — near the 11.1 ms 90 Hz budget; drop back to
+        // 0.7 if busy scenes judder.
+        let engineScale = 0.75
         let maxDim = 4096
         var s = engineScale
         if Double(max(w, h)) * s > Double(maxDim) {
@@ -850,6 +853,27 @@ actor Renderer {
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             var tang = primary.views[eye].tangents  // (left, right, top, bottom)
+
+            // 2D overlay (HUD/console/menu) placement: a box of fixed
+            // ANGULAR size centered on the forward axis, computed per eye
+            // from that eye's frustum tangents. Centering in the texture
+            // double-images: the per-eye frustums are asymmetric, so the
+            // texture center is a different view direction in each eye.
+            // The horizontal convergence shift (-eyeX/dist) makes the
+            // overlay fuse at hudDistance instead of optical infinity.
+            do {
+                let hudDistance: Float = 2.0                     // meters
+                let hudHalfTan = tanf(50.0 / 2.0 * .pi / 180.0)  // 50° wide
+                let tL = tang.x, tR = tang.y, tT = tang.z, tB = tang.w
+                let sumH = tL + tR, sumV = tT + tB
+                let conv = -eyeApple_x / hudDistance             // tan-space, toward the nose
+                let fullW = Float(colorMap.width), fullH = Float(colorMap.height)
+                // Same fraction of both axes keeps ortho pixels square.
+                let frac = 2.0 * hudHalfTan / sumH
+                let x0 = ((tL + conv) / sumH - frac / 2.0) * fullW
+                let y0 = (tB / sumV - frac / 2.0) * fullH
+                lambda_gl_worker_set_2d_viewport(x0, y0, fullW * frac, fullH * frac)
+            }
             let rc: Int32 = withUnsafePointer(to: &tang) { tp in
                 tp.withMemoryRebound(to: Float.self, capacity: 4) { fp -> Int32 in
                     if var angles = headAngles {

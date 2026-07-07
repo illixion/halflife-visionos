@@ -308,6 +308,13 @@ void lambda_joy_set_axis(int axis, int value);
 // next tick.
 void lambda_add_view_yaw(float yaw_deg);
 
+// Stage the 2D-layer (HUD/console/menu) viewport for subsequent per-eye
+// renders: GL pixel coords, origin bottom-left, within the eye's render
+// target. Computed per-eye from the frustum tangents so the overlay
+// occupies the same angular box in both eyes and fuses stereoscopically.
+// Pass w or h <= 0 to disable (2D layer spans the full target).
+void lambda_gl_worker_set_2d_viewport(float x, float y, float w, float h);
+
 // GPU-side frame fence. Register an MTLSharedEvent (borrowed, unretained)
 // and the value end_frame should signal on ANGLE's command queue when the
 // current eye's GPU work completes. The caller's MTLCommandQueue must
