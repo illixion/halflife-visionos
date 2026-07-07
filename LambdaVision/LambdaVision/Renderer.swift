@@ -185,6 +185,27 @@ actor Renderer {
         defer { pendingSnapDeg = 0; snapLock.unlock() }
         return pendingSnapDeg
     }
+
+    // Gaze aim: the pinch handler stages the spatial event's selectionRay
+    // (gaze direction, ARKit world space) from the event thread; renderFrame
+    // converts it to a pitch/yaw offset from the current view direction and
+    // hands it to the engine, where hlsdk applies it around the weapon
+    // frame — shots land where the eyes point, not at screen center.
+    // nil direction = no active pinch (offset returns to zero).
+    nonisolated(unsafe) private static var pendingGazeDir: SIMD3<Float>? = nil
+    private static let gazeLock = NSLock()
+
+    nonisolated static func setGazeRay(direction: SIMD3<Float>?) {
+        gazeLock.lock()
+        pendingGazeDir = direction
+        gazeLock.unlock()
+    }
+
+    private static func currentGazeDir() -> SIMD3<Float>? {
+        gazeLock.lock()
+        defer { gazeLock.unlock() }
+        return pendingGazeDir
+    }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
     private var headBaselinePos: SIMD3<Float>? = nil
@@ -876,6 +897,20 @@ actor Renderer {
             let baseRad = headBaselineYaw! * .pi / 180.0
             let s = sinf(baseRad), c = cosf(baseRad)
             headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
+
+            // Gaze aim: staged pinch ray → angular offset from the view
+            // direction (same xash conventions as pitchDeg/yawDeg above:
+            // pitch positive down, yaw CCW). Zero when no pinch is held.
+            if let g = Renderer.currentGazeDir() {
+                let gx = SIMD3<Float>(-g.z, -g.x, g.y)  // Apple → xash basis
+                let gPitch = atan2f(-gx.z, sqrtf(gx.x * gx.x + gx.y * gx.y)) * rad2deg
+                let gYaw   = atan2f(gx.y, gx.x) * rad2deg
+                var dy = gYaw - yawDeg
+                if dy > 180 { dy -= 360 } else if dy < -180 { dy += 360 }
+                lambda_set_aim_offset(gPitch - pitchDeg, dy)
+            } else {
+                lambda_set_aim_offset(0, 0)
+            }
         }
 
         // colorMap is written by ANGLE on its own MTLCommandQueue; glFinish

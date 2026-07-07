@@ -72,7 +72,7 @@ index 7cd9c1f..b0b9759 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
-index cb7aa9c..b006ef0 100644
+index cb7aa9c..eec9ae1 100644
 --- a/engine/client/cl_main.c
 +++ b/engine/client/cl_main.c
 @@ -509,8 +509,13 @@ static void CL_ApplyAddAngle( void )
@@ -91,6 +91,31 @@ index cb7aa9c..b006ef0 100644
  
  	// remember last total
  	cl.prevaddangletotal = addangletotal;
+@@ -700,6 +705,24 @@ static void CL_CreateCmd( void )
+ 	clgame.dllFuncs.CL_CreateMove( host.frametime, cmd, active );
+ 	IN_EngineAppendMove( host.frametime, cmd, active );
+ 
++	// VR: the platform overrides the RENDERED view per frame (abs head
++	// pitch/roll + head yaw delta, see V_RenderView), but the usercmd
++	// built above carries only the game view angles — the server aims
++	// weapons and judges NPC view cones along a direction the player may
++	// not be looking at. Compose the same effective view into the
++	// usercmd so the authoritative side sees what the player sees; this
++	// also makes movement head-relative, the expected VR locomotion.
++	{
++		extern int   cl_stereo_view_angles_override_active;
++		extern float cl_stereo_view_angles_override[3]; // abs pitch, delta yaw, abs roll
++		if( cl_stereo_view_angles_override_active )
++		{
++			cmd->viewangles[0]  = cl_stereo_view_angles_override[0];
++			cmd->viewangles[1] += cl_stereo_view_angles_override[1];
++			cmd->viewangles[2]  = 0.0f; // roll doesn't aim
++		}
++	}
++
+ 	CL_PopPMStates();
+ 
+ 	if( !cls.demoplayback )
 diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
 index d4628f3..295b93d 100644
 --- a/engine/client/cl_view.c

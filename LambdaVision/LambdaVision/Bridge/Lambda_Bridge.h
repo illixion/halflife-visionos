@@ -308,6 +308,13 @@ void lambda_joy_set_axis(int axis, int value);
 // next tick.
 void lambda_add_view_yaw(float yaw_deg);
 
+// Gaze/hand aim: angular offset of the aim ray from the view direction
+// (degrees, xash conventions: pitch positive down, yaw CCW). Weapons fire
+// along view+offset (applied by hlsdk around the weapon frame); view,
+// movement and pmove are unaffected. Pass (0, 0) to aim at view center.
+// Thread-safe; latest value wins, applied on the GL worker each tick.
+void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
+
 // Stage the 2D-layer (HUD/console/menu) viewport for subsequent per-eye
 // renders: GL pixel coords, origin bottom-left, within the eye's render
 // target. Computed per-eye from the frustum tangents so the overlay

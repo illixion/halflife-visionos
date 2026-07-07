@@ -1,0 +1,102 @@
+diff --git a/dlls/player.cpp b/dlls/player.cpp
+index a31504f..ca4a2eb 100644
+--- a/dlls/player.cpp
++++ b/dlls/player.cpp
+@@ -47,6 +47,14 @@ extern DLL_GLOBAL int g_iSkillLevel, gDisplayTitle;
+ 
+ BOOL gInitHUD = TRUE;
+ 
++// VR (LambdaVision): angular offset of the aim ray from the view
++// direction (pitch, yaw — degrees), written per frame by the platform
++// bridge. Applied around the weapon frame in CBasePlayer::ItemPostFrame
++// so weapons fire along the player's gaze/hand ray while view, movement
++// and pmove stay on the real view angles. Default visibility: the ld -r
++// prelink localizes hidden symbols and the bridge externs this by name.
++extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset[2] = { 0.0f, 0.0f };
++
+ extern void CopyToBodyQue( entvars_t *pev);
+ extern void respawn( entvars_t *pev, BOOL fCopyCorpse );
+ extern Vector VecBModelOrigin( entvars_t *pevBModel );
+@@ -3930,7 +3938,18 @@ void CBasePlayer::ItemPostFrame()
+ 	if( !m_pActiveItem )
+ 		return;
+ 
+-	m_pActiveItem->ItemPostFrame();
++	// VR aim: fire along the platform-supplied aim ray (gaze or hand),
++	// scoped to the weapon frame — UTIL_MakeVectors, GetAutoaimVector and
++	// GetGunPosition all read v_angle, so every weapon inherits the ray.
++	{
++		Vector vrSavedAngle = pev->v_angle;
++		pev->v_angle.x += g_vr_aim_offset[0];
++		pev->v_angle.y += g_vr_aim_offset[1];
++
++		m_pActiveItem->ItemPostFrame();
++
++		pev->v_angle = vrSavedAngle;
++	}
+ }
+ 
+ int CBasePlayer::AmmoInventory( int iAmmoIndex )
+diff --git a/scripts/waifulib/xcompile.py b/scripts/waifulib/xcompile.py
+index 548a64d..49ac36b 100644
+--- a/scripts/waifulib/xcompile.py
++++ b/scripts/waifulib/xcompile.py
+@@ -43,6 +43,30 @@ NSWITCH_ENVVARS = ['DEVKITPRO']
+ PSVITA_ENVVARS = ['VITASDK']
+ 
+ # This class does support ONLY r10e and r19c/r20 NDK
++class visionOS:
++	ctx = None
++	sdkpath = None
++	target = None
++
++	def __init__(self, ctx, issim):
++		self.ctx = ctx
++		sdk = 'xrsimulator' if issim else 'xros'
++		self.sdkpath = ctx.cmd_and_log('xcrun --show-sdk-path --sdk %s' % sdk).strip()
++		self.target = '--target=arm64-apple-xros2.0'
++		if issim: self.target += '-simulator'
++
++	def cflags(self, cxx=False):
++		return ['-isysroot' + self.sdkpath, self.target]
++
++	def linkflags(self):
++		return ['-isysroot' + self.sdkpath, self.target]
++
++	def cc(self):
++		return 'clang'
++
++	def cxx(self):
++		return 'clang++'
++
+ class Android:
+ 	ctx            = None # waf context
+ 	arch           = None
+@@ -541,6 +565,10 @@ def options(opt):
+ 		help='enable building for Sailfish/Aurora')
+ 	xc.add_option('--emscripten', action='store_true', dest='EMSCRIPTEN', default = None,
+ 		help='enable building for Emscripten')
++	xc.add_option('--xros', action='store_true', dest='XROS', default=False,
++		help='enable building for visionOS [default: %(default)s]')
++	xc.add_option('--xros-simulator', action='store_true', dest='XROSSIM', default=False,
++		help='enable building for visionOS Simulator [default: %(default)s]')
+ 
+ def configure(conf):
+ 	if 'CROSS_COMPILE' in conf.environ:
+@@ -636,6 +664,16 @@ def configure(conf):
+ 		conf.env.LIB_M = ['m']
+ 		conf.env.VRTLD = ['vrtld']
+ 		conf.env.DEST_OS = 'psvita'
++	elif conf.options.XROS or conf.options.XROSSIM:
++		issim = bool(conf.options.XROSSIM)
++		conf.xros = xros = visionOS(conf, issim)
++		conf.environ['CC'] = xros.cc()
++		conf.environ['CXX'] = xros.cxx()
++		conf.env.CFLAGS += xros.cflags()
++		conf.env.CXXFLAGS += xros.cflags(True)
++		conf.env.LINKFLAGS += xros.linkflags()
++		conf.env.XROS = 1
++		conf.env.DEST_OS = 'darwin'
+ 	elif conf.options.EMSCRIPTEN:
+ 		# Emscripten compiler is just wrapper to clang
+ 		# But we need to setup platform modifiers, they all are contained inside c_emscripten.py for now

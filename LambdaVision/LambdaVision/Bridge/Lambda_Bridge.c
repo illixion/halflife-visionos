@@ -2344,6 +2344,17 @@ int lambda_engine_init(const char *writable_dir,
         // an unreadable postage stamp.
         Cbuf_AddText("net_graphwidth 512\n");
         Cbuf_AddText("net_graphheight 160\n");
+        // Number keys switch weapons directly (no HUD picker confirm) —
+        // there's no comfortable "confirm" input in the headset.
+        Cbuf_AddText("hud_fastswitch 1\n");
+        // No client weapon prediction: shot EFFECTS (decals, tracers,
+        // muzzle flash) are traced by client event playback using the raw
+        // view angles, which ignores the VR aim-ray offset the server
+        // applies (hlsdk ItemPostFrame) — bullets would damage where you
+        // look but visibly hit screen center. With cl_lw 0 the server
+        // plays the events with its (offset) angles. Latency is a
+        // non-issue: single player, local loop.
+        Cbuf_AddText("cl_lw 0\n");
     }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
@@ -2397,6 +2408,27 @@ static void lambda_view_yaw_apply(void) {
     extern void CL_StereoAddViewYaw(float deg);
     int cd = atomic_exchange(&g_pending_view_yaw_centideg, 0);
     if (cd) CL_StereoAddViewYaw((float)cd / 100.0f);
+}
+
+// Gaze/hand aim: angular offset of the aim ray from the view direction
+// (degrees, xash conventions: pitch positive down, yaw CCW). hlsdk's
+// CBasePlayer::ItemPostFrame (dlls/player.cpp) applies it to v_angle
+// around the weapon frame only, so every weapon fires along the ray
+// while view/movement/pmove stay on the real view angles. Staged in
+// centidegrees (atomics are integer-only), published to the hlsdk-read
+// globals on the GL worker at tick start.
+extern float g_vr_aim_offset[2];  // defined in hlsdk dlls/player.cpp
+static _Atomic int g_pending_aim_pitch_cd;
+static _Atomic int g_pending_aim_yaw_cd;
+
+void lambda_set_aim_offset(float pitch_deg, float yaw_deg) {
+    atomic_store(&g_pending_aim_pitch_cd, (int)lroundf(pitch_deg * 100.0f));
+    atomic_store(&g_pending_aim_yaw_cd,   (int)lroundf(yaw_deg * 100.0f));
+}
+
+static void lambda_aim_offset_apply(void) {
+    g_vr_aim_offset[0] = (float)atomic_load(&g_pending_aim_pitch_cd) / 100.0f;
+    g_vr_aim_offset[1] = (float)atomic_load(&g_pending_aim_yaw_cd) / 100.0f;
 }
 
 // Pause/resume the engine's audio output. The AudioQueue backend
@@ -3236,6 +3268,7 @@ static void *gl_worker_main(void *arg) {
         case WORK_FRAME: {
             lambda_joy_apply();
             lambda_view_yaw_apply();
+            lambda_aim_offset_apply();
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;

@@ -86,6 +86,18 @@ final class KeyboardInput {
         case .keyF: return "impulse 100" // flashlight
         case .keyK: return "impulse 101" // give all weapons (cheat)
         case .keyQ: return "lastinv"     // quick weapon switch
+        // Weapon slots (HL uses 1-5; higher slots exist for mods).
+        // hud_fastswitch is left to the user's config: without it the
+        // slot opens the HUD picker, another press/attack confirms.
+        case .one:   return "slot1"
+        case .two:   return "slot2"
+        case .three: return "slot3"
+        case .four:  return "slot4"
+        case .five:  return "slot5"
+        case .six:   return "slot6"
+        case .seven: return "slot7"
+        case .eight: return "slot8"
+        case .nine:  return "slot9"
         default:    return nil
         }
     }

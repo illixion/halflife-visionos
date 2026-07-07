@@ -12,9 +12,10 @@ if [[ ! -d xash3d-fwgs ]]; then
     (cd xash3d-fwgs && git apply ../xash3d-visionos.patch)
 fi
 
-# 2. Half-Life SDK
+# 2. Half-Life SDK (+ visionOS patch: VR aim ray, xcompile tweaks)
 if [[ ! -d hlsdk-portable ]]; then
     git clone --depth 1 --recursive https://github.com/FWGS/hlsdk-portable.git
+    (cd hlsdk-portable && git apply ../hlsdk-visionos.patch)
 fi
 
 # 3. MoltenVK xcframework into the Xcode project's Vendor/

@@ -45,6 +45,12 @@ enum AudioSessionRecovery {
     }
 }
 
+// Held-pinch state for the fire trigger (IDs of in-flight pinches).
+// Spatial events arrive serially, so a plain Set is fine.
+private enum PinchFire {
+    static var active = Set<SpatialEventCollection.Event.ID>()
+}
+
 struct ImmersiveSpaceContent: CompositorContent {
 
     var appModel: AppModel
@@ -104,6 +110,38 @@ struct ImmersiveSpaceContent: CompositorContent {
                     lambda_snd_activate(0)
                     lambda_snd_activate(1)
                 }
+            // Gaze + pinch = trigger. CompositorServices delivers indirect
+            // pinch events straight to the layer in a full immersive space.
+            // A held pinch holds +attack (HL's automatic weapons fire while
+            // the trigger is down); release/cancel lets go.
+            layerRenderer.onSpatialEvent = { events in
+                for event in events {
+                    switch event.phase {
+                    case .active:
+                        // Stage the gaze ray BEFORE +attack so the shot
+                        // aims where the eyes point (renderFrame converts
+                        // it to an aim offset for the weapon code).
+                        if let ray = event.selectionRay {
+                            Renderer.setGazeRay(direction: SIMD3<Float>(
+                                Float(ray.direction.x),
+                                Float(ray.direction.y),
+                                Float(ray.direction.z)))
+                        }
+                        if PinchFire.active.insert(event.id).inserted,
+                           PinchFire.active.count == 1 {
+                            _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
+                        }
+                    case .ended, .cancelled:
+                        if PinchFire.active.remove(event.id) != nil,
+                           PinchFire.active.isEmpty {
+                            _ = "-attack".withCString { lambda_gl_worker_cmd($0) }
+                            Renderer.setGazeRay(direction: nil)
+                        }
+                    @unknown default:
+                        break
+                    }
+                }
+            }
             KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
         }
