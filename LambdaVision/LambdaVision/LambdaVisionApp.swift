@@ -51,6 +51,13 @@ private enum PinchFire {
     static var active = Set<SpatialEventCollection.Event.ID>()
 }
 
+// IDs of menu pinches that have already registered their single click. The
+// .active phase repeats every frame while the pinch is held, so without this
+// a held pinch would rapid-fire menu selections (one per frame).
+private enum MenuPinch {
+    static var clicked = Set<SpatialEventCollection.Event.ID>()
+}
+
 struct ImmersiveSpaceContent: CompositorContent {
 
     var appModel: AppModel
@@ -138,9 +145,14 @@ struct ImmersiveSpaceContent: CompositorContent {
                                          Float($0.direction.z))
                         }
                         if menuActive {
+                            // Keep the cursor under the gaze while held (for
+                            // highlight), but click only ONCE per pinch —
+                            // .active repeats each frame.
                             if let d = dir, let (mx, my) = Renderer.menuCursorFromGaze(d) {
                                 lambda_menu_set_cursor(Int32(mx), Int32(my))
-                                lambda_menu_click()
+                                if MenuPinch.clicked.insert(event.id).inserted {
+                                    lambda_menu_click()
+                                }
                             }
                             continue
                         }
@@ -153,7 +165,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                             _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
                         }
                     case .ended, .cancelled:
-                        if menuActive { continue }
+                        if menuActive { MenuPinch.clicked.remove(event.id); continue }
                         if PinchFire.active.remove(event.id) != nil,
                            PinchFire.active.isEmpty {
                             _ = "-attack".withCString { lambda_gl_worker_cmd($0) }
