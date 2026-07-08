@@ -18,4 +18,9 @@ class AppModel {
         case open
     }
     var immersiveSpaceState = ImmersiveSpaceState.closed
+
+    /// Player-facing settings (Graphics/Audio/Input), shared by SettingsView
+    /// and the render startup. Created here so its init pushes the stored
+    /// Renderer-static knobs before the immersive space opens.
+    let gameSettings = GameSettings()
 }

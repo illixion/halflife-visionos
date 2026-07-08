@@ -12,6 +12,9 @@ import IOSurface
 
 struct ContentView: View {
 
+    @Environment(AppModel.self) private var appModel
+
+    @State private var showSettings = false
     @State private var bridgeStatus: String = "—"
     @State private var vulkanStatus: String = "—"
     @State private var deviceStatus: String = "—"
@@ -19,25 +22,44 @@ struct ContentView: View {
     @State private var engineStatus: String = "—"
 
     var body: some View {
-        VStack(spacing: 16) {
-            Model3D(named: "Scene", bundle: realityKitContentBundle)
-                .padding(.bottom, 30)
+        NavigationStack {
+            VStack(spacing: 16) {
+                Model3D(named: "Scene", bundle: realityKitContentBundle)
+                    .padding(.bottom, 30)
 
-            Text("Lambda VisionPro").font(.largeTitle)
+                Text("Lambda VisionPro").font(.largeTitle)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("C bridge: \(bridgeStatus)")
-                Text("Vulkan / MoltenVK: \(vulkanStatus)")
-                Text("VkDevice: \(deviceStatus)")
-                Text("IOSurface clear: \(iosurfaceStatus)")
-                Text("Engine: \(engineStatus)")
+                ToggleImmersiveSpaceButton()
+
+                DisclosureGroup("Diagnostics") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("C bridge: \(bridgeStatus)")
+                        Text("Vulkan / MoltenVK: \(vulkanStatus)")
+                        Text("VkDevice: \(deviceStatus)")
+                        Text("IOSurface clear: \(iosurfaceStatus)")
+                        Text("Engine: \(engineStatus)")
+                    }
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.top, 8)
             }
-            .font(.system(.body, design: .monospaced))
-
-            ToggleImmersiveSpaceButton()
+            .padding()
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .help("Settings")
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView().environment(appModel)
+            }
+            .onAppear { runSmokeTests() }
         }
-        .padding()
-        .onAppear { runSmokeTests() }
     }
 
     private func runSmokeTests() {

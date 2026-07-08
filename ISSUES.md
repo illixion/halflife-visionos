@@ -6,13 +6,12 @@ instead of deleting them.
 
 ## Open — interaction
 
-- **Hand-anchored weapon polish.** v1 is in (p_ model at the right hand,
-  skeleton-aligned grip, hand-directed fire, gaze fallback): remaining
-  items — muzzle flash is lost while the viewmodel is hidden
-  (`CL_AddEntity` clears effects on index-0 entities, so `EF_MUZZLEFLASH`
-  can't ride the gun entity as-is); bullets still originate at the eyes
-  (only the direction follows the hand); dominant-hand setting
-  (left-handed players).
+- **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
+  skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
+  fire-along-gaze accessibility now in Settings): remaining items — muzzle
+  flash is lost while the viewmodel is hidden (`CL_AddEntity` clears effects
+  on index-0 entities, so `EF_MUZZLEFLASH` can't ride the gun entity as-is);
+  bullets still originate at the eyes (only the direction follows the hand).
 - **Egon renders/aims as a viewmodel, not hand-anchored** (workaround, not
   a true fix). The gluon gun's backpack is rigged to the player body and
   `p_egon` has no `Bip01 R Hand` bone, so hand-anchoring drives the pack
@@ -39,10 +38,6 @@ instead of deleting them.
 
 ## Open — rendering
 
-- **Settings pane.** Render-scale slider + MetalFX toggle (re-enable the
-  FXAA+MetalFX chain for M2-class hardware; it costs ~13-14 ms GPU and is
-  unnecessary on M5 — see `useMetalFXChain` in Renderer.swift), snap-turn
-  angle, dominant hand.
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
 - **RealityRenderer body/arms.** Modern skinned hands/arms (converted
@@ -94,6 +89,19 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~No settings window~~ — the 2D window is now a launcher with a gear →
+  Settings sheet (sectioned `Form`): Graphics (render scale, MetalFX, gamma,
+  brightness, snap-turn angle), Audio (SFX `volume` / MP3 `MP3Volume`), Input
+  (dominant hand, fire-along-gaze accessibility, fast weapon switch, gesture
+  toggle for pass 2), Advanced (stock HL menu portal via `menu_main`/
+  `menu_options`/`menu_multiplayer` console cmds, map loader, console field).
+  Plumbing: `AppSettingsStore` (UserDefaults) → `GameSettings` (@Observable;
+  `didSet` persists + applies) → engine via `lambda_gl_worker_cmd` cvars
+  (gated behind engine readiness — the GL-worker post deadlocks before init)
+  and hoisted `Renderer` statics (render scale/MetalFX read at drawable setup,
+  so they apply on next immersive open). FOV/anisotropy/sensitivity were
+  dropped as no-ops on our pipeline (headset tangents fix the world
+  projection; anisotropy is set at texture upload; look uses joy axes + snap).
 - ~~Audio pinned to the 2D window~~ / ~~1 s loop on resume~~ — window-pinning
   was visionOS anchoring the app's audio to its first window; fixed with
   `AVAudioSession.setIntendedSpatialExperience(.bypassed)`. Resume loop fixed

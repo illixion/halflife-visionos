@@ -173,7 +173,19 @@ actor Renderer {
     // position baseline. +30° = turn right.
     nonisolated(unsafe) private static var pendingSnapDeg: Float = 0
     private static let snapLock = NSLock()
-    static let snapTurnDegrees: Float = 30
+    // Settings-driven knobs, assigned from GameSettings on the main actor and
+    // read on the render/input threads. Simple value types with benign
+    // tearing (like the other cross-thread scalars here) — no lock needed.
+    nonisolated(unsafe) static var snapTurnDegrees: Float = 30
+    // Engine render scale and the FXAA+MetalFX upscale chain size the render
+    // targets, so these are read once at drawable setup — a change applies on
+    // the next immersive-space open, not live.
+    nonisolated(unsafe) static var engineScale: Float = 0.75
+    nonisolated(unsafe) static var useMetalFXChain: Bool = false
+    // Dominant hand for the weapon anchor + aim, and the accessibility switch
+    // that fires along gaze instead of the weapon barrel. Both live.
+    nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
+    nonisolated(unsafe) static var fireAlongGaze: Bool = false
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
         snapLock.lock()
@@ -223,7 +235,9 @@ actor Renderer {
 
     private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
         guard handTracking.state == .running else { return nil }
-        guard let hand = handTracking.latestAnchors.rightHand,
+        let left = Renderer.dominantHandIsLeft
+        guard let hand = left ? handTracking.latestAnchors.leftHand
+                              : handTracking.latestAnchors.rightHand,
               hand.isTracked,
               let skel = hand.handSkeleton else { return nil }
         // Anchor-level tracking is the only gate: per-joint isTracked goes
@@ -245,7 +259,10 @@ actor Renderer {
         let fwd    = simd_normalize(pMid - pWrist)
         // Right hand: index → little knuckle runs across the palm toward
         // the hand's own right; right × forward = up (palm-roll included).
-        let across = simd_normalize(worldPos(litK) - worldPos(idxK))
+        // The left hand's little finger is on the opposite side, so negate
+        // to keep `up` pointing the same way out of the palm.
+        let acrossRaw = worldPos(litK) - worldPos(idxK)
+        let across = simd_normalize(left ? -acrossRaw : acrossRaw)
         let up     = simd_normalize(simd_cross(across, fwd))
 
         // World → head-local (rotation only for directions), then Apple →
@@ -586,8 +603,10 @@ actor Renderer {
         // MetalFX below upscales the result back to full logical.
         // 0.75× (+56% pixels over 0.6×) projects to p50 ~10-11 ms by the
         // same linear model — near the 11.1 ms 90 Hz budget; drop back to
-        // 0.7 if busy scenes judder.
-        let engineScale = 0.75
+        // 0.7 if busy scenes judder. Now driven by the Graphics settings
+        // (Renderer.engineScale); read here so a change takes effect on the
+        // next immersive-space open.
+        let engineScale = Double(Renderer.engineScale)
         let maxDim = 4096
         var s = engineScale
         if Double(max(w, h)) * s > Double(maxDim) {
@@ -643,7 +662,7 @@ actor Renderer {
         // chain alone. At 0.75x engine scale the scaler's win over the
         // composite pass's bilinear sample doesn't justify two extra
         // full-res passes per eye.
-        let useMetalFXChain = false
+        let useMetalFXChain = Renderer.useMetalFXChain
         if useMetalFXChain, logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
            let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
             let sd = MTLFXSpatialScalerDescriptor()
@@ -751,6 +770,9 @@ actor Renderer {
             }
         }
         print("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
+        // Engine + GL worker are now up, so cvar commands are safe to post.
+        // Flush the archived Graphics/Audio/Input cvars and enable live pushes.
+        Task { @MainActor [appModel] in appModel.gameSettings.engineDidStart() }
     }
 
     private func updateDynamicBufferState(frameIndex: UInt64) {
@@ -980,7 +1002,11 @@ actor Renderer {
                 lambda_set_hand_pose(p.x, p.y, p.z,
                                      hand.localFwd.x, hand.localFwd.y, hand.localFwd.z,
                                      hand.localUp.x, hand.localUp.y, hand.localUp.z)
-                aimDir = hand.worldForward
+                // Fire follows the weapon barrel (hand forward) by default;
+                // the accessibility option aims shots along gaze instead, for
+                // players who can't comfortably point with the hand.
+                aimDir = Renderer.fireAlongGaze ? Renderer.currentGazeDir()
+                                                : hand.worldForward
             } else {
                 lambda_clear_hand_pose()
                 aimDir = Renderer.currentGazeDir()

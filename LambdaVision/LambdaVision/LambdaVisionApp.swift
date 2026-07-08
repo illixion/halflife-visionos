@@ -185,7 +185,9 @@ struct LambdaVisionApp: App {
     @State private var appModel = AppModel()
 
     var body: some Scene {
-        WindowGroup {
+        // Single-instance launcher/settings window — we only ever want one
+        // copy of the start menu.
+        Window("Lambda VisionPro", id: "main") {
             ContentView()
                 .environment(appModel)
                 // Route gamepad input to the app instead of system focus
