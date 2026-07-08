@@ -2361,6 +2361,28 @@ int lambda_engine_init(const char *writable_dir,
         // audible as pan lag in VR. 0.04 s keeps a safe cushion above the
         // ~8 ms engine tick while making panning feel responsive.
         Cbuf_AddText("_snd_mixahead 0.04\n");
+        // Default keyboard binds. We now forward hardware-keyboard input as
+        // real engine key events (Lambda_Bridge lambda_key_event), so the
+        // stock bind system is the source of truth — but no config.cfg with
+        // binds ships in the app, so establish the standard HL layout here.
+        // Runs after the deferred `exec config.cfg`, so it currently wins over
+        // a saved config (rebinds don't persist across launch yet — TODO).
+        // Z/X are handled app-side (snap turn) and deliberately unbound.
+        Cbuf_AddText(
+            "bind \"w\" \"+forward\"\n"       "bind \"s\" \"+back\"\n"
+            "bind \"a\" \"+moveleft\"\n"      "bind \"d\" \"+moveright\"\n"
+            "bind \"uparrow\" \"+forward\"\n" "bind \"downarrow\" \"+back\"\n"
+            "bind \"leftarrow\" \"+left\"\n"  "bind \"rightarrow\" \"+right\"\n"
+            "bind \"space\" \"+jump\"\n"      "bind \"ctrl\" \"+duck\"\n"
+            "bind \"shift\" \"+speed\"\n"     "bind \"e\" \"+use\"\n"
+            "bind \"r\" \"+reload\"\n"        "bind \"f\" \"impulse 100\"\n"
+            "bind \"q\" \"lastinv\"\n"        "bind \"t\" \"impulse 201\"\n"
+            "bind \"mouse1\" \"+attack\"\n"   "bind \"mouse2\" \"+attack2\"\n"
+            "bind \"1\" \"slot1\"\n" "bind \"2\" \"slot2\"\n" "bind \"3\" \"slot3\"\n"
+            "bind \"4\" \"slot4\"\n" "bind \"5\" \"slot5\"\n" "bind \"6\" \"slot6\"\n"
+            "bind \"7\" \"slot7\"\n" "bind \"8\" \"slot8\"\n" "bind \"9\" \"slot9\"\n"
+            "bind \"0\" \"slot10\"\n"
+            "bind \"[\" \"invprev\"\n"        "bind \"]\" \"invnext\"\n");
     }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
@@ -2531,6 +2553,50 @@ static void lambda_menu_input_apply(void) {
 static void lambda_menu_state_publish(void) {
     extern int UI_IsVisible(void);
     atomic_store(&g_menu_active, UI_IsVisible());
+}
+
+// ---- Hardware keyboard → engine key/char events ---------------------------
+// visionOS delivers keyboard input via GameController (KeyboardInput.swift),
+// not SDL. We forward it straight to the engine's input path so the stock
+// bind system, console, and menu text fields all work: Key_Event(keynum,down)
+// drives binds + navigation, CL_CharEvent(ch) drives console/menu text (it's
+// a no-op in game). Events are queued from the event thread and drained on
+// the GL worker before each tick (same thread the engine input path expects).
+#include <pthread.h>   // key queue mutex (pthread is used by the GL worker too)
+#define LAMBDA_KEYQ 256
+typedef struct { int is_char; int code; int down; } lambda_key_ev_t;
+static lambda_key_ev_t g_keyq[LAMBDA_KEYQ];
+static int g_keyq_head, g_keyq_tail;
+static pthread_mutex_t g_keyq_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static void lambda_key_enqueue(int is_char, int code, int down) {
+    pthread_mutex_lock(&g_keyq_mtx);
+    int n = (g_keyq_head + 1) % LAMBDA_KEYQ;
+    if (n != g_keyq_tail) {          // drop on overflow rather than block
+        g_keyq[g_keyq_head].is_char = is_char;
+        g_keyq[g_keyq_head].code = code;
+        g_keyq[g_keyq_head].down = down;
+        g_keyq_head = n;
+    }
+    pthread_mutex_unlock(&g_keyq_mtx);
+}
+
+void lambda_key_event(int key, int down) { lambda_key_enqueue(0, key, down); }
+void lambda_char_event(int ch)           { lambda_key_enqueue(1, ch, 0); }
+
+// GL worker, each frame BEFORE the tick.
+static void lambda_key_queue_apply(void) {
+    extern void Key_Event(int key, int down);
+    extern void CL_CharEvent(int key);
+    for (;;) {
+        pthread_mutex_lock(&g_keyq_mtx);
+        if (g_keyq_tail == g_keyq_head) { pthread_mutex_unlock(&g_keyq_mtx); break; }
+        lambda_key_ev_t e = g_keyq[g_keyq_tail];
+        g_keyq_tail = (g_keyq_tail + 1) % LAMBDA_KEYQ;
+        pthread_mutex_unlock(&g_keyq_mtx);
+        if (e.is_char) CL_CharEvent(e.code);
+        else           Key_Event(e.code, e.down);
+    }
 }
 
 // Pause/resume the engine's audio output. The AudioQueue backend
@@ -3394,8 +3460,10 @@ static void *gl_worker_main(void *arg) {
                 // head motion instead of sticking to the hand.
                 lambda_hand_pose_apply();
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
-                // Synthetic menu cursor/clicks BEFORE the tick so the menu
-                // draws with the right cursor this frame.
+                // Keyboard + synthetic menu cursor/clicks BEFORE the tick so
+                // binds/console/menu see them this frame (and the menu draws
+                // with the right cursor).
+                lambda_key_queue_apply();
                 lambda_menu_input_apply();
                 double t0 = ft_now_ms();
                 lambda_engine_frame();

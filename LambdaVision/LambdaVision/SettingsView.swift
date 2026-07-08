@@ -77,14 +77,11 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    HStack {
-                        Button("Main menu") { settings.command("menu_main") }
-                        Spacer()
-                        Button("Options") { settings.command("menu_options") }
-                        Spacer()
-                        Button("Multiplayer") { settings.command("menu_multiplayer") }
-                    }
-                    .disabled(!settings.isEngineReady)
+                    // Open the stock menu at its main screen and let the
+                    // player navigate. (Jumping straight to menu_options /
+                    // menu_multiplayer pops the first-run "player name" box.)
+                    Button("Open Half-Life menu") { settings.command("menu_main") }
+                        .disabled(!settings.isEngineReady)
 
                     Menu("Load map") {
                         ForEach(maps, id: \.id) { m in

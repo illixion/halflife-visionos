@@ -335,6 +335,14 @@ void lambda_menu_set_cursor(int x, int y);
 void lambda_menu_click(void);
 int  lambda_menu_active(void);
 
+// Hardware keyboard → engine input (KeyboardInput.swift). Forward key events
+// (xash keynums, lowercase-ascii for printable keys; see engine keydefs.h)
+// and, for printable keys, the shifted character for console/menu text. Both
+// are queued and drained on the GL worker each frame; the engine routes them
+// by key_dest (binds in game, editing in console/menu).
+void lambda_key_event(int key, int down);
+void lambda_char_event(int ch);
+
 // Stage the 2D-layer (HUD/console/menu) viewport for subsequent per-eye
 // renders: GL pixel coords, origin bottom-left, within the eye's render
 // target. Computed per-eye from the frustum tangents so the overlay
