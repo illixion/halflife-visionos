@@ -441,10 +441,10 @@ index 72bafc2..973d9bd 100644
  {
 diff --git a/engine/platform/visionos/snd_visionos.c b/engine/platform/visionos/snd_visionos.c
 new file mode 100644
-index 0000000..3e77a9e
+index 0000000..f3f5ef5
 --- /dev/null
 +++ b/engine/platform/visionos/snd_visionos.c
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,268 @@
 +/*
 +snd_visionos.c - AudioQueue sound output for visionOS
 +Copyright (C) 2026 Ixion
@@ -482,8 +482,13 @@ index 0000000..3e77a9e
 +// lock exists, and a race costs at worst one torn buffer (~23 ms click).
 +// samplepos is published with a release store and read with plain aligned
 +// loads (atomic on arm64).
++// Small buffers keep output latency (hence pan lag in VR) low. 3×512 @
++// 44100 = ~35 ms of queue depth; the engine tick (~8 ms at 120 fps) refills
++// well ahead of that. AudioQueue adds its own internal latency on top — if
++// pan lag is still objectionable, the real fix is a low-latency backend
++// (AVAudioSourceNode / AURemoteIO) pulling the same lock-free ring.
 +#define AQ_BUFFER_COUNT   3
-+#define AQ_FRAMES_PER_BUF 1024 // ~23 ms @ 44100 Hz; xash paints ~100 ms ahead
++#define AQ_FRAMES_PER_BUF 512
 +
 +static AudioQueueRef s_aq;
 +static qboolean      s_aq_running;
@@ -660,6 +665,23 @@ index 0000000..3e77a9e
 +
 +	if( active && !s_aq_running )
 +	{
++		// Silence the ring before resuming: while the app was suspended the
++		// mixer (GL worker) stopped painting, so the ring still holds the
++		// last ~0.74 s of audio. Restarting the queue before the mixer
++		// repaints would replay that stale content on a loop (observed on
++		// resume with the game hidden). Zeroed ring → the callback streams
++		// silence until the first fresh mix lands.
++		if( snd.buffer )
++		{
++			memset( snd.buffer, 0, snd.samples * 2 );
++			__atomic_store_n( &snd.samplepos, 0, __ATOMIC_RELEASE );
++		}
++		// NOTE: do NOT AudioQueueReset here — Reset removes the enqueued
++		// buffers WITHOUT returning them through the callback, so the queue
++		// starts with zero buffers, the callback never fires to re-enqueue,
++		// and output is silent forever (observed: total silence). The ring
++		// memset above is enough to kill the resume loop; the ~70 ms already
++		// copied into the 3 in-flight buffers plays out harmlessly.
 +		if( AudioQueueStart( s_aq, NULL ) == noErr )
 +			s_aq_running = true;
 +	}

@@ -58,12 +58,18 @@ instead of deleting them.
 
 ## Open — audio
 
-- **PHASE spatial audio rewrite.** AVAudioEnvironmentNode is dead on
-  visionOS (config matrix exhausted; SpatialAudioEngine.enabled=false).
-- **Window-anchored audio**: with the 2D window open, game audio
-  spatializes from the window; head-locked when closed. Consider
-  `.spatialExperience`/`.headTracked` session config during the PHASE
-  work.
+- **Lower audio latency for tighter panning.** Panning is responsive now
+  (small AudioQueue buffers + `_snd_mixahead 0.04`), but AudioQueue is a
+  buffered/high-latency API. For ~40 ms panning, swap the backend to a
+  low-latency `AVAudioSourceNode`/`AURemoteIO` render callback pulling the
+  same lock-free ring (`snd_visionos.c`).
+- **True HRTF (up/down cues).** Stock mixer + AudioQueue does HL-style L/R
+  panning only. PHASE (the HRTF route) is unusable here — see
+  `.claude/research/visionos-spatial-audio.md`. Real options: custom HRTF
+  convolution into the ring, or re-test PHASE on a newer visionOS.
+- **Window-lifecycle audio polish**: brief interrupt when closing the 2D
+  window; brief game-audio replay when reopening a window while the game is
+  hidden. Cosmetic.
 
 ## Open — upstream candidates (xash3d-fwgs)
 
@@ -88,6 +94,13 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~Audio pinned to the 2D window~~ / ~~1 s loop on resume~~ — window-pinning
+  was visionOS anchoring the app's audio to its first window; fixed with
+  `AVAudioSession.setIntendedSpatialExperience(.bypassed)`. Resume loop fixed
+  by silencing the DMA ring on reactivate (NOT `AudioQueueReset`, which
+  starves the queue). Also cut pan latency (`_snd_mixahead 0.04`, 512-frame
+  AQ buffers). PHASE spatial audio abandoned as unusable on visionOS 26 —
+  full write-up in `.claude/research/visionos-spatial-audio.md`.
 - ~~Gaze aim fires at screen center~~ — root cause: usercmd never carried
   the head-tracked view; server aimed along stale game yaw (also broke
   NPC view cones). Fixed by composing the stereo view override into the

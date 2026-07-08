@@ -2355,6 +2355,12 @@ int lambda_engine_init(const char *writable_dir,
         // plays the events with its (offset) angles. Latency is a
         // non-issue: single player, local loop.
         Cbuf_AddText("cl_lw 0\n");
+        // Minimize mix-ahead: the mixer bakes each sound's L/R pan into the
+        // DMA ring, so however far it paints ahead is how long a pan change
+        // (head turn / strafe) takes to be heard. Default 0.12 s is very
+        // audible as pan lag in VR. 0.04 s keeps a safe cushion above the
+        // ~8 ms engine tick while making panning feel responsive.
+        Cbuf_AddText("_snd_mixahead 0.04\n");
     }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);

@@ -382,14 +382,19 @@ actor Renderer {
     @MainActor
     static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, arSession: ARKitSession) {
         Task(executorPreference: RendererTaskExecutor.shared) {
-            // Per-source spatial audio is parked until the PHASE rewrite:
-            // AVAudioEnvironmentNode renders silence on visionOS despite a
-            // provably correct graph (see SpatialAudioEngine.swift). When
-            // disabled, HUD_GetSoundInterface declines and the engine uses
-            // its stock stereo mixer for everything.
+            // Per-source spatial audio. PHASE (PhaseAudioEngine) is the live
+            // renderer; the older AVAudioEnvironmentNode path
+            // (SpatialAudioEngine) is parked — that node outputs silence on
+            // visionOS. Whichever registers the SoundAPI callbacks intercepts
+            // world channels for spatial rendering; the engine's stock stereo
+            // mixer keeps the bed (music/UI/player-own sounds). If neither is
+            // enabled, HUD_GetSoundInterface declines and the mixer does
+            // everything head-locked.
             // Must precede engine init (first renderFrame): the engine
             // captures the spatial-audio SoundAPI callbacks during S_Init.
-            if SpatialAudioEngine.enabled {
+            if PhaseAudioEngine.enabled {
+                PhaseAudioEngine.shared.register()
+            } else if SpatialAudioEngine.enabled {
                 SpatialAudioEngine.shared.register()
             }
             let renderer = Renderer(layerRenderer, appModel: appModel)
@@ -1256,7 +1261,10 @@ actor Renderer {
                 // The engine stops ticking here but the AudioQueue would
                 // keep streaming the DMA ring — the last painted samples
                 // loop audibly forever. Pause output with the renderer.
+                // PHASE runs on its own engine (not the DMA ring), so its
+                // loops sustain unless we stop it too.
                 lambda_snd_activate(0)
+                PhaseAudioEngine.shared.setActive(false)
                 Task { @MainActor in
                     appModel.immersiveSpaceState = .closed
                 }
@@ -1266,8 +1274,10 @@ actor Renderer {
                     appModel.immersiveSpaceState = .inTransition
                 }
                 lambda_snd_activate(0)
+                PhaseAudioEngine.shared.setActive(false)
                 layerRenderer.waitUntilRunning()
                 lambda_snd_activate(1)
+                PhaseAudioEngine.shared.setActive(true)
                 continue
             } else {
                 Task { @MainActor in

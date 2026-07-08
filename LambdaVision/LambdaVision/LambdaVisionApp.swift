@@ -74,6 +74,16 @@ struct ImmersiveSpaceContent: CompositorContent {
             do {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, options: [.mixWithOthers])
+                // Bypass the system's spatializer. By default visionOS
+                // spatializes the app's audio and anchors it to the app's
+                // first window — sitting ON TOP of the mixes we already
+                // produce. That double layer is what made PHASE's own
+                // binaural output deafening while the window was open and
+                // silent when it was closed (no window = no anchor), and it
+                // window-pinned the AudioQueue bed. Bypassed = our stereo/
+                // binaural output plays through unmodified; PHASE does the
+                // spatialization, the bed stays head-locked.
+                try session.setIntendedSpatialExperience(.bypassed)
                 try session.setActive(true)
             } catch {
                 print("[LambdaVision] AVAudioSession activation failed: \(error)")
