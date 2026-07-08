@@ -4,6 +4,8 @@
 <dict>
 	<key>GCSupportsControllerUserInteraction</key>
 	<true/>
+	<key>NSHandsTrackingUsageDescription</key>
+	<string>Hand tracking anchors the in-game weapon to your hand and aims where you point.</string>
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>

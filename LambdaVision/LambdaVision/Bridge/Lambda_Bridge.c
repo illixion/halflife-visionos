@@ -2431,6 +2431,54 @@ static void lambda_aim_offset_apply(void) {
     g_vr_aim_offset[1] = (float)atomic_load(&g_pending_aim_yaw_cd) / 100.0f;
 }
 
+// Hand-anchored weapon: the tracked hand pose, camera-local in xash axes
+// (x forward, y left, z up), position in xash units, forward/up unit
+// vectors. hlsdk's cl_dll composes it with the rendered camera each frame
+// and draws the current p_ model there (HUD_CreateEntities, entity.cpp),
+// hiding the camera-locked viewmodel while active. Positions staged in
+// centi-units, directions in milli (atomics are integer-only).
+extern float g_vr_hand_pose[9];      // defined in hlsdk cl_dll/view.cpp
+extern int   g_vr_hand_pose_active;  // ditto
+extern float g_vr_cam_override[7];   // ditto: mirror of the engine's stereo
+                                     // view override for the cl_dll (which
+                                     // can't link engine symbols itself)
+static _Atomic int g_pending_hand[9];
+static _Atomic int g_pending_hand_active;
+
+void lambda_set_hand_pose(float px, float py, float pz,
+                          float fx, float fy, float fz,
+                          float ux, float uy, float uz) {
+    const float v[9] = { px, py, pz, fx, fy, fz, ux, uy, uz };
+    for (int i = 0; i < 9; i++) {
+        float scale = (i < 3) ? 100.0f : 1000.0f;
+        atomic_store(&g_pending_hand[i], (int)lroundf(v[i] * scale));
+    }
+    atomic_store(&g_pending_hand_active, 1);
+}
+
+void lambda_clear_hand_pose(void) {
+    atomic_store(&g_pending_hand_active, 0);
+}
+
+static void lambda_hand_pose_apply(void) {
+    extern int   cl_stereo_view_angles_override_active;
+    extern float cl_stereo_view_angles_override[3];
+    extern float cl_stereo_view_origin_offset[3];
+    for (int i = 0; i < 9; i++) {
+        float scale = (i < 3) ? 100.0f : 1000.0f;
+        g_vr_hand_pose[i] = (float)atomic_load(&g_pending_hand[i]) / scale;
+    }
+    g_vr_hand_pose_active = atomic_load(&g_pending_hand_active);
+    // Mirror the engine's stereo view override for the cl_dll, which
+    // composes the rendered camera from it (entity.cpp) but can't link
+    // engine symbols at its intermediate dylib link.
+    g_vr_cam_override[0] = cl_stereo_view_angles_override_active ? 1.0f : 0.0f;
+    for (int i = 0; i < 3; i++) {
+        g_vr_cam_override[1 + i] = cl_stereo_view_angles_override[i];
+        g_vr_cam_override[4 + i] = cl_stereo_view_origin_offset[i];
+    }
+}
+
 // Pause/resume the engine's audio output. The AudioQueue backend
 // (snd_visionos.c) streams the DMA ring on its own thread — when the
 // render loop stops ticking (immersive space closed/paused) the mixer
@@ -3284,6 +3332,13 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[1],
                                                   g_w_view_offset[2]);
                 }
+                // AFTER the view override is installed for THIS frame: the
+                // hand-pose apply mirrors it into the cl_dll globals, and
+                // the tick below composes the hand weapon from the mirror.
+                // Mirroring before the set (the old order) handed the
+                // entity a cleared/stale camera — the gun swam against
+                // head motion instead of sticking to the hand.
+                lambda_hand_pose_apply();
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
                 double t0 = ft_now_ms();
                 lambda_engine_frame();

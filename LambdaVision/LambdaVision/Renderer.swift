@@ -157,6 +157,7 @@ actor Renderer {
     var mesh: MTKMesh
 
     let worldTracking: WorldTrackingProvider
+    let handTracking: HandTrackingProvider
     let layerRenderer: LayerRenderer
     let appModel: AppModel
     // Head yaw at the first valid sample. Only yaw needs a baseline:
@@ -205,6 +206,60 @@ actor Renderer {
         gazeLock.lock()
         defer { gazeLock.unlock() }
         return pendingGazeDir
+    }
+
+    // Hand-anchored weapon: the dominant hand's gun pose, sampled from the
+    // hand skeleton each frame. Forward runs wrist → middle knuckle (where
+    // the fingers point), up is derived from the across-palm direction so
+    // the grip's roll carries over. Returned both as an Apple-world aim
+    // direction (for the fire-ray offset) and head-local in xash camera
+    // axes (meters; the bridge/hlsdk compose it with the rendered camera).
+    private struct HandSample {
+        var worldForward: SIMD3<Float>            // Apple world basis, unit
+        var localPos: SIMD3<Float>                // xash cam axes, meters
+        var localFwd: SIMD3<Float>
+        var localUp: SIMD3<Float>
+    }
+
+    private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
+        guard handTracking.state == .running else { return nil }
+        guard let hand = handTracking.latestAnchors.rightHand,
+              hand.isTracked,
+              let skel = hand.handSkeleton else { return nil }
+        // Anchor-level tracking is the only gate: per-joint isTracked goes
+        // false whenever fingers self-occlude (fist, hand rotation), which
+        // made the weapon flicker back to the viewmodel — the estimated
+        // joint poses are plenty for a grip frame.
+        let wrist = skel.joint(.wrist)
+        let midK  = skel.joint(.middleFingerKnuckle)
+        let idxK  = skel.joint(.indexFingerKnuckle)
+        let litK  = skel.joint(.littleFingerKnuckle)
+
+        let handT = hand.originFromAnchorTransform
+        func worldPos(_ j: HandSkeleton.Joint) -> SIMD3<Float> {
+            let t = handT * j.anchorFromJointTransform
+            return SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        }
+        let pWrist = worldPos(wrist)
+        let pMid   = worldPos(midK)
+        let fwd    = simd_normalize(pMid - pWrist)
+        // Right hand: index → little knuckle runs across the palm toward
+        // the hand's own right; right × forward = up (palm-roll included).
+        let across = simd_normalize(worldPos(litK) - worldPos(idxK))
+        let up     = simd_normalize(simd_cross(across, fwd))
+
+        // World → head-local (rotation only for directions), then Apple →
+        // xash camera basis: (x,y,z) → (-z,-x,y).
+        let hInv = m.inverse
+        func headLocalDir(_ v: SIMD3<Float>) -> SIMD3<Float> {
+            let r = hInv * SIMD4<Float>(v, 0)
+            return SIMD3(-r.z, -r.x, r.y)
+        }
+        let p4 = hInv * SIMD4<Float>(pMid, 1)
+        return HandSample(worldForward: fwd,
+                          localPos: SIMD3(-p4.z, -p4.x, p4.y),
+                          localFwd: headLocalDir(fwd),
+                          localUp: headLocalDir(up))
     }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
@@ -304,11 +359,21 @@ actor Renderer {
         #endif
 
         worldTracking = WorldTrackingProvider()
+        handTracking = HandTrackingProvider()
     }
 
     private func startARSession(_ arSession: ARKitSession) async {
         do {
-            try await arSession.run([worldTracking])
+            // Hand tracking is optional: run without it if unsupported or
+            // denied (weapon falls back to the camera-locked viewmodel).
+            var providers: [any DataProvider] = [worldTracking]
+            if HandTrackingProvider.isSupported {
+                let auth = await arSession.requestAuthorization(for: [.handTracking])
+                if auth[.handTracking] == .allowed {
+                    providers.append(handTracking)
+                }
+            }
+            try await arSession.run(providers)
         } catch {
             fatalError("Failed to initialize ARSession")
         }
@@ -898,10 +963,24 @@ actor Renderer {
             let s = sinf(baseRad), c = cosf(baseRad)
             headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
 
-            // Gaze aim: staged pinch ray → angular offset from the view
-            // direction (same xash conventions as pitchDeg/yawDeg above:
-            // pitch positive down, yaw CCW). Zero when no pinch is held.
-            if let g = Renderer.currentGazeDir() {
+            // Aim ray + hand-anchored weapon. With the dominant hand
+            // tracked, the weapon renders at the hand (p_ model, composed
+            // hlsdk-side) and fires along the hand's pointing direction;
+            // otherwise fall back to the pinch gaze ray, then view center.
+            // Offsets in xash conventions (pitch positive down, yaw CCW).
+            var aimDir: SIMD3<Float>? = nil  // Apple world basis
+            if let anchor = frameDeviceAnchor,
+               let hand = sampleDominantHand(headTransform: anchor.originFromAnchorTransform) {
+                let p = hand.localPos * appleToXash
+                lambda_set_hand_pose(p.x, p.y, p.z,
+                                     hand.localFwd.x, hand.localFwd.y, hand.localFwd.z,
+                                     hand.localUp.x, hand.localUp.y, hand.localUp.z)
+                aimDir = hand.worldForward
+            } else {
+                lambda_clear_hand_pose()
+                aimDir = Renderer.currentGazeDir()
+            }
+            if let g = aimDir {
                 let gx = SIMD3<Float>(-g.z, -g.x, g.y)  // Apple → xash basis
                 let gPitch = atan2f(-gx.z, sqrtf(gx.x * gx.x + gx.y * gx.y)) * rad2deg
                 let gYaw   = atan2f(gx.y, gx.x) * rad2deg

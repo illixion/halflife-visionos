@@ -169,6 +169,11 @@ HLSDK_CL_EXPORTS="$HERE/hlsdk-portable/build/cl_exports.list"
 nm -gU "$HERE/hlsdk-portable/build/cl_dll/client_arm64.dylib" \
   | awk '/ T / {print $NF}' | grep -v '^__Z' \
   | grep -vE '^_IN_(ActivateMouse|DeactivateMouse|MouseEvent)$' > "$HLSDK_CL_EXPORTS"
+# VR data globals (the awk above only passes T/text symbols): written by
+# Lambda_Bridge.c each tick, composed into the hand-anchored weapon entity
+# in entity.cpp. Without these the prelink localizes them and the app link
+# fails on the bridge's externs.
+printf '_g_vr_hand_pose\n_g_vr_hand_pose_active\n_g_vr_cam_override\n' >> "$HLSDK_CL_EXPORTS"
 
 # IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent collide three ways:
 # (a) engine's input.c defines them (used by SDL hosts we don't compile,

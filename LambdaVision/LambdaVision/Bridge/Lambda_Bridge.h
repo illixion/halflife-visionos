@@ -315,6 +315,17 @@ void lambda_add_view_yaw(float yaw_deg);
 // Thread-safe; latest value wins, applied on the GL worker each tick.
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
 
+// Hand-anchored weapon: tracked hand pose, CAMERA-local in xash axes
+// (x forward, y left, z up). Position in xash units (39.37/m), forward/up
+// unit vectors. While set, the client draws the current weapon's p_ model
+// at this pose (as a world entity, occluded by geometry) and hides the
+// camera-locked viewmodel; clear to restore the stock viewmodel.
+// Thread-safe; latest value wins, applied on the GL worker each tick.
+void lambda_set_hand_pose(float px, float py, float pz,
+                          float fx, float fy, float fz,
+                          float ux, float uy, float uz);
+void lambda_clear_hand_pose(void);
+
 // Stage the 2D-layer (HUD/console/menu) viewport for subsequent per-eye
 // renders: GL pixel coords, origin bottom-left, within the eye's render
 // target. Computed per-eye from the frustum tangents so the overlay

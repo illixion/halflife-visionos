@@ -6,12 +6,25 @@ instead of deleting them.
 
 ## Open — interaction
 
-- **Hand-anchored weapons.** Viewmodel is still camera-locked; render the
-  weapon at the dominant hand's tracked pose instead (ARKit
-  `HandTrackingProvider`). Options: re-anchor the `v_` model (fast, baked
-  arms may look odd) or switch to world `p_` models (cleaner, HD pack
-  upgrades those too). The aim-ray plumbing (`lambda_set_aim_offset` →
-  hlsdk) is already in and takes a hand ray as easily as the gaze ray.
+- **Hand-anchored weapon polish.** v1 is in (p_ model at the right hand,
+  skeleton-aligned grip, hand-directed fire, gaze fallback): remaining
+  items — muzzle flash is lost while the viewmodel is hidden
+  (`CL_AddEntity` clears effects on index-0 entities, so `EF_MUZZLEFLASH`
+  can't ride the gun entity as-is); bullets still originate at the eyes
+  (only the direction follows the hand); dominant-hand setting
+  (left-handed players).
+- **Egon renders/aims as a viewmodel, not hand-anchored** (workaround, not
+  a true fix). The gluon gun's backpack is rigged to the player body and
+  `p_egon` has no `Bip01 R Hand` bone, so hand-anchoring drives the pack
+  into the player's chest. Current behavior: `VR_AddHandWeapon`
+  (`entity.cpp`) skips the egon via `strstr(mdl->name, "egon")` and leaves
+  the stock viewmodel up (`g_vr_hand_weapon_drawn = 0`); to keep the
+  visuals and the hits consistent, `CBasePlayer::ItemPostFrame`
+  (`player.cpp`) also exempts `WEAPON_EGON` from the aim offset so it fires
+  along the view (where the player looks) instead of the hand ray. Two
+  files must agree on "egon" — the render skip and the aim exemption. A
+  proper fix would anchor only the gun portion to the hand (hide/detach
+  the backpack submesh) so it behaves like every other weapon.
 - **Gaze+pinch `+use`.** Off-hand pinch = use, dominant hand = fire, to
   avoid gesture ambiguity. Spatial events already reach the layer.
 - **Finger-curl trigger.** Index-joint flexion with hysteresis as an
