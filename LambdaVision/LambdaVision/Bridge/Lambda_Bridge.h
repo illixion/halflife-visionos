@@ -326,6 +326,15 @@ void lambda_set_hand_pose(float px, float py, float pz,
                           float ux, float uy, float uz);
 void lambda_clear_hand_pose(void);
 
+// Stock menu (gameui) gaze+pinch input. When lambda_menu_active() is nonzero
+// the Half-Life menu owns input: map a pinch's gaze ray to a render-target
+// pixel, stage it with lambda_menu_set_cursor, then lambda_menu_click() to
+// activate the item under it. Applied on the GL worker each frame (menu is
+// mouse-driven; -noenginemouse keeps the engine from clobbering the cursor).
+void lambda_menu_set_cursor(int x, int y);
+void lambda_menu_click(void);
+int  lambda_menu_active(void);
+
 // Stage the 2D-layer (HUD/console/menu) viewport for subsequent per-eye
 // renders: GL pixel coords, origin bottom-left, within the eye's render
 // target. Computed per-eye from the frustum tangents so the overlay

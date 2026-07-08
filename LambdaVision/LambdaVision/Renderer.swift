@@ -220,6 +220,37 @@ actor Renderer {
         return pendingGazeDir
     }
 
+    // Menu gaze-cursor mapping. The stock Half-Life menu is displayed in the
+    // 2D overlay box (hudDistance forward, 50° wide — see the overlay
+    // placement in renderFrame). A pinch's gaze ray is mapped through the SAME
+    // box to a render-target pixel, which the engine's menu treats as the
+    // mouse (Lambda_Bridge lambda_menu_*). These inputs are refreshed each
+    // frame from the render thread; the map runs on the spatial-event thread.
+    nonisolated(unsafe) static var latestHeadTransform: simd_float4x4? = nil
+    nonisolated(unsafe) static var renderTargetW: Int = 0
+    nonisolated(unsafe) static var renderTargetH: Int = 0
+    nonisolated(unsafe) static var hudBoxAspect: Float = 0.75   // box tan height / width (sumV/sumH)
+    static let hudHalfTan: Float = tanf(50.0 / 2.0 * .pi / 180.0)  // matches the 50°-wide overlay
+
+    /// Map an ARKit world-space gaze direction to a menu pixel (render-target
+    /// coords, origin top-left), or nil if it falls outside the overlay box or
+    /// behind the head. The box is centred on the head-forward axis both axes
+    /// (the overlay's x0/y0 place tan(0,0) at the box centre), so head-local
+    /// tangents map linearly to the box.
+    nonisolated static func menuCursorFromGaze(_ worldDir: SIMD3<Float>) -> (Int, Int)? {
+        guard let head = latestHeadTransform, renderTargetW > 0, renderTargetH > 0 else { return nil }
+        let d4 = head.inverse * SIMD4<Float>(worldDir, 0)   // world → head-local (rotation only)
+        guard d4.z < -1e-4 else { return nil }               // must look forward (-Z)
+        let htan = d4.x / -d4.z                               // + = right
+        let vtan = d4.y / -d4.z                               // + = up
+        let hH = hudHalfTan
+        let vH = hudHalfTan * hudBoxAspect
+        let u = (htan + hH) / (2 * hH)
+        let v = (vH - vtan) / (2 * vH)                        // screen y is down
+        guard u >= 0, u <= 1, v >= 0, v <= 1 else { return nil }
+        return (Int(u * Float(renderTargetW)), Int(v * Float(renderTargetH)))
+    }
+
     // Hand-anchored weapon: the dominant hand's gun pose, sampled from the
     // hand skeleton each frame. Forward runs wrist → middle knuckle (where
     // the fingers point), up is derived from the across-palm direction so
@@ -753,8 +784,13 @@ actor Renderer {
             appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
         let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
-        let extra = ["-dev", "2", "-console", "-noip", "-rodir", rodir, "-game", "valve",
+        let extra = ["-dev", "2", "-console", "-noip", "-noenginemouse",
+                     "-rodir", rodir, "-game", "valve",
                      "+map", "c0a0"] // tram ride (Black Mesa Inbound)
+        // -noenginemouse: no real mouse on AVP. Keeps in_mouseinitialized
+        // false so the engine's per-frame IN_MouseMove is a no-op and can't
+        // overwrite the synthetic menu cursor we inject (Lambda_Bridge
+        // lambda_menu_*). We drive weapon aim / menu clicks ourselves.
         let cArgs = extra.map { strdup($0) }
         defer { cArgs.forEach { free($0) } }
         var buf = [CChar](repeating: 0, count: 384)
@@ -1021,6 +1057,13 @@ actor Renderer {
             } else {
                 lambda_set_aim_offset(0, 0)
             }
+
+            // Inputs for gaze→menu cursor mapping (used off-thread when a
+            // pinch targets the stock menu). hudBoxAspect is set per frame in
+            // the eye loop below.
+            Renderer.latestHeadTransform = frameDeviceAnchor?.originFromAnchorTransform
+            Renderer.renderTargetW = colorMap.width
+            Renderer.renderTargetH = colorMap.height
         }
 
         // colorMap is written by ANGLE on its own MTLCommandQueue; glFinish
@@ -1074,6 +1117,8 @@ actor Renderer {
                 let x0 = ((tL + conv) / sumH - frac / 2.0) * fullW
                 let y0 = (tB / sumV - frac / 2.0) * fullH
                 lambda_gl_worker_set_2d_viewport(x0, y0, fullW * frac, fullH * frac)
+                // The box's tan height/width ratio, for the gaze→menu mapper.
+                if eye == 0 { Renderer.hudBoxAspect = sumV / sumH }
             }
             let rc: Int32 = withUnsafePointer(to: &tang) { tp in
                 tp.withMemoryRebound(to: Float.self, capacity: 4) { fp -> Int32 in

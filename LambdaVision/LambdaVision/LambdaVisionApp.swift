@@ -125,23 +125,35 @@ struct ImmersiveSpaceContent: CompositorContent {
             // A held pinch holds +attack (HL's automatic weapons fire while
             // the trigger is down); release/cancel lets go.
             layerRenderer.onSpatialEvent = { events in
+                // When the stock Half-Life menu is up it owns gaze+pinch: a
+                // pinch clicks the item the eyes are on (like a visionOS
+                // window), and must NOT fire the weapon.
+                let menuActive = lambda_menu_active() != 0
                 for event in events {
                     switch event.phase {
                     case .active:
+                        let dir = event.selectionRay.map {
+                            SIMD3<Float>(Float($0.direction.x),
+                                         Float($0.direction.y),
+                                         Float($0.direction.z))
+                        }
+                        if menuActive {
+                            if let d = dir, let (mx, my) = Renderer.menuCursorFromGaze(d) {
+                                lambda_menu_set_cursor(Int32(mx), Int32(my))
+                                lambda_menu_click()
+                            }
+                            continue
+                        }
                         // Stage the gaze ray BEFORE +attack so the shot
                         // aims where the eyes point (renderFrame converts
                         // it to an aim offset for the weapon code).
-                        if let ray = event.selectionRay {
-                            Renderer.setGazeRay(direction: SIMD3<Float>(
-                                Float(ray.direction.x),
-                                Float(ray.direction.y),
-                                Float(ray.direction.z)))
-                        }
+                        if let d = dir { Renderer.setGazeRay(direction: d) }
                         if PinchFire.active.insert(event.id).inserted,
                            PinchFire.active.count == 1 {
                             _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
                         }
                     case .ended, .cancelled:
+                        if menuActive { continue }
                         if PinchFire.active.remove(event.id) != nil,
                            PinchFire.active.isEmpty {
                             _ = "-attack".withCString { lambda_gl_worker_cmd($0) }

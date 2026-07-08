@@ -2485,6 +2485,54 @@ static void lambda_hand_pose_apply(void) {
     }
 }
 
+// ---- Stock menu (gameui) gaze+pinch input ---------------------------------
+// The Half-Life menu polls a mouse we don't have on AVP. We synthesize it:
+// Swift maps a pinch's gaze ray to a render-target pixel and stages it here;
+// the GL worker feeds it to the menu each frame (UI_MouseMove) and delivers
+// queued clicks (UI_KeyEvent K_MOUSE1 down+up). Applied BEFORE the engine
+// tick so the menu draws with the right cursor — and because we launch with
+// -noenginemouse, the engine's own IN_MouseMove is a no-op and never
+// overwrites it. UI_IsVisible() is cached per frame so Swift can decide
+// whether a pinch drives the menu or fires the weapon.
+#define LAMBDA_K_MOUSE1 241
+static _Atomic int g_menu_cursor_x, g_menu_cursor_y, g_menu_cursor_dirty;
+static _Atomic int g_menu_clicks;   // queued click count (down+up pairs)
+static _Atomic int g_menu_active;   // cached UI_IsVisible(), read by Swift
+
+void lambda_menu_set_cursor(int x, int y) {
+    atomic_store(&g_menu_cursor_x, x);
+    atomic_store(&g_menu_cursor_y, y);
+    atomic_store(&g_menu_cursor_dirty, 1);
+}
+
+void lambda_menu_click(void) {
+    atomic_fetch_add(&g_menu_clicks, 1);
+}
+
+int lambda_menu_active(void) {
+    return atomic_load(&g_menu_active);
+}
+
+// GL worker, each frame BEFORE the tick.
+static void lambda_menu_input_apply(void) {
+    extern void UI_MouseMove(int x, int y);
+    extern void UI_KeyEvent(int key, int down);
+    if (!atomic_load(&g_menu_active)) { atomic_store(&g_menu_clicks, 0); return; }
+    if (atomic_exchange(&g_menu_cursor_dirty, 0))
+        UI_MouseMove(atomic_load(&g_menu_cursor_x), atomic_load(&g_menu_cursor_y));
+    int n = atomic_exchange(&g_menu_clicks, 0);
+    for (int i = 0; i < n; i++) {
+        UI_KeyEvent(LAMBDA_K_MOUSE1, 1);
+        UI_KeyEvent(LAMBDA_K_MOUSE1, 0);
+    }
+}
+
+// GL worker, each frame AFTER the tick — publish menu visibility for Swift.
+static void lambda_menu_state_publish(void) {
+    extern int UI_IsVisible(void);
+    atomic_store(&g_menu_active, UI_IsVisible());
+}
+
 // Pause/resume the engine's audio output. The AudioQueue backend
 // (snd_visionos.c) streams the DMA ring on its own thread — when the
 // render loop stops ticking (immersive space closed/paused) the mixer
@@ -3346,9 +3394,14 @@ static void *gl_worker_main(void *arg) {
                 // head motion instead of sticking to the hand.
                 lambda_hand_pose_apply();
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
+                // Synthetic menu cursor/clicks BEFORE the tick so the menu
+                // draws with the right cursor this frame.
+                lambda_menu_input_apply();
                 double t0 = ft_now_ms();
                 lambda_engine_frame();
                 double t1 = ft_now_ms();
+                // Publish menu visibility for the spatial-event router.
+                lambda_menu_state_publish();
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
                 if (g_w_have_tangents)

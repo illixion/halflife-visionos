@@ -24,8 +24,18 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
-                Model3D(named: "Scene", bundle: realityKitContentBundle)
-                    .padding(.bottom, 30)
+                // Half-Life lambda mark (placeholder logo; swap a real HL
+                // asset later). Replaced the RealityKit demo globe, which
+                // rendered a volumetric sphere on top of the window content.
+                ZStack {
+                    Circle()
+                        .fill(Color.orange.gradient)
+                    Text("λ")
+                        .font(.system(size: 76, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 132, height: 132)
+                .padding(.bottom, 20)
 
                 Text("Lambda VisionPro").font(.largeTitle)
 
