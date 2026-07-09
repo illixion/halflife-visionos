@@ -189,6 +189,15 @@ actor Renderer {
     // that fires along gaze instead of the weapon barrel. Both live.
     nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
     nonisolated(unsafe) static var fireAlongGaze: Bool = false
+    // Weapon grip correction (applied in the hand-bone-local frame between the
+    // world hand frame and the GoldSrc→metres basis). GoldSrc hand bones and
+    // ARKit hand frames don't line up perfectly; these Euler degrees + push
+    // (metres, along the hand's forward) tune how the gun sits in the hand.
+    // Tuned live; start neutral and adjust from device.
+    nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
+    nonisolated(unsafe) static var gripPitchDeg: Float = 0
+    nonisolated(unsafe) static var gripYawDeg: Float = 180   // barrel points along fingers
+    nonisolated(unsafe) static var gripPushM: Float = 0  // seat grip back into the hand
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
         snapLock.lock()
@@ -262,6 +271,8 @@ actor Renderer {
     // axes (meters; the bridge/hlsdk compose it with the rendered camera).
     private struct HandSample {
         var worldForward: SIMD3<Float>            // Apple world basis, unit
+        var worldUp: SIMD3<Float>                 // Apple world basis, unit
+        var worldGrip: SIMD3<Float>               // Apple world, wrist (grip point)
         var localPos: SIMD3<Float>                // xash cam axes, meters
         var localFwd: SIMD3<Float>
         var localUp: SIMD3<Float>
@@ -308,6 +319,8 @@ actor Renderer {
         }
         let p4 = hInv * SIMD4<Float>(pMid, 1)
         return HandSample(worldForward: fwd,
+                          worldUp: up,
+                          worldGrip: pWrist,
                           localPos: SIMD3(-p4.z, -p4.x, p4.y),
                           localFwd: headLocalDir(fwd),
                           localUp: headLocalDir(up))
@@ -1339,30 +1352,47 @@ actor Renderer {
         renderEncoder.endEncoding()
 
         if weaponActive {
-            // Fixed head-relative placement for first-light bring-up: the mesh
-            // sits 0.5 m ahead and 0.1 m below the head, bbox-centred. Once the
-            // pass is confirmed rendering, this is replaced by the hand-anchor
-            // grip transform.
             let anchorM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
-            let s: Float = 1.0 / 39.37   // GoldSrc units → metres
-            // GoldSrc (x fwd, y left, z up) → Apple world (x right, y up, z back).
-            let basis = float4x4(columns: (
-                SIMD4<Float>(0,  0, -s, 0),
-                SIMD4<Float>(-s, 0,  0, 0),
-                SIMD4<Float>(0,  s,  0, 0),
-                SIMD4<Float>(0,  0,  0, 1)))
-            let c = (weaponPass.bbmin + weaponPass.bbmax) * 0.5
-            let center = matrix4x4_translation(-c.x, -c.y, -c.z)
-            let ahead  = matrix4x4_translation(0, -0.1, -0.5)
-            let model  = anchorM * ahead * basis * center
-            weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
-                              viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
-                              viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
-                              uniformBufferIndex: uniformBufferIndex,
-                              model: model,
-                              lightDir: normalize(SIMD3<Float>(0.3, 0.9, 0.2)),
-                              lightColor: SIMD3<Float>(repeating: 0.5),
-                              ambient: SIMD3<Float>(repeating: 0.55))
+            // Hand-anchored placement from the LIVE hand frame this frame — no
+            // engine round-trip, so head rotation can't shear it (the drift the
+            // engine-side path had). Skip drawing when the hand isn't tracked.
+            if let hand = sampleDominantHand(headTransform: anchorM) {
+                let fwd = hand.worldForward
+                let up  = hand.worldUp
+                let right = simd_normalize(simd_cross(up, fwd))
+                // World hand frame: local (x=right, y=up, z=forward) → world.
+                var handWorld = matrix_identity_float4x4
+                handWorld.columns.0 = SIMD4<Float>(right, 0)
+                handWorld.columns.1 = SIMD4<Float>(up, 0)
+                handWorld.columns.2 = SIMD4<Float>(fwd, 0)
+                handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
+
+                let s: Float = 1.0 / 39.37   // GoldSrc units → metres
+                // GoldSrc (x fwd, y left, z up) → Apple axes + metres.
+                let B = float4x4(columns: (
+                    SIMD4<Float>(0,  0, -s, 0),
+                    SIMD4<Float>(-s, 0,  0, 0),
+                    SIMD4<Float>(0,  s,  0, 0),
+                    SIMD4<Float>(0,  0,  0, 1)))
+                // Tunable grip correction in the hand-local frame.
+                let C = matrix4x4_translation(0, 0, Renderer.gripPushM)
+                      * matrix4x4_rotation(radians: Renderer.gripYawDeg   * .pi/180, axis: SIMD3(0,1,0))
+                      * matrix4x4_rotation(radians: Renderer.gripPitchDeg * .pi/180, axis: SIMD3(1,0,0))
+                      * matrix4x4_rotation(radians: Renderer.gripRollDeg  * .pi/180, axis: SIMD3(0,0,1))
+                // Place the model's Bip01 R Hand bind frame onto the physical
+                // hand: model = handWorld · C · B · inverse(handBone).
+                let handBoneInv = weaponPass.hasHandBone ? weaponPass.handBone.inverse
+                                                         : matrix_identity_float4x4
+                let model = handWorld * C * B * handBoneInv
+                weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
+                                  viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
+                                  viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
+                                  uniformBufferIndex: uniformBufferIndex,
+                                  model: model,
+                                  lightDir: normalize(SIMD3<Float>(0.3, 0.9, 0.2)),
+                                  lightColor: SIMD3<Float>(repeating: 0.5),
+                                  ambient: SIMD3<Float>(repeating: 0.55))
+            }
         }
 
         commandBuffer.endCommandBuffer()
