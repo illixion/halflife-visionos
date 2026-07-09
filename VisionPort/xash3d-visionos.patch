@@ -72,26 +72,32 @@ index 7cd9c1f..b0b9759 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
-index cb7aa9c..eec9ae1 100644
+index cb7aa9c..5e9581e 100644
 --- a/engine/client/cl_main.c
 +++ b/engine/client/cl_main.c
-@@ -509,8 +509,13 @@ static void CL_ApplyAddAngle( void )
+@@ -509,8 +509,19 @@ static void CL_ApplyAddAngle( void )
  
  	amove = addangletotal - cl.prevaddangletotal;
  
 -	// update input angles
 -	cl.viewangles[YAW] += amove;
-+	// update input angles (VR keeps the compass heading fixed on
-+	// rotating pushers — see cl_stereo_no_addangle in cl_view.c)
++	// update input angles. VR normally keeps the compass heading fixed on
++	// rotating pushers (svc_addangle) for comfort — see cl_stereo_no_addangle
++	// in cl_view.c. Exception: while the player is actively driving a train
++	// (FL_ONTRAIN — standing in its control volume), let the view follow the
++	// vehicle so steering reads right (e.g. the "On A Rail" cart, where you
++	// ride and shoot). Scripted passenger trams (the intro tram) don't set
++	// FL_ONTRAIN, so they stay fixed.
 +	{
 +		extern int cl_stereo_no_addangle;
-+		if( !cl_stereo_no_addangle )
++		qboolean driving = ( cl.frames[cl.parsecountmod].clientdata.flags & FL_ONTRAIN ) != 0;
++		if( !cl_stereo_no_addangle || driving )
 +			cl.viewangles[YAW] += amove;
 +	}
  
  	// remember last total
  	cl.prevaddangletotal = addangletotal;
-@@ -700,6 +705,24 @@ static void CL_CreateCmd( void )
+@@ -700,6 +711,24 @@ static void CL_CreateCmd( void )
  	clgame.dllFuncs.CL_CreateMove( host.frametime, cmd, active );
  	IN_EngineAppendMove( host.frametime, cmd, active );
  
