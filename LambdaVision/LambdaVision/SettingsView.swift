@@ -76,12 +76,13 @@ struct SettingsView: View {
                     Picker("Fire aims at", selection: $settings.fireAimMode) {
                         ForEach(FireAimMode.allCases) { Text($0.label).tag($0) }
                     }
+                    Toggle("Hand-tracked weapon model", isOn: $settings.weaponExternal)
                     Toggle("Fast weapon switch", isOn: $settings.fastWeaponSwitch)
                     Toggle("Immersive gesture input", isOn: $settings.gestureInputEnabled)
                 } header: {
                     Text("Input")
                 } footer: {
-                    Text("“Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. Finger-gun and gesture controls arrive in a later update.")
+                    Text("“Hand-tracked weapon model” draws the weapon in your hand, tracking it directly (world-lit); off falls back to the classic engine-drawn weapon. “Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. Finger-gun and gesture controls arrive in a later update.")
                 }
 
                 Section {

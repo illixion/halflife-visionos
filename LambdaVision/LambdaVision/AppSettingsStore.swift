@@ -75,6 +75,7 @@ enum AppSettingsStore {
     private static let fireAimModeKey         = "lambdavision.settings.fireAimMode"
     private static let gestureInputEnabledKey = "lambdavision.settings.gestureInputEnabled"
     private static let fastWeaponSwitchKey    = "lambdavision.settings.fastWeaponSwitch"
+    private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
 
     static var dominantHand: DominantHand {
         get {
@@ -99,5 +100,9 @@ enum AppSettingsStore {
     static var fastWeaponSwitch: Bool {
         get { bool(fastWeaponSwitchKey, true) }  // engine startup sets hud_fastswitch 1
         set { defaults.set(newValue, forKey: fastWeaponSwitchKey) }
+    }
+    static var weaponExternal: Bool {
+        get { bool(weaponExternalKey, true) }    // default: draw the weapon in the Metal pass
+        set { defaults.set(newValue, forKey: weaponExternalKey) }
     }
 }

@@ -99,6 +99,12 @@ final class GameSettings {
         didSet { AppSettingsStore.fastWeaponSwitch = fastWeaponSwitch
                  cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0) }
     }
+    /// Draw the weapon model in the app's Metal pass (hand-anchored, world-lit)
+    /// instead of the engine. On = the `vr_weapon_external` path.
+    var weaponExternal: Bool = AppSettingsStore.weaponExternal {
+        didSet { AppSettingsStore.weaponExternal = weaponExternal
+                 cvar("vr_weapon_external", weaponExternal ? 1 : 0) }
+    }
 
     init() {
         applyRendererStatics()
@@ -125,6 +131,7 @@ final class GameSettings {
         cvar("volume", sfxVolume)
         cvar("MP3Volume", musicVolume)
         cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0)
+        cvar("vr_weapon_external", weaponExternal ? 1 : 0)
     }
 
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
