@@ -45,9 +45,18 @@ final class GameSettings {
     private(set) var isEngineReady = false
 
     // MARK: Graphics
+    /// Render scale above this leaves nothing for MetalFX to upscale, so the
+    /// toggle is disabled/forced-off above it (SettingsView greys it out).
+    static let metalFXMaxScale = 0.75
+
     var renderScale: Double = AppSettingsStore.renderScale {
         didSet { AppSettingsStore.renderScale = renderScale
-                 Renderer.engineScale = Float(renderScale) }
+                 Renderer.engineScale = Float(renderScale)
+                 // MetalFX only makes sense when we're upscaling.
+                 if renderScale > GameSettings.metalFXMaxScale && metalFXEnabled {
+                     metalFXEnabled = false
+                 }
+        }
     }
     var metalFXEnabled: Bool = AppSettingsStore.metalFXEnabled {
         didSet { AppSettingsStore.metalFXEnabled = metalFXEnabled

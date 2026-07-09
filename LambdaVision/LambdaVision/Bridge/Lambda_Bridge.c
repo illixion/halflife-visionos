@@ -2280,11 +2280,17 @@ void lambda_engine_set_render_size(int width, int height) {
 
 // GL worker, before the tick: sync refState to the current render size.
 static void lambda_render_size_apply(void) {
-    extern int R_ChangeDisplaySettings(int width, int height, int window_mode);
+    extern int  R_ChangeDisplaySettings(int width, int height, int window_mode);
+    extern void SCR_VidInit(void);
     if (!g_engine_inited) return;                       // R_Init_Video handles first run
     if (!g_render_size_dirty) return;
     g_render_size_dirty = 0;
     R_ChangeDisplaySettings(lambda_vid_render_width, lambda_vid_render_height, 0);
+    // Tell the client dll (HUD) about the new resolution so its text/sprite
+    // scaling recomputes — otherwise HUD/credits keep the old scale factors
+    // and render microscopic at low render scale (the console, drawn engine-
+    // side from refState, was already correct).
+    SCR_VidInit();
 }
 
 int lambda_engine_init(const char *writable_dir,

@@ -19,8 +19,15 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
     @State private var consoleText = ""
+    // Snapshot of the reload-requiring settings when the sheet opened, so we
+    // can offer a reload on close if they changed.
+    @State private var snapScale = 0.0
+    @State private var snapMetalFX = false
+    @State private var showReloadPrompt = false
 
     // A handful of chapter-start maps for the Advanced loader.
     private let maps: [(id: String, name: String)] = [
@@ -41,6 +48,7 @@ struct SettingsView: View {
                         String(format: "%.0f%%", $0 * 100)
                     }
                     Toggle("MetalFX upscaling", isOn: $settings.metalFXEnabled)
+                        .disabled(settings.renderScale > GameSettings.metalFXMaxScale)
                     slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
                         String(format: "%.1f", $0)
                     }
@@ -53,7 +61,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale and MetalFX resize the render targets — they take effect the next time you enter the immersive space.")
+                    Text("Render scale and MetalFX resize the render targets, so they apply when the immersive space restarts — you'll be offered a reload on closing. MetalFX only helps below \(Int(GameSettings.metalFXMaxScale * 100))% (it upscales the reduced render back to full resolution).")
                 }
 
                 Section("Audio") {
@@ -113,11 +121,46 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Done") { done() }
                 }
             }
         }
         .frame(minWidth: 520, minHeight: 640)
+        .onAppear {
+            snapScale = appModel.gameSettings.renderScale
+            snapMetalFX = appModel.gameSettings.metalFXEnabled
+        }
+        .alert("Reload game to apply changes?", isPresented: $showReloadPrompt) {
+            Button("Reload") { reloadImmersiveSpace(); dismiss() }
+            Button("Later", role: .cancel) { dismiss() }
+        } message: {
+            Text("Render scale and MetalFX only take effect when the immersive space restarts.")
+        }
+    }
+
+    // Offer a reload only if a render-target setting actually changed and the
+    // game is running (otherwise the next launch/open picks it up anyway).
+    private func done() {
+        let s = appModel.gameSettings
+        let changed = s.renderScale != snapScale || s.metalFXEnabled != snapMetalFX
+        if changed && appModel.immersiveSpaceState == .open {
+            showReloadPrompt = true
+        } else {
+            dismiss()
+        }
+    }
+
+    // The hide/show "dance": dismiss + reopen the immersive space so a fresh
+    // Renderer reallocates the render targets at the new scale.
+    private func reloadImmersiveSpace() {
+        Task { @MainActor in
+            appModel.immersiveSpaceState = .inTransition
+            await dismissImmersiveSpace()
+            switch await openImmersiveSpace(id: appModel.immersiveSpaceID) {
+            case .opened: break
+            default: appModel.immersiveSpaceState = .closed
+            }
+        }
     }
 
     private func runConsole(_ settings: GameSettings) {
