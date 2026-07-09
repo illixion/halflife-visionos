@@ -2261,9 +2261,30 @@ static void *const _anchor_GetRefAPI = (void *)GetRefAPI;
 int lambda_vid_render_width  = 2048;
 int lambda_vid_render_height = 2048;
 
+// vid_visionos.c reads these into refState only at R_Init_Video (engine init).
+// So a size change AFTER init (render-scale setting + immersive-space reopen,
+// which reallocates the colorMap) leaves refState stale — the engine renders
+// at the old dimensions/aspect into the new-size buffer, which looks like a
+// warped FOV. Flag the change; the GL worker pushes it into refState live via
+// R_ChangeDisplaySettings before the next tick.
+// Plain flag (stdatomic.h isn't included until lower in this file). The apply
+// reads the current size regardless, so a torn set/clear at worst applies the
+// already-current size a frame early/late — benign.
+static volatile int g_render_size_dirty;
+
 void lambda_engine_set_render_size(int width, int height) {
     if (width > 0)  lambda_vid_render_width  = width;
     if (height > 0) lambda_vid_render_height = height;
+    g_render_size_dirty = 1;
+}
+
+// GL worker, before the tick: sync refState to the current render size.
+static void lambda_render_size_apply(void) {
+    extern int R_ChangeDisplaySettings(int width, int height, int window_mode);
+    if (!g_engine_inited) return;                       // R_Init_Video handles first run
+    if (!g_render_size_dirty) return;
+    g_render_size_dirty = 0;
+    R_ChangeDisplaySettings(lambda_vid_render_width, lambda_vid_render_height, 0);
 }
 
 int lambda_engine_init(const char *writable_dir,
@@ -2361,14 +2382,17 @@ int lambda_engine_init(const char *writable_dir,
         // audible as pan lag in VR. 0.04 s keeps a safe cushion above the
         // ~8 ms engine tick while making panning feel responsive.
         Cbuf_AddText("_snd_mixahead 0.04\n");
-        // Default keyboard binds. We now forward hardware-keyboard input as
-        // real engine key events (Lambda_Bridge lambda_key_event), so the
-        // stock bind system is the source of truth — but no config.cfg with
-        // binds ships in the app, so establish the standard HL layout here.
-        // Runs after the deferred `exec config.cfg`, so it currently wins over
-        // a saved config (rebinds don't persist across launch yet — TODO).
-        // Z/X are handled app-side (snap turn) and deliberately unbound.
-        Cbuf_AddText(
+        // Default keyboard binds. We forward hardware-keyboard input as real
+        // engine key events (Lambda_Bridge lambda_key_event), so the stock
+        // bind system is the source of truth. No config.cfg with binds ships,
+        // so establish the standard HL layout — but ONLY on first run. Once a
+        // config.cfg exists (written on pause via host_writeconfig), the
+        // engine's `exec config.cfg` restores the player's binds and we must
+        // not clobber them. Z/X stay app-side (snap turn) and are unbound.
+        char cfg_path[1024];
+        snprintf(cfg_path, sizeof cfg_path, "%s/valve/config.cfg", writable_dir);
+        int first_run = (access(cfg_path, F_OK) != 0);
+        if (first_run) Cbuf_AddText(
             "bind \"w\" \"+forward\"\n"       "bind \"s\" \"+back\"\n"
             "bind \"a\" \"+moveleft\"\n"      "bind \"d\" \"+moveright\"\n"
             "bind \"uparrow\" \"+forward\"\n" "bind \"downarrow\" \"+back\"\n"
@@ -3460,9 +3484,10 @@ static void *gl_worker_main(void *arg) {
                 // head motion instead of sticking to the hand.
                 lambda_hand_pose_apply();
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
-                // Keyboard + synthetic menu cursor/clicks BEFORE the tick so
-                // binds/console/menu see them this frame (and the menu draws
-                // with the right cursor).
+                // Sync refState if the render size changed (scale setting +
+                // immersive reopen), then feed keyboard + synthetic menu
+                // cursor/clicks — all BEFORE the tick.
+                lambda_render_size_apply();
                 lambda_key_queue_apply();
                 lambda_menu_input_apply();
                 double t0 = ft_now_ms();

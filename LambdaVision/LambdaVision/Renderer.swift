@@ -1329,6 +1329,9 @@ actor Renderer {
         while true {
             if layerRenderer.state == .invalidated {
                 print("Layer is invalidated")
+                // Persist binds/cvars while the engine is still up (visionOS
+                // may kill us without a clean Host_Shutdown).
+                _ = "host_writeconfig".withCString { lambda_gl_worker_cmd($0) }
                 // The engine stops ticking here but the AudioQueue would
                 // keep streaming the DMA ring — the last painted samples
                 // loop audibly forever. Pause output with the renderer.
@@ -1344,6 +1347,8 @@ actor Renderer {
                 Task { @MainActor in
                     appModel.immersiveSpaceState = .inTransition
                 }
+                // Backgrounded/hidden — a good moment to persist config.
+                _ = "host_writeconfig".withCString { lambda_gl_worker_cmd($0) }
                 lambda_snd_activate(0)
                 PhaseAudioEngine.shared.setActive(false)
                 layerRenderer.waitUntilRunning()
