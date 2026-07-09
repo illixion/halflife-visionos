@@ -12,6 +12,9 @@ instead of deleting them.
   flash is lost while the viewmodel is hidden (`CL_AddEntity` clears effects
   on index-0 entities, so `EF_MUZZLEFLASH` can't ride the gun entity as-is);
   bullets still originate at the eyes (only the direction follows the hand).
+  This is the default engine-drawn path; an opt-in Metal renderer that fixes
+  the rotation drift now exists — see "Weapon Metal-pass polish" under
+  rendering.
 - **Egon renders/aims as a viewmodel, not hand-anchored** (workaround, not
   a true fix). The gluon gun's backpack is rigged to the player body and
   `p_egon` has no `Bip01 R Hand` bone, so hand-anchoring drives the pack
@@ -40,11 +43,19 @@ instead of deleting them.
 
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
-- **RealityRenderer body/arms.** Modern skinned hands/arms (converted
-  HL:Source models?) drawn inside our compositor via RealityKit
-  `RealityRenderer`: our camera, our depth (correct occlusion, wall
-  clamping possible), IBL built from game lighting (`R_LightPoint`).
-  Big; the payoff is properly IK'd limbs in a 1998 game.
+- **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
+  Metal pass over the engine image instead of the engine (`vr_weapon_external`
+  cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored
+  from the live ARKit hand frame and shaded by an `R_LightPoint` probe.
+  RealityKit/`RealityRenderer` was ruled out — a CompositorLayer immersive
+  space is CompositorLayer XOR RealityView — so it's a 2nd Metal pass into the
+  drawable colour slice with its own depth (leaves `drawable.depthTextures`
+  for reprojection). Backlog: bind-pose only (no fire/reload/idle — needs
+  `mstudioanim_t` decode), no muzzle flash, chrome faces drawn flat, external
+  `…T.mdl` textures fall back to magenta, egon has no `Bip01 R Hand`
+  (origin-at-hand), and it's a manual cvar (wire into Settings). Custom
+  skinned hands/arms are now just another mesh in this pass — the original
+  motivation, and the path to properly IK'd limbs in a 1998 game.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.
@@ -89,6 +100,17 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~Hand-anchored weapon drifts off the hand under rotation~~ — the
+  engine-side hand weapon (`VR_AddHandWeapon`) reconstructed a one-frame-stale
+  camera, so head rotation sheared the gun off the hand. Added an opt-in
+  Metal weapon renderer (`vr_weapon_external`): the engine draws no weapon and
+  publishes the active `.mdl`; the app bakes a bind-pose mesh
+  (`Lambda_WeaponModel.c`) and draws it in a Metal pass (`WeaponPass.swift`)
+  at the live ARKit hand frame (`model = handWorld·C·B·inverse(handBone)`),
+  shaded by an `R_LightPoint`/`LightAtPoint` probe. Drift gone; textures +
+  world lighting verified on device. Commits 2d66b36 (cvar), 0674db6
+  (extractor), 9216721 (Metal pass), a78ce01 (hand-anchor), 3ca6571 (light
+  probe). Follow-ups tracked under "Weapon Metal-pass polish".
 - ~~No settings window~~ — the 2D window is now a launcher with a gear →
   Settings sheet (sectioned `Form`): Graphics (render scale, MetalFX, gamma,
   brightness, snap-turn angle), Audio (SFX `volume` / MP3 `MP3Volume`), Input
