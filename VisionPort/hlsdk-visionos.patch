@@ -1,5 +1,5 @@
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..9c17052 100644
+index 3670546..fd85ea8 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
 @@ -17,12 +17,36 @@
@@ -40,7 +40,7 @@ index 3670546..9c17052 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +521,257 @@ void Beams( void )
+@@ -497,15 +521,270 @@ void Beams( void )
  }
  #endif
  
@@ -143,6 +143,19 @@ index 3670546..9c17052 100644
 +	int i;
 +
 +	g_vr_hand_weapon_drawn = 0; // default: viewmodel shows
++
++	// External weapon renderer (visionOS Metal pass) owns the weapon model:
++	// draw nothing engine-side, but keep the camera-locked viewmodel hidden
++	// so the platform layer is the sole source of the weapon. Toggle from the
++	// console or via a "vr_weapon_external 1" command pushed from Swift.
++	static cvar_t *vr_weapon_external = NULL;
++	if( !vr_weapon_external )
++		vr_weapon_external = gEngfuncs.pfnRegisterVariable( "vr_weapon_external", "0", FCVAR_ARCHIVE );
++	if( vr_weapon_external && vr_weapon_external->value )
++	{
++		g_vr_hand_weapon_drawn = 1;
++		return;
++	}
 +
 +	if( !g_vr_hand_pose_active )
 +		return;
