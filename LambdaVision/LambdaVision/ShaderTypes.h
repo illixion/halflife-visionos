@@ -33,6 +33,7 @@ typedef NS_ENUM(EnumBackingType, VertexAttribute)
 {
     VertexAttributePosition   = 0,
     VertexAttributeTexcoord   = 1,
+    VertexAttributeNormal     = 2,
 };
 
 typedef NS_ENUM(EnumBackingType, TextureIndex)
@@ -50,10 +51,22 @@ typedef struct
     matrix_float4x4 modelMatrix;
 } Uniforms;
 
+// Weapon pass uniforms: model→world transform plus a single-probe lighting
+// term (ambient + one dominant directional), sampled from the engine at the
+// weapon origin. ambient.w doubles as the masked-alpha-test flag (>0.5).
+typedef struct
+{
+    matrix_float4x4 modelMatrix;
+    simd_float4     lightDir;    // xyz = world-space direction TO the light
+    simd_float4     lightColor;  // rgb = directional term
+    simd_float4     ambient;     // rgb = ambient term, w = alpha-test flag
+} WeaponUniforms;
+
 // Lambda engine bridge — only visible to Swift/ObjC, not to Metal shaders.
 #ifndef __METAL_VERSION__
 #include "Bridge/Lambda_Bridge.h"
 #include "Bridge/Lambda_SpatialAudio.h"
+#include "Bridge/Lambda_WeaponModel.h"
 #endif
 
 #endif /* ShaderTypes_h */

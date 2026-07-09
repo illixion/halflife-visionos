@@ -129,6 +129,9 @@ actor Renderer {
     var displayMap: MTLTexture!
     private var spatialScalers: [any MTL4FXSpatialScaler] = []
     private var engineInited = false
+    // Weapon model rendered by RealityKit-style Metal pass instead of the
+    // engine (see WeaponPass). Lazily created on the first frame.
+    private var weaponPass: WeaponPass!
 
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
@@ -1198,6 +1201,20 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
+        // Weapon pass: upload any freshly-baked mesh, gate on external mode,
+        // and size the weapon depth to the drawable colour slice.
+        if weaponPass == nil {
+            weaponPass = WeaponPass(device: device, layerRenderer: layerRenderer,
+                                    maxBuffersInFlight: maxBuffersInFlight)
+        }
+        weaponPass.uploadIfNeeded()
+        let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
+        if weaponActive {
+            weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
+                                   height: drawable.colorTextures[0].height,
+                                   slices: drawable.views.count)
+        }
+
         // colorMap was filled once by renderFrame() before this loop; both
         // eyes sample the same engine tick.
 
@@ -1239,6 +1256,9 @@ actor Renderer {
             drawable.depthTextures[0],
             drawableTarget.viewProjectionBuffer
         ])
+        if weaponActive {
+            residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex))
+        }
         residencySet.commit()
         #endif
 
@@ -1317,6 +1337,33 @@ actor Renderer {
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
+
+        if weaponActive {
+            // Fixed head-relative placement for first-light bring-up: the mesh
+            // sits 0.5 m ahead and 0.1 m below the head, bbox-centred. Once the
+            // pass is confirmed rendering, this is replaced by the hand-anchor
+            // grip transform.
+            let anchorM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+            let s: Float = 1.0 / 39.37   // GoldSrc units → metres
+            // GoldSrc (x fwd, y left, z up) → Apple world (x right, y up, z back).
+            let basis = float4x4(columns: (
+                SIMD4<Float>(0,  0, -s, 0),
+                SIMD4<Float>(-s, 0,  0, 0),
+                SIMD4<Float>(0,  s,  0, 0),
+                SIMD4<Float>(0,  0,  0, 1)))
+            let c = (weaponPass.bbmin + weaponPass.bbmax) * 0.5
+            let center = matrix4x4_translation(-c.x, -c.y, -c.z)
+            let ahead  = matrix4x4_translation(0, -0.1, -0.5)
+            let model  = anchorM * ahead * basis * center
+            weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
+                              viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
+                              viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
+                              uniformBufferIndex: uniformBufferIndex,
+                              model: model,
+                              lightDir: normalize(SIMD3<Float>(0.3, 0.9, 0.2)),
+                              lightColor: SIMD3<Float>(repeating: 0.5),
+                              ambient: SIMD3<Float>(repeating: 0.55))
+        }
 
         commandBuffer.endCommandBuffer()
 

@@ -235,15 +235,21 @@ static void bake_textures(snapshot_t *s, const uint8_t *base, const studiohdr_t 
     }
     if (need > s->texbytes) { s->texdata = realloc(s->texdata, need); s->texbytes = need; }
 
+    // The engine overwrites each mstudiotexture_t.index with a GL texture
+    // handle after upload (ref/gl/gl_studio.c R_StudioLoadTexture), so the
+    // per-texture offset is no longer usable. Reconstruct the original file
+    // layout from hdr->texturedataindex (left intact) plus cumulative sizes:
+    // the image blocks follow the texture headers contiguously, in order.
+    int64_t cursor = hdr->texturedataindex;
     size_t off = 0;
     for (uint32_t i = 0; i < n; i++) {
         lambda_weapon_texture_t *out = &s->textures[s->tcount++];
         uint8_t *dst = s->texdata + off;
 
         int have = ((int)i < hdr->numtextures) && tex[i].width > 0 && tex[i].height > 0;
-        int64_t pxoff = have ? tex[i].index : 0;
+        int64_t pxoff = cursor;
         int64_t pxcnt = have ? (int64_t)tex[i].width * tex[i].height : 0;
-        int in_range = have && pxoff > 0 &&
+        int in_range = have && cursor > 0 &&
                        pxoff + pxcnt + 256 * 3 <= (int64_t)hdr->length;
 
         if (in_range) {
@@ -269,6 +275,9 @@ static void bake_textures(snapshot_t *s, const uint8_t *base, const studiohdr_t 
             out->flags = 0;
             off += 2 * 2 * 4;
         }
+        // Advance the source cursor past this texture's image + palette so the
+        // next texture reads from the right place (even if this one fell back).
+        if (have) cursor += pxcnt + 256 * 3;
         out->rgba = dst;
     }
 }
@@ -368,11 +377,16 @@ static void dump_obj(const snapshot_t *s) {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+static int g_weapon_active = 0;
+
+int lambda_weapon_active(void) { return g_weapon_active; }
+
 void lambda_weapon_extract(void) {
     void *hdrp = g_vr_weapon_hdr;
     int   modelindex = g_vr_weapon_modelindex;
     int   body = g_vr_weapon_body;
 
+    g_weapon_active = (hdrp != NULL);                   // published this frame?
     if (!hdrp) return;                                  // no external weapon
     if (hdrp == g_last_hdr && modelindex == g_last_modelindex && body == g_last_body)
         return;                                         // unchanged since last bake

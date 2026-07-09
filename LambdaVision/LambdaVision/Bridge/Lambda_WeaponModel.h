@@ -88,6 +88,11 @@ void lambda_weapon_extract(void);
 // decide whether to re-upload Metal buffers. 0 means nothing baked yet.
 uint32_t lambda_weapon_generation(void);
 
+// Nonzero when the client published an external weapon on the most recent
+// frame (i.e. vr_weapon_external is on and a studio weapon is equipped). Swift
+// gates drawing on this so it doesn't double-draw once external mode is off.
+int lambda_weapon_active(void);
+
 // Lock the active snapshot for reading and fill *out with its pointers/counts.
 // Returns the generation (0 if nothing baked, in which case *out is zeroed).
 // Must be paired with lambda_weapon_unlock().
