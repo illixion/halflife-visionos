@@ -381,6 +381,15 @@ static int g_weapon_active = 0;
 
 int lambda_weapon_active(void) { return g_weapon_active; }
 
+// Published by the client (cl_dll/view.cpp) each frame in external mode.
+extern float g_vr_weapon_light[3];
+
+void lambda_weapon_get_light(float rgb[3]) {
+    rgb[0] = g_vr_weapon_light[0];
+    rgb[1] = g_vr_weapon_light[1];
+    rgb[2] = g_vr_weapon_light[2];
+}
+
 void lambda_weapon_extract(void) {
     void *hdrp = g_vr_weapon_hdr;
     int   modelindex = g_vr_weapon_modelindex;

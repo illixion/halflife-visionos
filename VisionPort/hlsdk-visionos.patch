@@ -1,8 +1,8 @@
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..50f844d 100644
+index 3670546..20e3afb 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
-@@ -17,12 +17,36 @@
+@@ -17,12 +17,37 @@
  #include "r_efx.h"
  #include "event_api.h"
  #include "pm_defs.h"
@@ -11,6 +11,7 @@ index 3670546..50f844d 100644
  #include "pm_shared.h"
 +#include "com_model.h"
 +#include "studio.h"
++#include "triangleapi.h" // pTriAPI->LightAtPoint for the weapon light probe
  
  void Game_AddObjects( void );
  
@@ -40,7 +41,7 @@ index 3670546..50f844d 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +521,289 @@ void Beams( void )
+@@ -497,15 +522,298 @@ void Beams( void )
  }
  #endif
  
@@ -172,6 +173,15 @@ index 3670546..50f844d 100644
 +			g_vr_weapon_hdr        = wm->cache.data;
 +			g_vr_weapon_modelindex = pl->curstate.weaponmodel;
 +			g_vr_weapon_body       = pl->curstate.body;
++		}
++		// Sample the world light at the eye (R_LightPoint via the tri API,
++		// 0..255) and publish it normalised for the external weapon shader.
++		{
++			extern float g_vr_weapon_light[3];
++			float lv[3] = { 0.0f, 0.0f, 0.0f };
++			gEngfuncs.pTriAPI->LightAtPoint( v_origin, lv );
++			for( i = 0; i < 3; i++ )
++				g_vr_weapon_light[i] = lv[i] * ( 1.0f / 255.0f );
 +		}
 +		return;
 +	}
@@ -332,10 +342,10 @@ index 3670546..50f844d 100644
  	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
  	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..efa710e 100644
+index 3b3187d..a536f4e 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,35 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,39 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -368,11 +378,15 @@ index 3b3187d..efa710e 100644
 +extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_hdr = 0;
 +extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_modelindex = 0;
 +extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_body = 0;
++// World light sampled at the view origin (R_LightPoint via the triangle API),
++// normalised 0..1, published each frame for the external weapon renderer to
++// shade the gun to match the room.
++extern "C" __attribute__((visibility("default"))) float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
 +float v_frametime, v_lastDistance;
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +805,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +809,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  

@@ -1384,14 +1384,21 @@ actor Renderer {
                 let handBoneInv = weaponPass.hasHandBone ? weaponPass.handBone.inverse
                                                          : matrix_identity_float4x4
                 let model = handWorld * C * B * handBoneInv
+
+                // World light sampled at the eye by the engine (R_LightPoint),
+                // split into an ambient floor + a soft top-down directional so
+                // the gun matches room brightness/tint yet keeps some shape.
+                var lrgb: [Float] = [0.5, 0.5, 0.5]
+                lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
+                let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
                                   viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
                                   viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
                                   uniformBufferIndex: uniformBufferIndex,
                                   model: model,
-                                  lightDir: normalize(SIMD3<Float>(0.3, 0.9, 0.2)),
-                                  lightColor: SIMD3<Float>(repeating: 0.5),
-                                  ambient: SIMD3<Float>(repeating: 0.55))
+                                  lightDir: normalize(SIMD3<Float>(0.2, 1.0, 0.3)),
+                                  lightColor: lc * 0.7,
+                                  ambient: lc * 0.6)
             }
         }
 

@@ -93,6 +93,10 @@ uint32_t lambda_weapon_generation(void);
 // gates drawing on this so it doesn't double-draw once external mode is off.
 int lambda_weapon_active(void);
 
+// World light (R_LightPoint at the eye, normalised 0..1) sampled by the client
+// this frame; copied into rgb[3]. Used to shade the weapon to match the room.
+void lambda_weapon_get_light(float rgb[3]);
+
 // Lock the active snapshot for reading and fill *out with its pointers/counts.
 // Returns the generation (0 if nothing baked, in which case *out is zeroed).
 // Must be paired with lambda_weapon_unlock().
