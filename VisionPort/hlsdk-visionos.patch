@@ -1,5 +1,5 @@
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..fd85ea8 100644
+index 3670546..50f844d 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
 @@ -17,12 +17,36 @@
@@ -40,7 +40,7 @@ index 3670546..fd85ea8 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +521,270 @@ void Beams( void )
+@@ -497,15 +521,289 @@ void Beams( void )
  }
  #endif
  
@@ -148,12 +148,31 @@ index 3670546..fd85ea8 100644
 +	// draw nothing engine-side, but keep the camera-locked viewmodel hidden
 +	// so the platform layer is the sole source of the weapon. Toggle from the
 +	// console or via a "vr_weapon_external 1" command pushed from Swift.
++	// Defined extern "C" in view.cpp; a plain extern here resolves to the same
++	// unmangled symbol (global variables aren't name-mangled), matching how
++	// g_vr_hand_weapon_drawn is shared. (extern "C" isn't allowed at block scope.)
++	extern void *g_vr_weapon_hdr;
++	extern int   g_vr_weapon_modelindex;
++	extern int   g_vr_weapon_body;
++	g_vr_weapon_hdr = NULL; // reset each frame; republished below in external mode
++
 +	static cvar_t *vr_weapon_external = NULL;
 +	if( !vr_weapon_external )
 +		vr_weapon_external = gEngfuncs.pfnRegisterVariable( "vr_weapon_external", "0", FCVAR_ARCHIVE );
 +	if( vr_weapon_external && vr_weapon_external->value )
 +	{
 +		g_vr_hand_weapon_drawn = 1;
++		// Publish the active weapon's resident studio header so the platform
++		// weapon pass can bake a bind-pose mesh from it.
++		cl_entity_t *pl = gEngfuncs.GetLocalPlayer();
++		model_t *wm = ( pl && pl->curstate.weaponmodel )
++			? gEngfuncs.pfnGetModelByIndex( pl->curstate.weaponmodel ) : NULL;
++		if( wm && wm->type == mod_studio && wm->cache.data )
++		{
++			g_vr_weapon_hdr        = wm->cache.data;
++			g_vr_weapon_modelindex = pl->curstate.weaponmodel;
++			g_vr_weapon_body       = pl->curstate.body;
++		}
 +		return;
 +	}
 +
@@ -313,10 +332,10 @@ index 3670546..fd85ea8 100644
  	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
  	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..eb94a33 100644
+index 3b3187d..efa710e 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,28 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,35 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -342,11 +361,18 @@ index 3b3187d..eb94a33 100644
 +// rigged to the body and clips into the player when hand-anchored. Both
 +// files link into the same cl_dll object, so a plain global suffices.
 +int g_vr_hand_weapon_drawn = 0;
++// Published by VR_AddHandWeapon (entity.cpp) each frame when vr_weapon_external
++// is on: the active weapon's resident studio header, its engine model index and
++// body value. The visionOS Metal weapon pass (Lambda_WeaponModel.c) reads these
++// to bake a bind-pose mesh. NULL header = no external weapon this frame.
++extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_hdr = 0;
++extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_modelindex = 0;
++extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_body = 0;
 +float v_frametime, v_lastDistance;
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +798,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +805,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  

@@ -1,4 +1,5 @@
 #include "Lambda_Bridge.h"
+#include "Lambda_WeaponModel.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3499,6 +3500,12 @@ static void *gl_worker_main(void *arg) {
                 double t0 = ft_now_ms();
                 lambda_engine_frame();
                 double t1 = ft_now_ms();
+                // The client (HUD_CreateEntities) just published the active
+                // weapon's studio header when vr_weapon_external is on; bake a
+                // fresh bind-pose mesh if the model changed. Cheap no-op
+                // otherwise. Same thread as the publish, so the pointer is
+                // sequenced; the snapshot swap is mutex-guarded for the reader.
+                lambda_weapon_extract();
                 // Publish menu visibility for the spatial-event router.
                 lambda_menu_state_publish();
                 if (g_w_have_view_angles)
