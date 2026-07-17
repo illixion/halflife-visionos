@@ -189,6 +189,14 @@ actor Renderer {
     // that fires along gaze instead of the weapon barrel. Both live.
     nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
     nonisolated(unsafe) static var fireAlongGaze: Bool = false
+    // Immersive gesture input (pass 2, opt-in via Settings). When on, curling
+    // the dominant hand's index finger pulls the trigger (finger-gun fire).
+    // Pinch fire (LambdaVisionApp) stays available as a fallback. The trigger
+    // uses the index EXTENSION ratio from sampleDominantHand with hysteresis:
+    // fire below `fireCurlOn`, release above `fireCurlOff`. Tuned live.
+    nonisolated(unsafe) static var gestureInputEnabled: Bool = false
+    nonisolated(unsafe) static var fireCurlOn: Float = 0.55   // extension below this → +attack
+    nonisolated(unsafe) static var fireCurlOff: Float = 0.75  // extension above this → -attack
     // Weapon grip correction (applied in the hand-bone-local frame between the
     // world hand frame and the GoldSrc→metres basis). GoldSrc hand bones and
     // ARKit hand frames don't line up perfectly; these Euler degrees + push
@@ -198,6 +206,55 @@ actor Renderer {
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
     nonisolated(unsafe) static var gripYawDeg: Float = 180   // barrel points along fingers
     nonisolated(unsafe) static var gripPushM: Float = 0  // seat grip back into the hand
+
+    // Live aim diagnostics, published from the render thread each frame and
+    // read by the launcher's Diagnostics disclosure (which stays visible while
+    // the game runs). Purpose: see in real time WHY a shot went where it did —
+    // which hand-sample gate dropped, whether fire used barrel/gaze/center, and
+    // the resulting pitch/yaw offset. Plain struct copy across threads; a torn
+    // read is harmless for a readout. The n* counters accumulate so a gate that
+    // only drops intermittently (e.g. during the firing pose) shows up as a
+    // climbing count rather than a single fleeting string.
+    struct AimDiag {
+        var handOutcome = "—"     // last sampleDominantHand result
+        var aimSource   = "—"     // barrel / gaze(hand) / gaze(fallback) / center(no-dir)
+        var fireAlongGaze = false // the "Fire aims at" setting, as the render thread sees it
+        var pitch: Float = 0      // offset actually sent to the engine (deg)
+        var yaw: Float = 0
+        var nTracked = 0, nNotTracked = 0, nNoSkeleton = 0, nNoAnchor = 0, nProviderDown = 0
+        var gestureOn = false     // "Immersive gesture input" setting, render-thread view
+        var indexExt: Float = 0   // live index extension ratio (finger-gun trigger)
+        var fireGesture = false   // finger-gun trigger currently held
+        var moveClutch = false    // off-hand joystick clutch engaged
+        var joyX: Float = 0       // joystick strafe (-1..1, + = right)
+        var joyY: Float = 0       // joystick forward (-1..1, + = forward)
+        var moveVert = "—"        // jump / duck / —
+        var moveHandSeen = false  // off-hand anchor tracked this frame
+        var pinchDist: Float = -1 // thumb↔index distance, m (-1 = no hand)
+        var fistCount = 0         // fingers curled to metacarpal (>=3 = suppressed)
+    }
+    nonisolated(unsafe) static var aimDiag = AimDiag()
+
+    /// Human-readable snapshot of the live aim diagnostics for the launcher's
+    /// Diagnostics disclosure. Read from the main thread; the underlying struct
+    /// is written on the render thread (torn read tolerated for a readout).
+    nonisolated static func aimDiagLines() -> [String] {
+        let d = aimDiag
+        return [
+            "hand: \(d.handOutcome)   dom: \(dominantHandIsLeft ? "L" : "R")",
+            "fire aims at: \(d.fireAlongGaze ? "gaze (setting)" : "barrel (setting)")",
+            "aim source: \(d.aimSource)",
+            String(format: "offset: pitch %+.1f°  yaw %+.1f°", d.pitch, d.yaw),
+            "gate hits — tracked:\(d.nTracked) notTracked:\(d.nNotTracked) "
+              + "noSkel:\(d.nNoSkeleton) noAnchor:\(d.nNoAnchor) provDown:\(d.nProviderDown)",
+            String(format: "finger-gun: %@  indexExt %.2f  trigger %@",
+                   d.gestureOn ? "on" : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
+            String(format: "move: clutch %@  joy(%+.2f,%+.2f)  vert %@",
+                   d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
+            String(format: "move dbg: hand %@  pinchDist %.3f  fist %d",
+                   d.moveHandSeen ? "seen" : "—", d.pinchDist, d.fistCount),
+        ]
+    }
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
         snapLock.lock()
@@ -276,15 +333,38 @@ actor Renderer {
         var localPos: SIMD3<Float>                // xash cam axes, meters
         var localFwd: SIMD3<Float>
         var localUp: SIMD3<Float>
+        var indexExtension: Float                 // index tip↔knuckle / palm length; low = curled (trigger)
     }
 
     private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
-        guard handTracking.state == .running else { return nil }
+        guard handTracking.state == .running else {
+            Renderer.aimDiag.handOutcome = "provider \(handTracking.state)"
+            Renderer.aimDiag.nProviderDown &+= 1
+            return nil
+        }
         let left = Renderer.dominantHandIsLeft
+        // Split what used to be one compound guard so the diagnostics can name
+        // exactly which gate failed (anchor missing vs anchor-not-tracked vs
+        // skeleton missing) — that's how we tell "shooting needs all fingers"
+        // apart from a lost anchor.
         guard let hand = left ? handTracking.latestAnchors.leftHand
-                              : handTracking.latestAnchors.rightHand,
-              hand.isTracked,
-              let skel = hand.handSkeleton else { return nil }
+                              : handTracking.latestAnchors.rightHand else {
+            Renderer.aimDiag.handOutcome = "no anchor"
+            Renderer.aimDiag.nNoAnchor &+= 1
+            return nil
+        }
+        guard hand.isTracked else {
+            Renderer.aimDiag.handOutcome = "not tracked"
+            Renderer.aimDiag.nNotTracked &+= 1
+            return nil
+        }
+        guard let skel = hand.handSkeleton else {
+            Renderer.aimDiag.handOutcome = "no skeleton"
+            Renderer.aimDiag.nNoSkeleton &+= 1
+            return nil
+        }
+        Renderer.aimDiag.handOutcome = "tracked"
+        Renderer.aimDiag.nTracked &+= 1
         // Anchor-level tracking is the only gate: per-joint isTracked goes
         // false whenever fingers self-occlude (fist, hand rotation), which
         // made the weapon flicker back to the viewmodel — the estimated
@@ -310,6 +390,16 @@ actor Renderer {
         let across = simd_normalize(left ? -acrossRaw : acrossRaw)
         let up     = simd_normalize(simd_cross(across, fwd))
 
+        // Index-finger curl for the finger-gun trigger: tip↔knuckle distance
+        // normalised by palm length (wrist→middle knuckle), so it's scale-
+        // invariant across hand sizes. Extended ≈ 1, curled (trigger pulled)
+        // drops toward ~0.3. The knuckle barely moves when the finger curls,
+        // so this doesn't disturb the wrist→knuckle aim ray.
+        let palmLen = simd_length(pMid - pWrist)
+        let idxExt  = palmLen > 1e-4
+            ? simd_length(worldPos(skel.joint(.indexFingerTip)) - worldPos(idxK)) / palmLen
+            : 1.0
+
         // World → head-local (rotation only for directions), then Apple →
         // xash camera basis: (x,y,z) → (-z,-x,y).
         let hInv = m.inverse
@@ -323,11 +413,16 @@ actor Renderer {
                           worldGrip: pWrist,
                           localPos: SIMD3(-p4.z, -p4.x, p4.y),
                           localFwd: headLocalDir(fwd),
-                          localUp: headLocalDir(up))
+                          localUp: headLocalDir(up),
+                          indexExtension: idxExt)
     }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
     private var headBaselinePos: SIMD3<Float>? = nil
+
+    // Finger-gun trigger state (render thread): true while +attack is held via
+    // the index-curl gesture, so we only send +attack/-attack on transitions.
+    private var fireGestureDown = false
 
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -1048,8 +1143,10 @@ actor Renderer {
             // otherwise fall back to the pinch gaze ray, then view center.
             // Offsets in xash conventions (pitch positive down, yaw CCW).
             var aimDir: SIMD3<Float>? = nil  // Apple world basis
-            if let anchor = frameDeviceAnchor,
-               let hand = sampleDominantHand(headTransform: anchor.originFromAnchorTransform) {
+            let handSample = frameDeviceAnchor.flatMap {
+                sampleDominantHand(headTransform: $0.originFromAnchorTransform)
+            }
+            if let hand = handSample {
                 let p = hand.localPos * appleToXash
                 lambda_set_hand_pose(p.x, p.y, p.z,
                                      hand.localFwd.x, hand.localFwd.y, hand.localFwd.z,
@@ -1059,10 +1156,13 @@ actor Renderer {
                 // players who can't comfortably point with the hand.
                 aimDir = Renderer.fireAlongGaze ? Renderer.currentGazeDir()
                                                 : hand.worldForward
+                Renderer.aimDiag.aimSource = Renderer.fireAlongGaze ? "gaze(hand)" : "barrel"
             } else {
                 lambda_clear_hand_pose()
                 aimDir = Renderer.currentGazeDir()
+                Renderer.aimDiag.aimSource = "gaze(fallback)"
             }
+            Renderer.aimDiag.fireAlongGaze = Renderer.fireAlongGaze
             if let g = aimDir {
                 let gx = SIMD3<Float>(-g.z, -g.x, g.y)  // Apple → xash basis
                 let gPitch = atan2f(-gx.z, sqrtf(gx.x * gx.x + gx.y * gx.y)) * rad2deg
@@ -1070,8 +1170,58 @@ actor Renderer {
                 var dy = gYaw - yawDeg
                 if dy > 180 { dy -= 360 } else if dy < -180 { dy += 360 }
                 lambda_set_aim_offset(gPitch - pitchDeg, dy)
+                Renderer.aimDiag.pitch = gPitch - pitchDeg
+                Renderer.aimDiag.yaw = dy
             } else {
                 lambda_set_aim_offset(0, 0)
+                // aimDir nil means "gaze fallback but no active pinch ray": the
+                // offset collapses to zero, so shots go along the head view =
+                // screen center. This is the "shoots at crosshair" symptom.
+                Renderer.aimDiag.aimSource = "center(no-dir)"
+                Renderer.aimDiag.pitch = 0
+                Renderer.aimDiag.yaw = 0
+            }
+
+            // Finger-gun trigger (opt-in). Reconcile the held +attack state
+            // with the current index curl each frame: pull below fireCurlOn,
+            // release above fireCurlOff (hysteresis), and force-release when
+            // the gesture is off, the menu is up, or the hand sample is gone —
+            // so a lost hand mid-trigger can't leave fire stuck on. Edge-only
+            // console commands, so this costs a worker round-trip only on a
+            // press/release, not every frame. Pinch fire stays independent.
+            var wantFire = fireGestureDown
+            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+               let hand = handSample {
+                Renderer.aimDiag.indexExt = hand.indexExtension
+                if hand.indexExtension < Renderer.fireCurlOn { wantFire = true }
+                else if hand.indexExtension > Renderer.fireCurlOff { wantFire = false }
+                // else: within the hysteresis band — hold the current state.
+            } else {
+                wantFire = false
+            }
+            if wantFire != fireGestureDown {
+                fireGestureDown = wantFire
+                _ = (wantFire ? "+attack" : "-attack").withCString { lambda_gl_worker_cmd($0) }
+            }
+            Renderer.aimDiag.gestureOn = Renderer.gestureInputEnabled
+            Renderer.aimDiag.fireGesture = fireGestureDown
+
+            // Off-hand (non-dominant) locomotion joystick. Head axes in Apple
+            // world (forward = -col2, right = +col0); HandMovement flattens Y.
+            // Movement hand is the opposite of the dominant (gun) hand.
+            if let anchor = frameDeviceAnchor {
+                let hm = anchor.originFromAnchorTransform
+                let headFwd = SIMD3<Float>(-hm.columns.2.x, -hm.columns.2.y, -hm.columns.2.z)
+                let headRight = SIMD3<Float>(hm.columns.0.x, hm.columns.0.y, hm.columns.0.z)
+                let moveHand = Renderer.dominantHandIsLeft
+                    ? handTracking.latestAnchors.rightHand
+                    : handTracking.latestAnchors.leftHand
+                HandMovement.shared.poll(
+                    active: Renderer.gestureInputEnabled && lambda_menu_active() == 0,
+                    movementHand: moveHand,
+                    headForward: headFwd,
+                    headRight: headRight,
+                    now: CACurrentMediaTime())
             }
 
             // Inputs for gaze→menu cursor mapping (used off-thread when a

@@ -174,6 +174,9 @@ nm -gU "$HERE/hlsdk-portable/build/cl_dll/client_arm64.dylib" \
 # in entity.cpp. Without these the prelink localizes them and the app link
 # fails on the bridge's externs.
 printf '_g_vr_hand_pose\n_g_vr_hand_pose_active\n_g_vr_cam_override\n' >> "$HLSDK_CL_EXPORTS"
+# Client-side barrel-aim offset (view.cpp), written by the bridge so the
+# bullet decal/tracer trace (ev_hldm.cpp) matches the server damage trace.
+printf '_g_vr_aim_offset_cl\n' >> "$HLSDK_CL_EXPORTS"
 # Active-weapon publish (view.cpp), read by Lambda_WeaponModel.c to bake the
 # bind-pose weapon mesh for the external (visionOS) renderer.
 printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLSDK_CL_EXPORTS"

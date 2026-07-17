@@ -2476,7 +2476,8 @@ static void lambda_view_yaw_apply(void) {
 // while view/movement/pmove stay on the real view angles. Staged in
 // centidegrees (atomics are integer-only), published to the hlsdk-read
 // globals on the GL worker at tick start.
-extern float g_vr_aim_offset[2];  // defined in hlsdk dlls/player.cpp
+extern float g_vr_aim_offset[2];     // defined in hlsdk dlls/player.cpp (server damage trace)
+extern float g_vr_aim_offset_cl[2];  // defined in hlsdk cl_dll/view.cpp (client decal/tracer trace)
 static _Atomic int g_pending_aim_pitch_cd;
 static _Atomic int g_pending_aim_yaw_cd;
 
@@ -2486,8 +2487,15 @@ void lambda_set_aim_offset(float pitch_deg, float yaw_deg) {
 }
 
 static void lambda_aim_offset_apply(void) {
-    g_vr_aim_offset[0] = (float)atomic_load(&g_pending_aim_pitch_cd) / 100.0f;
-    g_vr_aim_offset[1] = (float)atomic_load(&g_pending_aim_yaw_cd) / 100.0f;
+    float pitch = (float)atomic_load(&g_pending_aim_pitch_cd) / 100.0f;
+    float yaw   = (float)atomic_load(&g_pending_aim_yaw_cd) / 100.0f;
+    // Server side (bullet damage trace) and client side (decal/tracer trace)
+    // read separate symbols; write both from the one source so the visible
+    // hole lands where the shot actually hits.
+    g_vr_aim_offset[0] = pitch;
+    g_vr_aim_offset[1] = yaw;
+    g_vr_aim_offset_cl[0] = pitch;
+    g_vr_aim_offset_cl[1] = yaw;
 }
 
 // Hand-anchored weapon: the tracked hand pose, camera-local in xash axes

@@ -51,6 +51,19 @@ struct ContentView: View {
                         Text("VkDevice: \(deviceStatus)")
                         Text("IOSurface clear: \(iosurfaceStatus)")
                         Text("Engine: \(engineStatus)")
+
+                        Divider()
+                        // Live aim readout — polled ~4×/s while the game runs,
+                        // so it's visible without leaving the immersive space.
+                        // Aim the weapon / fire and watch which gate drops.
+                        Text("Aim").font(.caption2).foregroundStyle(.secondary)
+                        TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(Renderer.aimDiagLines(), id: \.self) { line in
+                                    Text(line)
+                                }
+                            }
+                        }
                     }
                     .font(.system(.caption, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)

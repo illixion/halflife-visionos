@@ -6,6 +6,15 @@ instead of deleting them.
 
 ## Open — interaction
 
+- **Barrel aim reads slightly to the right.** With `fireAimMode = barrel`,
+  shots (and now the decals) land a bit right of the visible muzzle. The aim
+  ray is `wrist→middle-knuckle` (`sampleDominantHand`), not the drawn gun
+  barrel (the WeaponPass grip correction `C = gripYaw 180°, gripRoll 90°`), so
+  the two disagree by a fixed rotation. Deferred on purpose: adding VR
+  hands/arms will re-seat the grip and shift this again, so realign the aim
+  axis to the drawn barrel then (derive it from the same `handWorld·C·B·
+  inverse(handBone)` transform). Live aim readout is in the launcher's
+  Diagnostics disclosure.
 - **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
   skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
   fire-along-gaze accessibility now in Settings): remaining items — muzzle
@@ -100,6 +109,16 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~Bullet-hole decals + tracers lied about where barrel-mode shots landed~~
+  — the server damage trace fired along the barrel (`pev->v_angle +
+  g_vr_aim_offset` in `ItemPostFrame`), but the client event trace that draws
+  the decal/tracer read `args->angles` (the head view, no offset), so the hole
+  appeared along the gaze while the damage went along the gun. Fixed by
+  applying the same offset client-side in `ev_hldm.cpp` (`EV_VR_ApplyAimOffset`
+  in the six hitscan/beam events, local player only, egon exempt). The offset
+  can't be folded into the usercmd view (that would swing the camera), so it's
+  a separate client-side symbol `g_vr_aim_offset_cl` (`view.cpp`) the bridge
+  writes alongside the server copy. Residual right-offset tracked above.
 - ~~Hand-anchored weapon drifts off the hand under rotation~~ — the
   engine-side hand weapon (`VR_AddHandWeapon`) reconstructed a one-frame-stale
   camera, so head rotation sheared the gun off the hand. Added an opt-in

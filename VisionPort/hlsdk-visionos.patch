@@ -1,5 +1,5 @@
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..20e3afb 100644
+index 3670546..3931a57 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
 @@ -17,12 +17,37 @@
@@ -159,7 +159,7 @@ index 3670546..20e3afb 100644
 +
 +	static cvar_t *vr_weapon_external = NULL;
 +	if( !vr_weapon_external )
-+		vr_weapon_external = gEngfuncs.pfnRegisterVariable( "vr_weapon_external", "0", FCVAR_ARCHIVE );
++		vr_weapon_external = gEngfuncs.pfnRegisterVariable( "vr_weapon_external", "1", FCVAR_ARCHIVE );
 +	if( vr_weapon_external && vr_weapon_external->value )
 +	{
 +		g_vr_hand_weapon_drawn = 1;
@@ -341,11 +341,99 @@ index 3670546..20e3afb 100644
  	// e.g., create a persistent cl_entity_t somewhere.
  	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
  	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
+diff --git a/cl_dll/ev_hldm.cpp b/cl_dll/ev_hldm.cpp
+index e28742f..3f08c40 100644
+--- a/cl_dll/ev_hldm.cpp
++++ b/cl_dll/ev_hldm.cpp
+@@ -47,6 +47,27 @@ void VectorAngles( const float *forward, float *angles );
+ 
+ extern cvar_t *cl_lw;
+ 
++// VR barrel aim: the server adds g_vr_aim_offset to pev->v_angle inside
++// CBasePlayer::ItemPostFrame (dlls/player.cpp) so shots fire along the weapon
++// barrel (the hand direction) rather than the head view. The client event
++// trace that draws the bullet-hole decal + tracer reads args->angles — the
++// head view, with NO offset — so without this the visual "lied": the hole
++// appeared along the gaze while the damage went along the barrel. Apply the
++// same offset to the client trace angles so the decal/tracer match the hit.
++// We read g_vr_aim_offset_cl (defined client-side in view.cpp, written by the
++// bridge) rather than the server's g_vr_aim_offset — the intermediate cl_dll
++// dylib link has no server symbols. Local player only (the offset is the host
++// player's; remote players in MP carry their own args->angles). Egon is exempt,
++// matching the server-side and render-side exemptions — it fires along the view.
++extern "C" float g_vr_aim_offset_cl[2];  // defined in cl_dll/view.cpp
++static void EV_VR_ApplyAimOffset( event_args_t *args, float *angles )
++{
++	if( !EV_IsLocal( args->entindex ) )
++		return;
++	angles[PITCH] += g_vr_aim_offset_cl[0];
++	angles[YAW]   += g_vr_aim_offset_cl[1];
++}
++
+ extern "C"
+ {
+ // HLDM
+@@ -480,6 +501,7 @@ static void EV_FireGlock_Impl( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	empty = args->bparam1;
+ 	AngleVectors( angles, forward, right, up );
+@@ -543,6 +565,7 @@ void EV_FireShotGunDouble( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	AngleVectors( angles, forward, right, up );
+ 
+@@ -597,6 +620,7 @@ void EV_FireShotGunSingle( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	AngleVectors( angles, forward, right, up );
+ 
+@@ -654,6 +678,7 @@ void EV_FireMP5( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	AngleVectors( angles, forward, right, up );
+ 
+@@ -737,6 +762,7 @@ void EV_FirePython( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	AngleVectors( angles, forward, right, up );
+ 
+@@ -793,6 +819,7 @@ void EV_SpinGauss( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	pitch = args->iparam1;
+ 
+@@ -845,6 +872,7 @@ void EV_FireGauss( event_args_t *args )
+ 	VectorCopy( args->origin, origin );
+ 	VectorCopy( args->angles, angles );
+ 	VectorCopy( args->velocity, velocity );
++	EV_VR_ApplyAimOffset( args, angles );  // aim decal/tracer along the barrel
+ 
+ 	if( args->bparam2 )
+ 	{
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..a536f4e 100644
+index 3b3187d..6c6f6a8 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,39 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,46 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -365,6 +453,13 @@ index 3b3187d..a536f4e 100644
 +// directly — the intermediate cl_dll dylib link has no engine symbols.
 +// [0]=active, [1..3]=angles, [4..6]=origin offset.
 +extern "C" __attribute__((visibility("default"))) float g_vr_cam_override[7] = { 0 };
++// Client-side mirror of the server's g_vr_aim_offset (dlls/player.cpp): the
++// pitch/yaw the server adds to pev->v_angle so shots fire along the weapon
++// barrel. The client bullet-trace events (ev_hldm.cpp) apply the SAME offset
++// so the decal/tracer land where the damage does. Defined here (not extern'd
++// from the server) because the intermediate cl_dll dylib link has no server
++// symbols; the bridge writes both copies each tick from one source.
++extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset_cl[2] = { 0 };
 +// Set by VR_AddHandWeapon (entity.cpp) each frame: 1 when the weapon's p_
 +// model was drawn at the hand (so the viewmodel is hidden below), 0 when
 +// it fell back to the stock viewmodel — e.g. the egon, whose backpack is
@@ -386,7 +481,7 @@ index 3b3187d..a536f4e 100644
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +809,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +816,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  

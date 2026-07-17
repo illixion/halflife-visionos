@@ -156,6 +156,12 @@ struct ImmersiveSpaceContent: CompositorContent {
                             }
                             continue
                         }
+                        // When immersive gesture input is on, the render-thread
+                        // gestures own both hands (dominant index-curl fires,
+                        // off-hand pinch drives the joystick), so the pinch must
+                        // NOT also fire. Gate the press only — a release still
+                        // clears below, so toggling mid-pinch can't stick fire.
+                        if Renderer.gestureInputEnabled { continue }
                         // Stage the gaze ray BEFORE +attack so the shot
                         // aims where the eyes point (renderFrame converts
                         // it to an aim offset for the weapon code).

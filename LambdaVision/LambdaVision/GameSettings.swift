@@ -90,10 +90,12 @@ final class GameSettings {
         didSet { AppSettingsStore.fireAimMode = fireAimMode
                  Renderer.fireAlongGaze = (fireAimMode == .gaze) }
     }
-    /// Gate for the upcoming finger-gun / gesture input model (pass 2). Stored
-    /// now so the preference persists; not yet consumed at runtime.
+    /// Immersive gesture input (pass 2). When on, curling the dominant hand's
+    /// index finger fires (finger-gun); pinch fire stays as a fallback. Read
+    /// live by the render thread via Renderer.gestureInputEnabled.
     var gestureInputEnabled: Bool = AppSettingsStore.gestureInputEnabled {
-        didSet { AppSettingsStore.gestureInputEnabled = gestureInputEnabled }
+        didSet { AppSettingsStore.gestureInputEnabled = gestureInputEnabled
+                 Renderer.gestureInputEnabled = gestureInputEnabled }
     }
     var fastWeaponSwitch: Bool = AppSettingsStore.fastWeaponSwitch {
         didSet { AppSettingsStore.fastWeaponSwitch = fastWeaponSwitch
@@ -119,6 +121,7 @@ final class GameSettings {
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
+        Renderer.gestureInputEnabled = gestureInputEnabled
     }
 
     /// Called from Renderer.ensureEngineInitialized() once the engine is up.
