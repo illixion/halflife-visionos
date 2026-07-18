@@ -18,15 +18,22 @@ import CompositorServices
 import simd
 
 final class WeaponPass {
-    /// Reload-progress ring drawn at the tail of the weapon pass: a
-    /// world-anchored arc billboard (see ringVertexShader). All fields in
-    /// Apple world metres; progress 0..1 fills clockwise from 12 o'clock.
-    struct Ring {
+    /// UI arc drawn at the tail of the weapon pass: a world-anchored arc
+    /// billboard (see ringVertexShader). Used for the reload-progress ring
+    /// and the radial weapon menu's sectors. All lengths in Apple world
+    /// metres; angles in turns clockwise from 12 o'clock.
+    struct Arc {
         var center: SIMD3<Float>
         var right: SIMD3<Float>   // billboard axes (unit)
         var up: SIMD3<Float>
-        var progress: Float
+        var innerR: Float
+        var outerR: Float
+        var color: SIMD4<Float>
+        var startTurns: Float
+        var sweepTurns: Float
     }
+    static let maxArcs = 8
+    private static let arcSlotStride = 256   // constant-buffer slot alignment
 
     private let device: MTLDevice
     private let pipeline: MTLRenderPipelineState
@@ -128,7 +135,7 @@ final class WeaponPass {
                               options: .storageModeShared)!
         }
         self.ringUniformBuffers = (0..<maxBuffersInFlight).map { _ in
-            device.makeBuffer(length: MemoryLayout<RingUniforms>.stride,
+            device.makeBuffer(length: WeaponPass.arcSlotStride * WeaponPass.maxArcs,
                               options: .storageModeShared)!
         }
     }
@@ -234,7 +241,7 @@ final class WeaponPass {
                 lightDir: SIMD3<Float>,
                 lightColor: SIMD3<Float>,
                 ambient: SIMD3<Float>,
-                ring: Ring? = nil) {
+                arcs: [Arc] = []) {
         guard isReady, let depth else { return }
 
         let ub = uniformBuffers[uniformBufferIndex]
@@ -288,22 +295,29 @@ final class WeaponPass {
                                vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
         }
 
-        // Reload-progress ring, drawn last with depth test off so the weapon
-        // can't hide it. 2*(RING_SEGMENTS+1) strip vertices, generated in the
-        // vertex shader — must match RING_SEGMENTS in WeaponShaders.metal.
-        if let ring, ring.progress > 0 {
+        // UI arcs (reload ring, weapon-menu sectors), drawn last with depth
+        // test off so the weapon can't hide them. Each arc is one strip of
+        // 2*(RING_SEGMENTS+1) vertices generated in the vertex shader — the
+        // count must match RING_SEGMENTS in WeaponShaders.metal. One slot of
+        // the per-frame ring buffer per arc.
+        if !arcs.isEmpty {
             let rub = ringUniformBuffers[uniformBufferIndex]
-            var ru = RingUniforms(center: SIMD4(ring.center, 1),
-                                  right: SIMD4(ring.right, 0.030),   // outer radius
-                                  up: SIMD4(ring.up, 0.022),         // inner radius
-                                  color: SIMD4(1.0, 0.78, 0.25, 1),  // HL amber
-                                  progress: ring.progress)
-            memcpy(rub.contents(), &ru, MemoryLayout<RingUniforms>.size)
             enc.setRenderPipelineState(ringPipeline)
             enc.setDepthStencilState(ringDepthState)
-            vertexArgTable.setAddress(rub.gpuAddress, index: BufferIndex.uniforms.rawValue)
-            enc.drawPrimitives(primitiveType: .triangleStrip,
-                               vertexStart: 0, vertexCount: 2 * (48 + 1))
+            for (k, arc) in arcs.prefix(WeaponPass.maxArcs).enumerated() {
+                let offset = k * WeaponPass.arcSlotStride
+                var ru = RingUniforms(center: SIMD4(arc.center, 1),
+                                      right: SIMD4(arc.right, arc.outerR),
+                                      up: SIMD4(arc.up, arc.innerR),
+                                      color: arc.color,
+                                      startTurns: arc.startTurns,
+                                      sweepTurns: arc.sweepTurns)
+                memcpy(rub.contents() + offset, &ru, MemoryLayout<RingUniforms>.size)
+                vertexArgTable.setAddress(rub.gpuAddress + UInt64(offset),
+                                          index: BufferIndex.uniforms.rawValue)
+                enc.drawPrimitives(primitiveType: .triangleStrip,
+                                   vertexStart: 0, vertexCount: 2 * (48 + 1))
+            }
         }
         enc.endEncoding()
     }

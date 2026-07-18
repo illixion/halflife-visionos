@@ -204,6 +204,15 @@ actor Renderer {
     nonisolated(unsafe) static var thumbCurlOn: Float = 0.45   // extension below this → hold begins
     nonisolated(unsafe) static var thumbCurlOff: Float = 0.60  // extension above this → hold cancels
     nonisolated(unsafe) static var reloadHoldSeconds: Double = 0.75
+    // 🤌 radial weapon menu (dominant hand): pinch ALL fingertips to the
+    // thumb to open, move the hand toward a sector, release to select
+    // (slot1..slot5, 12 o'clock = slot1, clockwise). Enter/exit hysteresis
+    // on the tip spread; the fist gate keeps a clenched fist from opening
+    // it; the deadzone means release-in-place cancels.
+    nonisolated(unsafe) static var menuPinchEnter: Float = 0.055  // max tip↔thumb spread, m
+    nonisolated(unsafe) static var menuPinchExit: Float = 0.085
+    nonisolated(unsafe) static var menuFistGate: Float = 0.05     // middle tip↔metacarpal must exceed
+    nonisolated(unsafe) static var menuDeadzoneM: Float = 0.04    // hand travel before a sector arms
     // Weapon grip correction (applied in the hand-bone-local frame between the
     // world hand frame and the GoldSrc→metres basis). GoldSrc hand bones and
     // ARKit hand frames don't line up perfectly; these Euler degrees + push
@@ -234,6 +243,9 @@ actor Renderer {
         var fireGesture = false   // finger-gun trigger currently held
         var thumbExt: Float = 0   // live thumb extension ratio (reload gesture)
         var reloadProg: Float = 0 // reload hold progress 0..1 (0 = idle/fired)
+        var menuSpread: Float = 0 // live 🤌 fingertip spread, m
+        var menuOpen = false      // radial weapon menu currently up
+        var menuSel = -1          // armed sector (0-based; -1 = none/cancel)
         var moveClutch = false    // off-hand joystick clutch engaged
         var joyX: Float = 0       // joystick strafe (-1..1, + = right)
         var joyY: Float = 0       // joystick forward (-1..1, + = forward)
@@ -261,6 +273,9 @@ actor Renderer {
                    d.gestureOn ? "on" : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
             String(format: "reload: thumbExt %.2f  hold %d%%",
                    d.thumbExt, Int(d.reloadProg * 100)),
+            String(format: "wpn menu: spread %.3f  %@  sel %@",
+                   d.menuSpread, d.menuOpen ? "OPEN" : "—",
+                   d.menuSel >= 0 ? "slot\(d.menuSel + 1)" : "—"),
             String(format: "move: clutch %@  joy(%+.2f,%+.2f)  vert %@",
                    d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
             String(format: "move dbg: hand %@  pinchDist %.3f  fist %d  recenter %d",
@@ -347,6 +362,8 @@ actor Renderer {
         var localUp: SIMD3<Float>
         var indexExtension: Float                 // index tip↔knuckle / palm length; low = curled (trigger)
         var thumbExtension: Float                 // thumb tip↔index knuckle / palm length; low = curled (reload)
+        var pinchAllSpread: Float                 // max fingertip↔thumb-tip distance, m; low = 🤌 (weapon menu)
+        var middleCurlM: Float                    // middle tip↔metacarpal, m; low = fist (menu suppressor)
     }
 
     private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
@@ -419,6 +436,20 @@ actor Renderer {
         let thumbExt = palmLen > 1e-4
             ? simd_length(worldPos(skel.joint(.thumbTip)) - worldPos(idxK)) / palmLen
             : 1.0
+        // 🤌 pinched-fingers for the radial weapon menu: how far the
+        // farthest fingertip sits from the thumb tip — all tips converged
+        // reads low (~0.02-0.04m). A fist also brings tips near the thumb,
+        // so middleCurlM (middle tip↔metacarpal) doubles as a suppressor:
+        // in 🤌 the fingers arch up to the pinch point (high), in a fist
+        // they collapse onto the palm (low).
+        let pThumbTip = worldPos(skel.joint(.thumbTip))
+        var spread: Float = 0
+        for tip: HandSkeleton.JointName in [.indexFingerTip, .middleFingerTip,
+                                            .ringFingerTip, .littleFingerTip] {
+            spread = max(spread, simd_distance(worldPos(skel.joint(tip)), pThumbTip))
+        }
+        let middleCurl = simd_distance(worldPos(skel.joint(.middleFingerTip)),
+                                       worldPos(skel.joint(.middleFingerMetacarpal)))
 
         // World → head-local (rotation only for directions), then Apple →
         // xash camera basis: (x,y,z) → (-z,-x,y).
@@ -435,7 +466,9 @@ actor Renderer {
                           localFwd: headLocalDir(fwd),
                           localUp: headLocalDir(up),
                           indexExtension: idxExt,
-                          thumbExtension: thumbExt)
+                          thumbExtension: thumbExt,
+                          pinchAllSpread: spread,
+                          middleCurlM: middleCurl)
     }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
@@ -465,6 +498,13 @@ actor Renderer {
     private var reloadStart: Double? = nil
     private var reloadLatched = false
     private var reloadRingProgress: Float = 0
+
+    // Radial weapon menu state (render thread). Non-nil anchor = menu open,
+    // holding the wrist position where the 🤌 engaged; selection is the
+    // armed sector index (-1 inside the deadzone). Selection commits on a
+    // clean release (spread past exit); a lost hand or engine menu cancels.
+    private var weaponMenuAnchor: SIMD3<Float>? = nil
+    private var weaponMenuSelected = -1
 
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -1270,6 +1310,56 @@ actor Renderer {
                 Renderer.aimDiag.yaw = 0
             }
 
+            // 🤌 radial weapon menu (opt-in, dominant hand). Runs BEFORE the
+            // fire/reload reconciliation so an open menu owns the hand:
+            // firing and reload are forced off while it's up (the converging
+            // fingertips would otherwise read as index/thumb curls). Opening
+            // requires all four fingertips near the thumb tip AND the fist
+            // gate (a clenched fist keeps tips near the thumb too, but its
+            // middle finger collapses to the palm). While open, wrist travel
+            // from the engagement point arms a sector (12 o'clock = slot1,
+            // clockwise); releasing the pinch commits it, releasing inside
+            // the deadzone or losing the hand cancels.
+            let hadWeaponMenu = weaponMenuAnchor != nil
+            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+               let hand = handSample {
+                Renderer.aimDiag.menuSpread = hand.pinchAllSpread
+                if !hadWeaponMenu {
+                    if hand.pinchAllSpread < Renderer.menuPinchEnter,
+                       hand.middleCurlM > Renderer.menuFistGate,
+                       !fireGestureDown {
+                        weaponMenuAnchor = hand.worldGrip
+                        weaponMenuSelected = -1
+                    }
+                } else if hand.pinchAllSpread > Renderer.menuPinchExit {
+                    if weaponMenuSelected >= 0 {
+                        _ = "slot\(weaponMenuSelected + 1)".withCString { lambda_gl_worker_cmd($0) }
+                    }
+                    weaponMenuAnchor = nil
+                    weaponMenuSelected = -1
+                } else if let mAnchor = weaponMenuAnchor, let da = frameDeviceAnchor {
+                    let hm = da.originFromAnchorTransform
+                    let hr = SIMD3<Float>(hm.columns.0.x, hm.columns.0.y, hm.columns.0.z)
+                    let hu = SIMD3<Float>(hm.columns.1.x, hm.columns.1.y, hm.columns.1.z)
+                    let d = hand.worldGrip - mAnchor
+                    let dx = simd_dot(d, hr)
+                    let dy = simd_dot(d, hu)
+                    if (dx * dx + dy * dy).squareRoot() > Renderer.menuDeadzoneM {
+                        var ang = atan2f(dx, dy)   // 0 = up, clockwise positive
+                        if ang < 0 { ang += 2 * .pi }
+                        weaponMenuSelected = Int(ang / (2 * .pi / 5)) % 5
+                    } else {
+                        weaponMenuSelected = -1
+                    }
+                }
+            } else if hadWeaponMenu {
+                weaponMenuAnchor = nil     // hand lost / gesture off → cancel
+                weaponMenuSelected = -1
+            }
+            let weaponMenuOpen = weaponMenuAnchor != nil
+            Renderer.aimDiag.menuOpen = weaponMenuOpen
+            Renderer.aimDiag.menuSel = weaponMenuSelected
+
             // Finger-gun trigger (opt-in). Reconcile the held +attack state
             // with the current index curl each frame: pull below fireCurlOn,
             // release above fireCurlOff (hysteresis), and force-release when
@@ -1279,7 +1369,7 @@ actor Renderer {
             // press/release, not every frame. Pinch fire stays independent.
             var wantFire = fireGestureDown
             if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
-               let hand = handSample {
+               !weaponMenuOpen, let hand = handSample {
                 Renderer.aimDiag.indexExt = hand.indexExtension
                 if hand.indexExtension < Renderer.fireCurlOn { wantFire = true }
                 else if hand.indexExtension > Renderer.fireCurlOff { wantFire = false }
@@ -1303,7 +1393,7 @@ actor Renderer {
             // so one hold = one reload.
             var thumbHold = reloadStart != nil
             if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
-               let hand = handSample {
+               !weaponMenuOpen, let hand = handSample {
                 Renderer.aimDiag.thumbExt = hand.thumbExtension
                 if hand.indexExtension < Renderer.fireCurlOn {
                     thumbHold = false   // trigger pulled — never reload mid-fire
@@ -1670,16 +1760,33 @@ actor Renderer {
                 var lrgb: [Float] = [0.5, 0.5, 0.5]
                 lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
-                // Reload-hold ring: floats above the weapon, billboarded to
-                // the head so it reads from any angle.
-                var ring: WeaponPass.Ring? = nil
+                // UI arcs, billboarded to the head so they read from any
+                // angle: the reload-hold ring floats above the weapon; the
+                // radial weapon menu draws five sector wedges around the
+                // point where the 🤌 engaged, the armed one highlighted.
+                var arcs: [WeaponPass.Arc] = []
+                let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
+                let headUp    = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
                 if reloadRingProgress > 0 {
-                    let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
-                    let headUp    = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
-                    ring = WeaponPass.Ring(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
-                                           right: headRight,
-                                           up: headUp,
-                                           progress: reloadRingProgress)
+                    arcs.append(WeaponPass.Arc(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
+                                               right: headRight, up: headUp,
+                                               innerR: 0.022, outerR: 0.030,
+                                               color: SIMD4(1.0, 0.78, 0.25, 1),  // HL amber
+                                               startTurns: 0, sweepTurns: reloadRingProgress))
+                }
+                if let mAnchor = weaponMenuAnchor {
+                    let gap: Float = 0.012   // turns of separation between sectors
+                    for i in 0..<5 {
+                        let armed = (i == weaponMenuSelected)
+                        arcs.append(WeaponPass.Arc(center: mAnchor,
+                                                   right: headRight, up: headUp,
+                                                   innerR: armed ? 0.050 : 0.055,
+                                                   outerR: armed ? 0.098 : 0.088,
+                                                   color: armed ? SIMD4(1.0, 0.78, 0.25, 1)
+                                                                : SIMD4(0.45, 0.47, 0.52, 1),
+                                                   startTurns: Float(i) / 5 + gap,
+                                                   sweepTurns: 1.0 / 5 - 2 * gap))
+                    }
                 }
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
                                   viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
@@ -1689,7 +1796,7 @@ actor Renderer {
                                   lightDir: normalize(SIMD3<Float>(0.2, 1.0, 0.3)),
                                   lightColor: lc * 0.7,
                                   ambient: lc * 0.6,
-                                  ring: ring)
+                                  arcs: arcs)
             }
         }
 

@@ -62,11 +62,12 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
     return float4(lit, 1.0);
 }
 
-// ---- Reload-progress ring -------------------------------------------------
+// ---- UI arcs (reload ring, radial-menu sectors) ---------------------------
 // Procedural arc billboard (triangle strip, no vertex buffer): vertex_id
 // walks RING_SEGMENTS steps around the sweep, alternating inner/outer
-// radius. progress scales the sweep angle, so the ring "fills" clockwise
-// from 12 o'clock as the reload gesture is held.
+// radius. startTurns/sweepTurns place the arc clockwise from 12 o'clock,
+// so a progress ring "fills" by growing sweepTurns and a menu sector is a
+// fixed wedge.
 
 #define RING_SEGMENTS 48
 
@@ -83,7 +84,7 @@ vertex RingInOut ringVertexShader(uint vid [[vertex_id]],
 {
     uint  seg = vid >> 1;
     float t   = float(seg) / float(RING_SEGMENTS);
-    float a   = M_PI_F * 0.5 - t * r.progress * 2.0 * M_PI_F;
+    float a   = M_PI_F * 0.5 - (r.startTurns + t * r.sweepTurns) * 2.0 * M_PI_F;
     float rad = (vid & 1) ? r.right.w : r.up.w;   // outer / inner
     float3 world = r.center.xyz
                  + (cos(a) * r.right.xyz + sin(a) * r.up.xyz) * rad;

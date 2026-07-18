@@ -62,18 +62,21 @@ typedef struct
     simd_float4     ambient;     // rgb = ambient term, w = alpha-test flag
 } WeaponUniforms;
 
-// Reload-progress ring: an unlit world-anchored arc billboard drawn at the
-// end of the weapon pass. The arc is generated procedurally in the vertex
-// shader (no vertex buffer); center/right/up define the billboard frame in
-// Apple world metres, progress is the sweep fraction (0..1, clockwise from
-// 12 o'clock).
+// UI arc (reload-progress ring, radial-menu sectors): an unlit
+// world-anchored arc billboard drawn at the end of the weapon pass. The
+// arc is generated procedurally in the vertex shader (no vertex buffer);
+// center/right/up define the billboard frame in Apple world metres.
+// Angles are in "turns" clockwise from 12 o'clock (start 0, sweep 1 =
+// full circle), so a progress ring is start=0/sweep=progress and a menu
+// sector is start=i/N/sweep=1/N.
 typedef struct
 {
-    simd_float4 center;    // xyz = world-space ring center
-    simd_float4 right;     // xyz = billboard right axis, w = outer radius (m)
-    simd_float4 up;        // xyz = billboard up axis,    w = inner radius (m)
-    simd_float4 color;     // rgba (no blending; drawn opaque)
-    float       progress;  // 0..1 arc sweep
+    simd_float4 center;      // xyz = world-space ring center
+    simd_float4 right;       // xyz = billboard right axis, w = outer radius (m)
+    simd_float4 up;          // xyz = billboard up axis,    w = inner radius (m)
+    simd_float4 color;       // rgba (no blending; drawn opaque)
+    float       startTurns;  // arc start, turns clockwise from 12 o'clock
+    float       sweepTurns;  // arc sweep, turns
 } RingUniforms;
 
 // Lambda engine bridge — only visible to Swift/ObjC, not to Metal shaders.
