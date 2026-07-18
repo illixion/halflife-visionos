@@ -2481,9 +2481,39 @@ extern float g_vr_aim_offset_cl[2];  // defined in hlsdk cl_dll/view.cpp (client
 static _Atomic int g_pending_aim_pitch_cd;
 static _Atomic int g_pending_aim_yaw_cd;
 
+// Immersive +use: cone-override ray for CBasePlayer::PlayerUse (same angle
+// conventions and staging scheme as the aim offset) and the train-throttle
+// target gear. All defined in hlsdk dlls/player.cpp; g_vr_train_state is
+// written server-side each think and only READ here.
+extern float g_vr_use_offset[2];
+extern int   g_vr_use_active;
+extern int   g_vr_train_target;
+extern int   g_vr_train_state;
+static _Atomic int g_pending_use_pitch_cd;
+static _Atomic int g_pending_use_yaw_cd;
+static _Atomic int g_pending_use_active;
+static _Atomic int g_pending_train_target = 99;  // VR_TRAIN_NO_TARGET
+
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg) {
     atomic_store(&g_pending_aim_pitch_cd, (int)lroundf(pitch_deg * 100.0f));
     atomic_store(&g_pending_aim_yaw_cd,   (int)lroundf(yaw_deg * 100.0f));
+}
+
+void lambda_set_use_offset(float pitch_deg, float yaw_deg, int active) {
+    atomic_store(&g_pending_use_pitch_cd, (int)lroundf(pitch_deg * 100.0f));
+    atomic_store(&g_pending_use_yaw_cd,   (int)lroundf(yaw_deg * 100.0f));
+    atomic_store(&g_pending_use_active, active);
+}
+
+// Throttle gear the gesture wants (-1..3); 99 = no throttle gesture held.
+void lambda_set_train_gear(int gear) {
+    atomic_store(&g_pending_train_target, gear);
+}
+
+// 0 = not controlling a train; else 0x100 | (current gear + 1). Torn reads
+// are benign (plain int, written on the engine thread).
+int lambda_train_state(void) {
+    return g_vr_train_state;
 }
 
 static void lambda_aim_offset_apply(void) {
@@ -2496,6 +2526,11 @@ static void lambda_aim_offset_apply(void) {
     g_vr_aim_offset[1] = yaw;
     g_vr_aim_offset_cl[0] = pitch;
     g_vr_aim_offset_cl[1] = yaw;
+    // Immersive +use ray and train throttle, same publish cadence.
+    g_vr_use_offset[0] = (float)atomic_load(&g_pending_use_pitch_cd) / 100.0f;
+    g_vr_use_offset[1] = (float)atomic_load(&g_pending_use_yaw_cd) / 100.0f;
+    g_vr_use_active = atomic_load(&g_pending_use_active);
+    g_vr_train_target = atomic_load(&g_pending_train_target);
 }
 
 // Hand-anchored weapon: the tracked hand pose, camera-local in xash axes

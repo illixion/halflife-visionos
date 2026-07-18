@@ -497,10 +497,10 @@ index 3b3187d..6c6f6a8 100644
  
  	v_origin = pparams->vieworg;
 diff --git a/dlls/player.cpp b/dlls/player.cpp
-index a31504f..06e6414 100644
+index a31504f..1b26ce3 100644
 --- a/dlls/player.cpp
 +++ b/dlls/player.cpp
-@@ -47,6 +47,14 @@ extern DLL_GLOBAL int g_iSkillLevel, gDisplayTitle;
+@@ -47,6 +47,35 @@ extern DLL_GLOBAL int g_iSkillLevel, gDisplayTitle;
  
  BOOL gInitHUD = TRUE;
  
@@ -512,10 +512,187 @@ index a31504f..06e6414 100644
 +// prelink localizes hidden symbols and the bridge externs this by name.
 +extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset[2] = { 0.0f, 0.0f };
 +
++// VR (LambdaVision): immersive +use. g_vr_use_offset points the PlayerUse
++// selection cone along the platform's eye→fingertip ray (pitch/yaw degrees
++// from the view direction, same convention as g_vr_aim_offset);
++// g_vr_use_active gates it — zero means the stock gaze cone. When active,
++// the entity cone search also runs BEFORE the train-mount attempt, so
++// poking a button while standing on a controllable train presses the
++// button instead of grabbing the train.
++extern "C" __attribute__((visibility("default"))) float g_vr_use_offset[2] = { 0.0f, 0.0f };
++extern "C" __attribute__((visibility("default"))) int g_vr_use_active = 0;
++
++// VR train throttle: the platform stages a desired gear (-1 reverse, 0
++// neutral, 1..3 forward; VR_TRAIN_NO_TARGET = gesture inactive) and the
++// PreThink train block steps the train one notch at a time toward it via
++// the same USE_SET path the IN_FORWARD/IN_BACK edges use — sounds and the
++// HUD gear sprite behave exactly like key taps. g_vr_train_state mirrors
++// the live status back to the platform: 0 = not controlling a train, else
++// 0x100 | (gear + 1).
++#define VR_TRAIN_NO_TARGET	99
++extern "C" __attribute__((visibility("default"))) int g_vr_train_target = VR_TRAIN_NO_TARGET;
++extern "C" __attribute__((visibility("default"))) int g_vr_train_state = 0;
++
  extern void CopyToBodyQue( entvars_t *pev);
  extern void respawn( entvars_t *pev, BOOL fCopyCorpse );
  extern Vector VecBModelOrigin( entvars_t *pevBModel );
-@@ -3930,7 +3938,27 @@ void CBasePlayer::ItemPostFrame()
+@@ -1513,6 +1542,49 @@ void CBasePlayer::StartObserver( Vector vecPosition, Vector vecViewAngle )
+ //
+ #define	PLAYER_SEARCH_RADIUS	(float)64
+ 
++// VR: current gear of a controlled train as -1..3 (reverse..full), the
++// same banding TrainSpeed() uses for the HUD sprite.
++static int VR_TrainGear( CBaseEntity *pTrain )
++{
++	int iSpeed = (int)pTrain->pev->speed;
++	float f = pTrain->pev->impulse ? (float)iSpeed / (float)pTrain->pev->impulse : 0.0f;
++
++	if( iSpeed < 0 )
++		return -1;
++	if( iSpeed == 0 )
++		return 0;
++	if( f < 0.33f )
++		return 1;
++	if( f < 0.66f )
++		return 2;
++	return 3;
++}
++
++// VR: the train-mount attempt, factored out of PlayerUse so the immersive
++// use path can try it AFTER the entity cone search instead of before.
++static BOOL VR_TryMountTrain( CBasePlayer *pPlayer )
++{
++	entvars_t *pev = pPlayer->pev;
++	CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
++
++	if( pTrain && !( pev->button & IN_JUMP ) && FBitSet( pev->flags, FL_ONGROUND ) && ( pTrain->ObjectCaps() & FCAP_DIRECTIONAL_USE ) && pTrain->OnControls( pev ) )
++	{
++		pPlayer->m_afPhysicsFlags |= PFLAG_ONTRAIN;
++		pPlayer->m_iTrain = TrainSpeed( (int)pTrain->pev->speed, pTrain->pev->impulse );
++		pPlayer->m_iTrain |= TRAIN_NEW;
++
++		if( pTrain->Classify() == CLASS_VEHICLE )
++		{
++			EMIT_SOUND( ENT( pev ), CHAN_ITEM, "plats/vehicle_ignition.wav", 0.8, ATTN_NORM );
++			( (CFuncVehicle *)pTrain )->m_pDriver = pPlayer;
++		}
++		else
++			EMIT_SOUND( ENT( pev ), CHAN_ITEM, "plats/train_use1.wav", 0.8, ATTN_NORM );
++		return TRUE;
++	}
++	return FALSE;
++}
++
+ void CBasePlayer::PlayerUse( void )
+ {
+ 	if( IsObserver() )
+@@ -1546,26 +1618,14 @@ void CBasePlayer::PlayerUse( void )
+ 				}
+ 				return;
+ 			}
+-			else
++			else if( !g_vr_use_active )
+ 			{	// Start controlling the train!
+-				CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
+-
+-				if( pTrain && !( pev->button & IN_JUMP ) && FBitSet( pev->flags, FL_ONGROUND ) && ( pTrain->ObjectCaps() & FCAP_DIRECTIONAL_USE ) && pTrain->OnControls( pev ) )
+-				{
+-					m_afPhysicsFlags |= PFLAG_ONTRAIN;
+-					m_iTrain = TrainSpeed( (int)pTrain->pev->speed, pTrain->pev->impulse );
+-					m_iTrain |= TRAIN_NEW;
+-
+-					if( pTrain->Classify() == CLASS_VEHICLE )
+-					{
+-						EMIT_SOUND( ENT( pev ), CHAN_ITEM, "plats/vehicle_ignition.wav", 0.8, ATTN_NORM );
+-						( (CFuncVehicle *)pTrain )->m_pDriver = this;
+-					}
+-					else
+-						EMIT_SOUND( ENT( pev ), CHAN_ITEM, "plats/train_use1.wav", 0.8, ATTN_NORM );
++				if( VR_TryMountTrain( this ) )
+ 					return;
+-				}
+ 			}
++			// VR use ray active: the entity cone search below runs FIRST;
++			// the mount attempt happens only when the finger found nothing
++			// usable (see the not-found branch at the end).
+ 		}
+ 	}
+ 
+@@ -1575,7 +1635,19 @@ void CBasePlayer::PlayerUse( void )
+ 	float flMaxDot = VIEW_FIELD_NARROW;
+ 	float flDot;
+ 
+-	UTIL_MakeVectors( pev->v_angle );// so we know which way we are facing
++	// VR: aim the selection cone along the platform's eye→fingertip ray
++	// instead of the view center, and tighten it — a finger is more
++	// precise than gaze, and adjacent buttons must not steal the pick.
++	if( g_vr_use_active )
++	{
++		Vector vrUseAngle = pev->v_angle;
++		vrUseAngle.x += g_vr_use_offset[0];
++		vrUseAngle.y += g_vr_use_offset[1];
++		UTIL_MakeVectors( vrUseAngle );
++		flMaxDot = 0.9f;
++	}
++	else
++		UTIL_MakeVectors( pev->v_angle );// so we know which way we are facing
+ 
+ 	while( ( pObject = UTIL_FindEntityInSphere( pObject, pev->origin, PLAYER_SEARCH_RADIUS ) ) != NULL )
+ 	{
+@@ -1629,7 +1701,16 @@ void CBasePlayer::PlayerUse( void )
+ 	else
+ 	{
+ 		if( m_afButtonPressed & IN_USE )
++		{
++			// VR: nothing usable under the finger — now try the train
++			// mount that the stock code would have tried first.
++			if( g_vr_use_active && !( m_afPhysicsFlags & PFLAG_ONTRAIN ) && m_pTank == 0 )
++			{
++				if( VR_TryMountTrain( this ) )
++					return;
++			}
+ 			EMIT_SOUND( ENT( pev ), CHAN_ITEM, "common/wpn_denyselect.wav", 0.4, ATTN_NORM );
++		}
+ 	}
+ }
+ 
+@@ -1930,6 +2011,7 @@ void CBasePlayer::PreThink( void )
+ 		pev->flags &= ~FL_ONTRAIN;
+ 
+ 	// Train speed control
++	g_vr_train_state = 0;	// re-published below while actually controlling
+ 	if( m_afPhysicsFlags & PFLAG_ONTRAIN )
+ 	{
+ 		CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
+@@ -2006,8 +2088,27 @@ void CBasePlayer::PreThink( void )
+ 				vel = -1;
+ 				pTrain->Use( this, this, USE_SET, vel );
+ 			}
++
++			// VR throttle: step one notch at a time toward the staged
++			// target gear through the same USE_SET path as the key edges,
++			// rate-limited so gears click by like deliberate taps.
++			if( g_vr_train_target != VR_TRAIN_NO_TARGET )
++			{
++				static float s_flNextVRTrainStep = 0.0f;
++				int iWant = g_vr_train_target;
++
++				if( iWant > 3 ) iWant = 3;
++				if( iWant < -1 ) iWant = -1;
++
++				if( s_flNextVRTrainStep < gpGlobals->time && iWant != VR_TrainGear( pTrain ) )
++				{
++					pTrain->Use( this, this, USE_SET, ( iWant > VR_TrainGear( pTrain ) ) ? 1 : -1 );
++					s_flNextVRTrainStep = gpGlobals->time + 0.25f;
++				}
++			}
+ 		}
+ 		iGearId = TrainSpeed( pTrain->pev->speed, pTrain->pev->impulse );
++		g_vr_train_state = 0x100 | ( VR_TrainGear( pTrain ) + 1 );
+ 
+ 		if( iGearId != ( m_iTrain & 0x0F ) )	// Vit_amiN: speed changed
+ 		{
+@@ -3930,7 +4031,27 @@ void CBasePlayer::ItemPostFrame()
  	if( !m_pActiveItem )
  		return;
  

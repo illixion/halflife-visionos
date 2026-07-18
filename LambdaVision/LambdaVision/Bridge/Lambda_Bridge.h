@@ -315,6 +315,20 @@ void lambda_add_view_yaw(float yaw_deg);
 // Thread-safe; latest value wins, applied on the GL worker each tick.
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
 
+// Immersive +use: while active, hlsdk's PlayerUse points its selection cone
+// along view+offset (the eye→fingertip ray; same conventions as the aim
+// offset) and prefers usable entities over train mounting. Pass active=0
+// to restore the stock gaze-centered cone. The +use button itself is still
+// driven separately (lambda_gl_worker_cmd "+use"/"-use").
+void lambda_set_use_offset(float pitch_deg, float yaw_deg, int active);
+
+// Train throttle: desired gear (-1 reverse, 0 neutral, 1..3 forward) that
+// the server steps toward one notch at a time; pass 99 when no throttle
+// gesture is held. lambda_train_state() returns 0 when not controlling a
+// train, else 0x100 | (current gear + 1).
+void lambda_set_train_gear(int gear);
+int  lambda_train_state(void);
+
 // Hand-anchored weapon: tracked hand pose, CAMERA-local in xash axes
 // (x forward, y left, z up). Position in xash units (39.37/m), forward/up
 // unit vectors. While set, the client draws the current weapon's p_ model

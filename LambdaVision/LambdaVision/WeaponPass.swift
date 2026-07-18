@@ -32,7 +32,7 @@ final class WeaponPass {
         var startTurns: Float
         var sweepTurns: Float
     }
-    static let maxArcs = 8
+    static let maxArcs = 12
     private static let arcSlotStride = 256   // constant-buffer slot alignment
 
     private let device: MTLDevice

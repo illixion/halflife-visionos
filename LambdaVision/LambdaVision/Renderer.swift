@@ -246,6 +246,10 @@ actor Renderer {
         var menuSpread: Float = 0 // live 🤌 fingertip spread, m
         var menuOpen = false      // radial weapon menu currently up
         var menuSel = -1          // armed sector (0-based; -1 = none/cancel)
+        var useReach: Float = 0   // off-hand fingertip forward reach, m
+        var useHeld = false       // +use currently held by the reach gesture
+        var onTrain = false       // server says we're controlling a train
+        var trainGear = 0         // current gear (-1..3) while on a train
         var moveClutch = false    // off-hand joystick clutch engaged
         var joyX: Float = 0       // joystick strafe (-1..1, + = right)
         var joyY: Float = 0       // joystick forward (-1..1, + = forward)
@@ -276,6 +280,9 @@ actor Renderer {
             String(format: "wpn menu: spread %.3f  %@  sel %@",
                    d.menuSpread, d.menuOpen ? "OPEN" : "—",
                    d.menuSel >= 0 ? "slot\(d.menuSel + 1)" : "—"),
+            String(format: "use: reach %.2f  %@   train: %@",
+                   d.useReach, d.useHeld ? "HELD" : "—",
+                   d.onTrain ? "gear \(d.trainGear)" : "—"),
             String(format: "move: clutch %@  joy(%+.2f,%+.2f)  vert %@",
                    d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
             String(format: "move dbg: hand %@  pinchDist %.3f  fist %d  recenter %d",
@@ -1432,15 +1439,38 @@ actor Renderer {
                 let hm = anchor.originFromAnchorTransform
                 let headFwd = SIMD3<Float>(-hm.columns.2.x, -hm.columns.2.y, -hm.columns.2.z)
                 let headRight = SIMD3<Float>(hm.columns.0.x, hm.columns.0.y, hm.columns.0.z)
+                let headPos = SIMD3<Float>(hm.columns.3.x, hm.columns.3.y, hm.columns.3.z)
                 let moveHand = Renderer.dominantHandIsLeft
                     ? handTracking.latestAnchors.rightHand
                     : handTracking.latestAnchors.leftHand
-                HandMovement.shared.poll(
+                // Train status from the server (0 = free; else 0x100 | gear+1).
+                let trainState = Int(lambda_train_state())
+                let onTrain = (trainState & 0x100) != 0
+                let trainGear = onTrain ? (trainState & 0xFF) - 1 : 0
+                Renderer.aimDiag.onTrain = onTrain
+                Renderer.aimDiag.trainGear = trainGear
+                let useRay = HandMovement.shared.poll(
                     active: Renderer.gestureInputEnabled && lambda_menu_active() == 0,
                     movementHand: moveHand,
                     headForward: headFwd,
                     headRight: headRight,
+                    headPos: headPos,
+                    onTrain: onTrain,
+                    trainGear: trainGear,
                     now: CACurrentMediaTime())
+                // Stage the eye→fingertip ray as the PlayerUse cone override,
+                // converted to pitch/yaw offsets from the current view — the
+                // same composition the fire aim offset uses.
+                if let u = useRay {
+                    let ux = SIMD3<Float>(-u.z, -u.x, u.y)  // Apple → xash basis
+                    let uPitch = atan2f(-ux.z, sqrtf(ux.x * ux.x + ux.y * ux.y)) * rad2deg
+                    let uYaw   = atan2f(ux.y, ux.x) * rad2deg
+                    var duy = uYaw - yawDeg
+                    if duy > 180 { duy -= 360 } else if duy < -180 { duy += 360 }
+                    lambda_set_use_offset(uPitch - pitchDeg, duy, 1)
+                } else {
+                    lambda_set_use_offset(0, 0, 0)
+                }
             }
 
             // Inputs for gaze→menu cursor mapping (used off-thread when a
@@ -1786,6 +1816,25 @@ actor Renderer {
                                                                 : SIMD4(0.45, 0.47, 0.52, 1),
                                                    startTurns: Float(i) / 5 + gap,
                                                    sweepTurns: 1.0 / 5 - 2 * gap))
+                    }
+                }
+                // Train-throttle gear ladder: five rings stacked above the
+                // grab point (R at the bottom, full speed on top); the ring
+                // for the CURRENT gear fills amber, the armed target (while
+                // the train steps toward it) shows as a brighter outline.
+                if let gauge = HandMovement.throttleGauge {
+                    for g in -1...3 {
+                        let pos = gauge.center + SIMD3<Float>(0, 0.06 + Float(g + 1) * 0.035, 0)
+                        let isCur = (g == gauge.gear)
+                        let isTgt = (g == gauge.target)
+                        arcs.append(WeaponPass.Arc(center: pos,
+                                                   right: headRight, up: headUp,
+                                                   innerR: isCur ? 0.002 : 0.009,
+                                                   outerR: isCur ? 0.013 : (isTgt ? 0.014 : 0.012),
+                                                   color: isCur ? SIMD4(1.0, 0.78, 0.25, 1)
+                                                        : (isTgt ? SIMD4(0.95, 0.95, 0.95, 1)
+                                                                 : SIMD4(0.45, 0.47, 0.52, 1)),
+                                                   startTurns: 0, sweepTurns: 1))
                     }
                 }
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
