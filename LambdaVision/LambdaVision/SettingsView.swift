@@ -82,7 +82,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Input")
                 } footer: {
-                    Text("“Hand-tracked weapon model” draws the weapon in your hand, tracking it directly (world-lit); off falls back to the classic engine-drawn weapon. “Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. “Immersive gesture input” lets you fire with a finger-gun — curl your dominant index finger to pull the trigger (pinch still fires too). More gestures (reload, jump/crouch taps, weapon wheel) arrive in later updates.")
+                    Text("“Hand-tracked weapon model” draws the weapon in your hand, tracking it directly (world-lit); off falls back to the classic engine-drawn weapon. “Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. “Immersive gesture input” lets you fire with a finger-gun — curl your dominant index finger to pull the trigger (pinch still fires too). Reload by curling your thumb down (index extended) and holding until the ring above the weapon fills. Move with the other hand: pinch thumb+index and drag like a joystick; raise or drop the pinched hand to jump or crouch. More gestures (weapon wheel) arrive in later updates.")
                 }
 
                 Section {

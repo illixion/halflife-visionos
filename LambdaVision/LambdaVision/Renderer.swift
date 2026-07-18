@@ -197,6 +197,13 @@ actor Renderer {
     nonisolated(unsafe) static var gestureInputEnabled: Bool = false
     nonisolated(unsafe) static var fireCurlOn: Float = 0.55   // extension below this → +attack
     nonisolated(unsafe) static var fireCurlOff: Float = 0.75  // extension above this → -attack
+    // Reload gesture (dominant hand): curl the thumb down while the index
+    // stays extended (off the trigger), hold for reloadHoldSeconds → +reload.
+    // A progress ring above the weapon fills during the hold, so a stray
+    // curl is visible before it fires. Hysteresis mirrors the finger-gun.
+    nonisolated(unsafe) static var thumbCurlOn: Float = 0.45   // extension below this → hold begins
+    nonisolated(unsafe) static var thumbCurlOff: Float = 0.60  // extension above this → hold cancels
+    nonisolated(unsafe) static var reloadHoldSeconds: Double = 0.75
     // Weapon grip correction (applied in the hand-bone-local frame between the
     // world hand frame and the GoldSrc→metres basis). GoldSrc hand bones and
     // ARKit hand frames don't line up perfectly; these Euler degrees + push
@@ -225,6 +232,8 @@ actor Renderer {
         var gestureOn = false     // "Immersive gesture input" setting, render-thread view
         var indexExt: Float = 0   // live index extension ratio (finger-gun trigger)
         var fireGesture = false   // finger-gun trigger currently held
+        var thumbExt: Float = 0   // live thumb extension ratio (reload gesture)
+        var reloadProg: Float = 0 // reload hold progress 0..1 (0 = idle/fired)
         var moveClutch = false    // off-hand joystick clutch engaged
         var joyX: Float = 0       // joystick strafe (-1..1, + = right)
         var joyY: Float = 0       // joystick forward (-1..1, + = forward)
@@ -232,6 +241,7 @@ actor Renderer {
         var moveHandSeen = false  // off-hand anchor tracked this frame
         var pinchDist: Float = -1 // thumb↔index distance, m (-1 = no hand)
         var fistCount = 0         // fingers curled to metacarpal (>=3 = suppressed)
+        var nRecenter = 0         // head-baseline re-anchors (resume / origin jump)
     }
     nonisolated(unsafe) static var aimDiag = AimDiag()
 
@@ -249,10 +259,12 @@ actor Renderer {
               + "noSkel:\(d.nNoSkeleton) noAnchor:\(d.nNoAnchor) provDown:\(d.nProviderDown)",
             String(format: "finger-gun: %@  indexExt %.2f  trigger %@",
                    d.gestureOn ? "on" : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
+            String(format: "reload: thumbExt %.2f  hold %d%%",
+                   d.thumbExt, Int(d.reloadProg * 100)),
             String(format: "move: clutch %@  joy(%+.2f,%+.2f)  vert %@",
                    d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
-            String(format: "move dbg: hand %@  pinchDist %.3f  fist %d",
-                   d.moveHandSeen ? "seen" : "—", d.pinchDist, d.fistCount),
+            String(format: "move dbg: hand %@  pinchDist %.3f  fist %d  recenter %d",
+                   d.moveHandSeen ? "seen" : "—", d.pinchDist, d.fistCount, d.nRecenter),
         ]
     }
 
@@ -334,6 +346,7 @@ actor Renderer {
         var localFwd: SIMD3<Float>
         var localUp: SIMD3<Float>
         var indexExtension: Float                 // index tip↔knuckle / palm length; low = curled (trigger)
+        var thumbExtension: Float                 // thumb tip↔index knuckle / palm length; low = curled (reload)
     }
 
     private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
@@ -399,6 +412,13 @@ actor Renderer {
         let idxExt  = palmLen > 1e-4
             ? simd_length(worldPos(skel.joint(.indexFingerTip)) - worldPos(idxK)) / palmLen
             : 1.0
+        // Thumb curl for the reload gesture: thumb tip↔index knuckle,
+        // normalised like the index. Extended/raised thumb reads high
+        // (~0.5+); curled down onto the fist it approaches the index
+        // knuckle and drops (~0.3). Tuned live via the diagnostics line.
+        let thumbExt = palmLen > 1e-4
+            ? simd_length(worldPos(skel.joint(.thumbTip)) - worldPos(idxK)) / palmLen
+            : 1.0
 
         // World → head-local (rotation only for directions), then Apple →
         // xash camera basis: (x,y,z) → (-z,-x,y).
@@ -414,15 +434,37 @@ actor Renderer {
                           localPos: SIMD3(-p4.z, -p4.x, p4.y),
                           localFwd: headLocalDir(fwd),
                           localUp: headLocalDir(up),
-                          indexExtension: idxExt)
+                          indexExtension: idxExt,
+                          thumbExtension: thumbExt)
     }
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
     private var headBaselinePos: SIMD3<Float>? = nil
 
+    // Recenter support. The baselines above are captured once and normally
+    // never move, but the ARKit world origin CAN move under them: a
+    // crown-hold recenter swaps the origin outright, and hiding the
+    // immersive space long enough for visionOS to drop tracking makes it
+    // relocalize to a shifted origin on resume. Either way the stale
+    // baseline turns into a huge headOffset and the camera "teleports"
+    // into neighboring rooms. `recenterPending` (render thread only) is
+    // set by renderLoop when the layer resumes from .paused; origin swaps
+    // mid-session are self-detected in renderFrame as an implausible
+    // pose jump between samples (there is no public recenter callback).
+    private var recenterPending = false
+    private var lastHeadSample: (pos: SIMD3<Float>, yaw: Float, time: Double)? = nil
+
     // Finger-gun trigger state (render thread): true while +attack is held via
     // the index-curl gesture, so we only send +attack/-attack on transitions.
     private var fireGestureDown = false
+
+    // Reload gesture state (render thread). reloadStart is the timestamp the
+    // thumb-curl hold began (nil = not holding); reloadLatched blocks repeat
+    // fires until the thumb re-extends; reloadRingProgress is what the
+    // weapon pass draws this frame (0 = no ring).
+    private var reloadStart: Double? = nil
+    private var reloadLatched = false
+    private var reloadRingProgress: Float = 0
 
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -894,7 +936,22 @@ actor Renderer {
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
-        let rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
+        // Game assets: prefer a copy pushed to Documents/GameData (one-time
+        // `scripts/push-assets.sh` — survives reinstalls, so code-only
+        // installs stay small/fast). Fall back to assets bundled into the
+        // app (`build-and-sign.sh --set BUNDLE_HL_ASSETS=1`).
+        let docsGameData = (try? FileManager.default.url(
+            for: .documentDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true))
+            .map { $0.appendingPathComponent("GameData").path }
+        let rodir: String
+        if let d = docsGameData,
+           FileManager.default.fileExists(atPath: d + "/valve/liblist.gam") {
+            rodir = d
+        } else {
+            rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
+        }
+        print("[LambdaVision] rodir: \(rodir)")
         let extra = ["-dev", "2", "-console", "-noip", "-noenginemouse",
                      "-rodir", rodir, "-game", "valve",
                      "+map", "c0a0"] // tram ride (Black Mesa Inbound)
@@ -1093,6 +1150,37 @@ actor Renderer {
             let pitchDeg = atan2f(-fwd.z, horizLen) * rad2deg
             let yawDeg   = atan2f(fwd.y, fwd.x) * rad2deg
             let rollDeg  = atan2f(left.z, up.z) * rad2deg
+
+            // Recenter: drop the baselines so they re-capture at the CURRENT
+            // pose below — headOffset collapses to 0 (camera lands back on
+            // the player entity) and the yaw delta resets (head-forward maps
+            // onto the engine's current view yaw). Triggered by renderLoop
+            // on resume from a paused layer, or self-detected here when the
+            // head "moves" faster than a head physically can between samples
+            // — the signature of an ARKit origin swap (crown-hold recenter
+            // or relocalization after tracking loss). Thresholds scale with
+            // the sample gap so a real walk during a tracking dropout isn't
+            // mistaken for a jump.
+            var recenter = recenterPending
+            recenterPending = false
+            if !recenter, let last = lastHeadSample {
+                let dt = Float(min(max(presentTime - last.time, 0.001), 10.0))
+                var dY = yawDeg - last.yaw
+                if dY > 180 { dY -= 360 } else if dY < -180 { dY += 360 }
+                let moved = simd_distance(cur.pos, last.pos)
+                if moved > 0.3 + 1.5 * dt || abs(dY) > 25 + 180 * dt {
+                    recenter = true
+                }
+            }
+            lastHeadSample = (cur.pos, yawDeg, presentTime)
+            if recenter, headBaselineYaw != nil {
+                headBaselineYaw = nil
+                headBaselinePos = nil
+                Renderer.aimDiag.nRecenter += 1
+                print("[LambdaVision] recenter: re-anchoring head baseline "
+                    + "(#\(Renderer.aimDiag.nRecenter))")
+            }
+
             if headBaselineYaw == nil {
                 headBaselineYaw = yawDeg
                 headBaselinePos = cur.pos
@@ -1205,6 +1293,47 @@ actor Renderer {
             }
             Renderer.aimDiag.gestureOn = Renderer.gestureInputEnabled
             Renderer.aimDiag.fireGesture = fireGestureDown
+
+            // Reload gesture (opt-in, dominant hand): thumb curled down while
+            // the index stays extended (off the trigger). The hold must last
+            // reloadHoldSeconds before +reload fires — the progress ring the
+            // weapon pass draws makes a stray curl visible before it commits.
+            // Hysteresis on the thumb metric; curling the index (firing)
+            // cancels the hold outright. Latched until the thumb re-extends
+            // so one hold = one reload.
+            var thumbHold = reloadStart != nil
+            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+               let hand = handSample {
+                Renderer.aimDiag.thumbExt = hand.thumbExtension
+                if hand.indexExtension < Renderer.fireCurlOn {
+                    thumbHold = false   // trigger pulled — never reload mid-fire
+                } else if hand.thumbExtension < Renderer.thumbCurlOn,
+                          hand.indexExtension > Renderer.fireCurlOff {
+                    thumbHold = true
+                } else if hand.thumbExtension > Renderer.thumbCurlOff {
+                    thumbHold = false
+                }
+                // else: inside a hysteresis band — keep the current state.
+            } else {
+                thumbHold = false
+            }
+            if thumbHold {
+                if reloadStart == nil { reloadStart = presentTime }
+                let prog = Float(min((presentTime - reloadStart!) / Renderer.reloadHoldSeconds, 1.0))
+                if prog >= 1, !reloadLatched {
+                    reloadLatched = true
+                    _ = "+reload".withCString { lambda_gl_worker_cmd($0) }
+                    _ = "-reload".withCString { lambda_gl_worker_cmd($0) }
+                }
+                // Hide the ring once fired: the full ring vanishing is the
+                // "it took" cue; holding longer must not re-arm.
+                reloadRingProgress = reloadLatched ? 0 : prog
+            } else {
+                reloadStart = nil
+                reloadLatched = false
+                reloadRingProgress = 0
+            }
+            Renderer.aimDiag.reloadProg = reloadRingProgress
 
             // Off-hand (non-dominant) locomotion joystick. Head axes in Apple
             // world (forward = -col2, right = +col0); HandMovement flattens Y.
@@ -1541,6 +1670,17 @@ actor Renderer {
                 var lrgb: [Float] = [0.5, 0.5, 0.5]
                 lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
+                // Reload-hold ring: floats above the weapon, billboarded to
+                // the head so it reads from any angle.
+                var ring: WeaponPass.Ring? = nil
+                if reloadRingProgress > 0 {
+                    let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
+                    let headUp    = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
+                    ring = WeaponPass.Ring(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
+                                           right: headRight,
+                                           up: headUp,
+                                           progress: reloadRingProgress)
+                }
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
                                   viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
                                   viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
@@ -1548,7 +1688,8 @@ actor Renderer {
                                   model: model,
                                   lightDir: normalize(SIMD3<Float>(0.2, 1.0, 0.3)),
                                   lightColor: lc * 0.7,
-                                  ambient: lc * 0.6)
+                                  ambient: lc * 0.6,
+                                  ring: ring)
             }
         }
 
@@ -1588,6 +1729,14 @@ actor Renderer {
                 layerRenderer.waitUntilRunning()
                 lambda_snd_activate(1)
                 PhaseAudioEngine.shared.setActive(true)
+                // While hidden, visionOS may have lost tracking and
+                // relocalized to a shifted origin (or the user recentered) —
+                // re-anchor the head baselines on the first resumed frame so
+                // the camera resumes on the player entity, not a stale
+                // room-space offset. The user also physically moved the
+                // headset meanwhile in most cases, so a resume-recenter is
+                // the right behavior even when the origin didn't shift.
+                recenterPending = true
                 continue
             } else {
                 Task { @MainActor in

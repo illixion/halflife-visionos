@@ -61,3 +61,39 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
     float3 lit = c.rgb * (u.ambient.rgb + u.lightColor.rgb * ndl);
     return float4(lit, 1.0);
 }
+
+// ---- Reload-progress ring -------------------------------------------------
+// Procedural arc billboard (triangle strip, no vertex buffer): vertex_id
+// walks RING_SEGMENTS steps around the sweep, alternating inner/outer
+// radius. progress scales the sweep angle, so the ring "fills" clockwise
+// from 12 o'clock as the reload gesture is held.
+
+#define RING_SEGMENTS 48
+
+struct RingInOut
+{
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex RingInOut ringVertexShader(uint vid [[vertex_id]],
+                                  ushort amp_id [[amplification_id]],
+                                  constant RingUniforms & r [[ buffer(BufferIndexUniforms) ]],
+                                  constant ViewProjectionArray & vp [[ buffer(BufferIndexViewProjection) ]])
+{
+    uint  seg = vid >> 1;
+    float t   = float(seg) / float(RING_SEGMENTS);
+    float a   = M_PI_F * 0.5 - t * r.progress * 2.0 * M_PI_F;
+    float rad = (vid & 1) ? r.right.w : r.up.w;   // outer / inner
+    float3 world = r.center.xyz
+                 + (cos(a) * r.right.xyz + sin(a) * r.up.xyz) * rad;
+    RingInOut out;
+    out.position = vp.viewProjectionMatrix[amp_id] * float4(world, 1.0);
+    out.color = r.color;
+    return out;
+}
+
+fragment float4 ringFragmentShader(RingInOut in [[stage_in]])
+{
+    return in.color;
+}

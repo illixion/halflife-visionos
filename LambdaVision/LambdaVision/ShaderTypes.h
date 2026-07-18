@@ -62,6 +62,20 @@ typedef struct
     simd_float4     ambient;     // rgb = ambient term, w = alpha-test flag
 } WeaponUniforms;
 
+// Reload-progress ring: an unlit world-anchored arc billboard drawn at the
+// end of the weapon pass. The arc is generated procedurally in the vertex
+// shader (no vertex buffer); center/right/up define the billboard frame in
+// Apple world metres, progress is the sweep fraction (0..1, clockwise from
+// 12 o'clock).
+typedef struct
+{
+    simd_float4 center;    // xyz = world-space ring center
+    simd_float4 right;     // xyz = billboard right axis, w = outer radius (m)
+    simd_float4 up;        // xyz = billboard up axis,    w = inner radius (m)
+    simd_float4 color;     // rgba (no blending; drawn opaque)
+    float       progress;  // 0..1 arc sweep
+} RingUniforms;
+
 // Lambda engine bridge — only visible to Swift/ObjC, not to Metal shaders.
 #ifndef __METAL_VERSION__
 #include "Bridge/Lambda_Bridge.h"

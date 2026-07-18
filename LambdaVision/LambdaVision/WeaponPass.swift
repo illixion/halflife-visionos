@@ -18,9 +18,21 @@ import CompositorServices
 import simd
 
 final class WeaponPass {
+    /// Reload-progress ring drawn at the tail of the weapon pass: a
+    /// world-anchored arc billboard (see ringVertexShader). All fields in
+    /// Apple world metres; progress 0..1 fills clockwise from 12 o'clock.
+    struct Ring {
+        var center: SIMD3<Float>
+        var right: SIMD3<Float>   // billboard axes (unit)
+        var up: SIMD3<Float>
+        var progress: Float
+    }
+
     private let device: MTLDevice
     private let pipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
+    private let ringPipeline: MTLRenderPipelineState
+    private let ringDepthState: MTLDepthStencilState
     private let vertexArgTable: MTL4ArgumentTable
     private let fragmentArgTable: MTL4ArgumentTable
     private let colorFormat: MTLPixelFormat
@@ -47,6 +59,7 @@ final class WeaponPass {
 
     // Uniform ring (one WeaponUniforms per in-flight frame).
     private var uniformBuffers: [MTLBuffer]
+    private var ringUniformBuffers: [MTLBuffer] = []
 
     var isReady: Bool { vertexBuffer != nil && !submeshes.isEmpty }
 
@@ -86,6 +99,22 @@ final class WeaponPass {
         dsd.isDepthWriteEnabled = true
         self.depthState = device.makeDepthStencilState(descriptor: dsd)!
 
+        // Ring: procedural arc, no vertex descriptor, always on top (it's a
+        // UI readout — the weapon must not be able to occlude it).
+        let rpdsc = MTLRenderPipelineDescriptor()
+        rpdsc.label = "ReloadRingPipeline"
+        rpdsc.vertexFunction = library?.makeFunction(name: "ringVertexShader")
+        rpdsc.fragmentFunction = library?.makeFunction(name: "ringFragmentShader")
+        rpdsc.rasterSampleCount = 1
+        rpdsc.colorAttachments[0].pixelFormat = colorFormat
+        rpdsc.depthAttachmentPixelFormat = depthFormat
+        rpdsc.maxVertexAmplificationCount = layerRenderer.properties.viewCount
+        self.ringPipeline = try! device.makeRenderPipelineState(descriptor: rpdsc)
+        let rdsd = MTLDepthStencilDescriptor()
+        rdsd.depthCompareFunction = .always
+        rdsd.isDepthWriteEnabled = false
+        self.ringDepthState = device.makeDepthStencilState(descriptor: rdsd)!
+
         let vDesc = MTL4ArgumentTableDescriptor()
         vDesc.maxBufferBindCount = 4            // vertex@0, uniforms@2, viewProj@3
         self.vertexArgTable = try! device.makeArgumentTable(descriptor: vDesc)
@@ -96,6 +125,10 @@ final class WeaponPass {
 
         self.uniformBuffers = (0..<maxBuffersInFlight).map { _ in
             device.makeBuffer(length: MemoryLayout<WeaponUniforms>.stride,
+                              options: .storageModeShared)!
+        }
+        self.ringUniformBuffers = (0..<maxBuffersInFlight).map { _ in
+            device.makeBuffer(length: MemoryLayout<RingUniforms>.stride,
                               options: .storageModeShared)!
         }
     }
@@ -185,6 +218,7 @@ final class WeaponPass {
         if let vertexBuffer { r.append(vertexBuffer) }
         if let depth { r.append(depth) }
         r.append(uniformBuffers[uniformBufferIndex])
+        r.append(ringUniformBuffers[uniformBufferIndex])
         r.append(contentsOf: textures)
         return r
     }
@@ -199,7 +233,8 @@ final class WeaponPass {
                 model: float4x4,
                 lightDir: SIMD3<Float>,
                 lightColor: SIMD3<Float>,
-                ambient: SIMD3<Float>) {
+                ambient: SIMD3<Float>,
+                ring: Ring? = nil) {
         guard isReady, let depth else { return }
 
         let ub = uniformBuffers[uniformBufferIndex]
@@ -251,6 +286,24 @@ final class WeaponPass {
             fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
             enc.drawPrimitives(primitiveType: .triangle,
                                vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
+        }
+
+        // Reload-progress ring, drawn last with depth test off so the weapon
+        // can't hide it. 2*(RING_SEGMENTS+1) strip vertices, generated in the
+        // vertex shader — must match RING_SEGMENTS in WeaponShaders.metal.
+        if let ring, ring.progress > 0 {
+            let rub = ringUniformBuffers[uniformBufferIndex]
+            var ru = RingUniforms(center: SIMD4(ring.center, 1),
+                                  right: SIMD4(ring.right, 0.030),   // outer radius
+                                  up: SIMD4(ring.up, 0.022),         // inner radius
+                                  color: SIMD4(1.0, 0.78, 0.25, 1),  // HL amber
+                                  progress: ring.progress)
+            memcpy(rub.contents(), &ru, MemoryLayout<RingUniforms>.size)
+            enc.setRenderPipelineState(ringPipeline)
+            enc.setDepthStencilState(ringDepthState)
+            vertexArgTable.setAddress(rub.gpuAddress, index: BufferIndex.uniforms.rawValue)
+            enc.drawPrimitives(primitiveType: .triangleStrip,
+                               vertexStart: 0, vertexCount: 2 * (48 + 1))
         }
         enc.endEncoding()
     }
