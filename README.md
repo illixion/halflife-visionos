@@ -71,12 +71,20 @@ This grabs ~507 MB across 5 depots:
 (Build ID **5433873**, captured 2026-05-10. Valve does occasionally re-mint
 the legacy build; manifests may shift.)
 
-The folder we care about is `HalfLifeAssets/valve/`. The Xcode build's
-"Bundle HalfLifeAssets" Run Script phase rsyncs this directory into
-`LambdaVision.app/GameData/valve/` at build time, and the engine is
-launched with `-rodir <bundle>/GameData -game valve`. There is no app-side
-asset import flow — drop the folder there and rebuild. (No App Store
-target; this ships via Xcode + GitHub only, so bundling is fine.)
+The folder we care about is `HalfLifeAssets/valve/`. Assets reach the
+device out of band: after installing the app once, run
+`./scripts/push-assets.sh` to copy every gamedir (valve/, valve_hd/,
+mods…) into the app's `Documents/GameData` via `devicectl`. The copy is
+incremental (unchanged files are skipped; `--delete` mirrors removals), it
+survives reinstalls, and code-only rebuilds no longer re-send ~450 MB per
+install. The engine prefers `Documents/GameData` as `-rodir` when
+`valve/liblist.gam` is present there.
+
+For a self-contained app (assets baked into the bundle — e.g. handing a
+build to someone), pass `--set BUNDLE_HL_ASSETS=1` to
+`scripts/build-and-sign.sh` (re-enables the "Bundle HalfLifeAssets" Run
+Script phase); the engine falls back to `<bundle>/GameData` when no
+Documents copy exists.
 
 The folder is NOT redistributable; it's already gitignored.
 

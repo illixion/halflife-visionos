@@ -14,6 +14,13 @@ set -euo pipefail
 #   ./scripts/build-and-sign.sh --no-deploy      # Sign but don't install to device
 #   ./scripts/build-and-sign.sh --sign-only      # Skip build, sign existing IPA
 #   ./scripts/build-and-sign.sh --ipa path.ipa   # Sign a specific IPA (implies --sign-only)
+#   ./scripts/build-and-sign.sh --set KEY=VALUE  # Extra xcodebuild setting (repeatable)
+#
+# This script is SHARED — the same file is replicated byte-identical across
+# repos (Spatialcraft, VisionVNC, VisionProHomeAssistant, spatialstash,
+# Lambda_VisionPro). Repo-specific behavior belongs in build-signing.conf
+# (PRE_BUILD_HOOK, EXTRA_BUILD_SETTINGS) or the hook script it points at —
+# never here. If you fix a bug in this file, copy it to the other repos.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -35,8 +42,8 @@ P12_PASSWORD="${P12_PASSWORD:-}"
 DEV_P12_PASSWORD="${DEV_P12_PASSWORD:-$P12_PASSWORD}"
 DIST_P12_PASSWORD="${DIST_P12_PASSWORD:-$P12_PASSWORD}"
 PRE_BUILD_HOOK="${PRE_BUILD_HOOK:-}"
-# Extra xcodebuild settings (bash array), e.g. the Moonlight flag:
-#   EXTRA_BUILD_SETTINGS=('SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) MOONLIGHT_ENABLED')
+# Extra xcodebuild settings (bash array), e.g. compilation conditions:
+#   EXTRA_BUILD_SETTINGS=('SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) SOME_FLAG')
 if [[ -z "${EXTRA_BUILD_SETTINGS+x}" ]]; then EXTRA_BUILD_SETTINGS=(); fi
 
 required_vars=(
@@ -64,9 +71,10 @@ while [[ $# -gt 0 ]]; do
         --distribution)  USE_DIST=true; shift ;;
         --sign-only)     SIGN_ONLY=true; shift ;;
         --no-deploy)     NO_DEPLOY=true; shift ;;
+        --set)           EXTRA_BUILD_SETTINGS+=("$2"); shift 2 ;;
         --ipa)           INPUT_IPA="$2"; SIGN_ONLY=true; shift 2 ;;
         -h|--help)
-            sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '4,23p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -226,11 +234,24 @@ if [[ "$SIGN_ONLY" == false ]]; then
         build
 
     echo "==> Packaging IPA..."
-    APP_PATH=$(find "$BUILD_DIR/DerivedData" -name '*.app' -type d | head -1)
+    # Two stale-.app traps live in DerivedData, both of which end with an
+    # OLD binary silently installed on device:
+    #   1. the OTHER configuration's products (Debug-xros vs Release-xros)
+    #   2. a product left over from a previous product/target name
+    # So constrain the search to THIS configuration's products dir AND this
+    # target's product name. Fall back to any *.app within the config dir
+    # (with a warning) in case the product name differs from TARGET_NAME.
+    PRODUCTS_DIR="$BUILD_DIR/DerivedData/Build/Products"
+    APP_PATH=$(find "$PRODUCTS_DIR" -maxdepth 2 -type d -name "${TARGET_NAME}.app" -path "*/${CONFIG}-*" 2>/dev/null | head -1)
     if [[ -z "$APP_PATH" ]]; then
-        echo "ERROR: No .app bundle found in DerivedData" >&2
+        APP_PATH=$(find "$PRODUCTS_DIR" -maxdepth 2 -type d -name '*.app' -path "*/${CONFIG}-*" 2>/dev/null | head -1)
+        [[ -n "$APP_PATH" ]] && echo "WARNING: ${TARGET_NAME}.app not found; using $(basename "$APP_PATH") (product name != TARGET_NAME?)"
+    fi
+    if [[ -z "$APP_PATH" ]]; then
+        echo "ERROR: No .app bundle found in $PRODUCTS_DIR/${CONFIG}-*" >&2
         exit 1
     fi
+    echo "  App: $APP_PATH"
     rm -rf "$BUILD_DIR/Payload"
     mkdir -p "$BUILD_DIR/Payload"
     cp -R "$APP_PATH" "$BUILD_DIR/Payload/"
@@ -271,7 +292,7 @@ if [[ -z "$APP_BUNDLE" ]]; then
 fi
 
 # Step 4.5: Enforce bundle identities. A command-line
-# PRODUCT_BUNDLE_IDENTIFIER override would hit EVERY target (the broadcast
+# PRODUCT_BUNDLE_IDENTIFIER override would hit EVERY target (an app
 # extension would clone the app's ID → installd DuplicateIdentifier), so the
 # IDs are patched per-bundle here instead.
 echo "==> Setting bundle identifiers..."

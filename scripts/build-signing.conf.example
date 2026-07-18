@@ -35,10 +35,14 @@ DIST_PROFILE_PATH="$HOME/Downloads/Distribution.mobileprovision"
 # --- Deployment ---
 DEVICE_NAME="Apple Vision Pro"
 
-# --- Optional pre-build hook ---
-# Fetches xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework (idempotent).
-# Uncomment if building on a fresh clone.
-# PRE_BUILD_HOOK="./VisionPort/setup.sh"
+# --- Pre-build hook ---
+# Repo-specific pre-build logic (fetches vendored deps on a fresh clone,
+# verifies libxash.a exists). Lives in its own script so build-and-sign.sh
+# stays identical across repos.
+PRE_BUILD_HOOK="./scripts/pre-build.sh"
 
 # --- Extra xcodebuild settings (bash array) ---
+# One-off settings can also be passed per-invocation with --set KEY=VALUE,
+# e.g. `./scripts/build-and-sign.sh --set BUNDLE_HL_ASSETS=1` to bake HL
+# assets into the bundle (default: ship via scripts/push-assets.sh).
 # EXTRA_BUILD_SETTINGS=()
