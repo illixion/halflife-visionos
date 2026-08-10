@@ -69,7 +69,7 @@ enum FrameTimingStats {
             capacity: 512
         )
         profiler.onWindowClosed = { snapshot in
-            print("[FT] app(ms) " + snapshot.percentileLine(keys: order))
+            AppLog.render.line("[FT] app(ms) " + snapshot.percentileLine(keys: order))
         }
         return profiler
     }()
@@ -797,7 +797,7 @@ actor Renderer {
         let workerRc = workerStatus.withUnsafeMutableBufferPointer { buf in
             lambda_gl_worker_setup(buf.baseAddress, Int32(buf.count))
         }
-        print("[LambdaVision] gl-worker setup rc=\(workerRc): \(String(cString: workerStatus))")
+        AppLog.render.line("[LambdaVision] gl-worker setup rc=\(workerRc): \(String(cString: workerStatus))")
 
         var devStatus = [CChar](repeating: 0, count: 384)
         let rc = devStatus.withUnsafeMutableBufferPointer { buf in
@@ -824,7 +824,7 @@ actor Renderer {
             w = rateMap.screenSize.width
             h = rateMap.screenSize.height
             let p0 = rateMap.physicalSize(layer: 0)
-            print("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) "
+            AppLog.render.line("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) "
                   + "logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
         }
         let logicalW = w
@@ -849,7 +849,7 @@ actor Renderer {
         }
         w = Int((Double(w) * s).rounded())
         h = Int((Double(h) * s).rounded())
-        print("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) bgra8Unorm via ANGLE")
+        AppLog.render.line("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) bgra8Unorm via ANGLE")
 
         // ANGLE renders into this Swift-allocated MTLTexture each frame; the
         // display pass samples it. GL is the only pixel producer.
@@ -954,12 +954,12 @@ actor Renderer {
                     commandQueueResidencySet.addAllocations([fm, dm])
                     commandQueueResidencySet.commit()
                     #endif
-                    print("[LambdaVision] FXAA + MetalFX spatial upscale \(w)x\(h) → \(logicalW)x\(logicalH)")
+                    AppLog.render.line("[LambdaVision] FXAA + MetalFX spatial upscale \(w)x\(h) → \(logicalW)x\(logicalH)")
                 }
             }
         }
         if displayMap == nil {
-            print("[LambdaVision] MetalFX upscale inactive — displaying colorMap directly")
+            AppLog.render.line("[LambdaVision] MetalFX upscale inactive — displaying colorMap directly")
         }
     }
 
@@ -1002,7 +1002,7 @@ actor Renderer {
         } else {
             rodir = (Bundle.main.resourcePath ?? "") + "/GameData"
         }
-        print("[LambdaVision] rodir: \(rodir)")
+        AppLog.render.line("[LambdaVision] rodir: \(rodir)")
         let extra = ["-dev", "2", "-console", "-noip", "-noenginemouse",
                      "-rodir", rodir, "-game", "valve",
                      "+map", "c0a0"] // tram ride (Black Mesa Inbound)
@@ -1024,7 +1024,7 @@ actor Renderer {
                 }
             }
         }
-        print("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
+        AppLog.render.line("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
         // Engine + GL worker are now up, so cvar commands are safe to post.
         // Flush the archived Graphics/Audio/Input cvars and enable live pushes.
         Task { @MainActor [appModel] in appModel.gameSettings.engineDidStart() }
@@ -1228,7 +1228,7 @@ actor Renderer {
                 headBaselineYaw = nil
                 headBaselinePos = nil
                 Renderer.aimDiag.nRecenter += 1
-                print("[LambdaVision] recenter: re-anchoring head baseline "
+                AppLog.render.line("[LambdaVision] recenter: re-anchoring head baseline "
                     + "(#\(Renderer.aimDiag.nRecenter))")
             }
 
@@ -1566,7 +1566,7 @@ actor Renderer {
                 }
             }
             if rc != 0 {
-                print("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
+                AppLog.render.line("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
             }
         }
 
@@ -1863,7 +1863,7 @@ actor Renderer {
     func renderLoop() {
         while true {
             if layerRenderer.state == .invalidated {
-                print("Layer is invalidated")
+                AppLog.render.line("Layer is invalidated")
                 // Persist binds/cvars while the engine is still up (visionOS
                 // may kill us without a clean Host_Shutdown).
                 _ = "host_writeconfig".withCString { lambda_gl_worker_cmd($0) }

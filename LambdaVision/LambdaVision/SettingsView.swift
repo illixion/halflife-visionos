@@ -19,6 +19,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
@@ -62,6 +63,17 @@ struct SettingsView: View {
                     Text("Graphics")
                 } footer: {
                     Text("Render scale and MetalFX resize the render targets, so they apply when the immersive space restarts — you'll be offered a reload on closing. MetalFX only helps below \(Int(GameSettings.metalFXMaxScale * 100))% (it upscales the reduced render back to full resolution).")
+                }
+
+                Section("Diagnostics") {
+                    Button {
+                        openWindow(id: "console")
+                    } label: {
+                        Label("Open Console", systemImage: "apple.terminal")
+                    }
+                    Text("Live view of this app's log output, readable on the headset without a cable.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
 
                 Section("Audio") {

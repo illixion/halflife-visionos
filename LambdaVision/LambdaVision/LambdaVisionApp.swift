@@ -5,6 +5,7 @@
 //  Created by Ixion on 10/05/2026.
 //
 
+import RAVEConsole
 import ARKit
 import AVFAudio
 import CompositorServices
@@ -29,7 +30,7 @@ enum AudioSessionRecovery {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { return }
                 if (try? AVAudioSession.sharedInstance().setActive(true)) != nil {
-                    print("[LambdaVision] audio session reclaimed — restarting queue")
+                    AppLog.app.line("[LambdaVision] audio session reclaimed — restarting queue")
                     lambda_snd_activate(1)
                     return
                 }
@@ -71,7 +72,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                 appropriateFor: nil, create: true) {
                 let path = docs.appendingPathComponent("crash.log").path
                 path.withCString { lambda_set_crash_log_path($0) }
-                print("[LambdaVision] crash log path: \(path)")
+                AppLog.app.line("[LambdaVision] crash log path: \(path)")
             }
             // The engine's AudioQueue backend (snd_visionos.c) plays into
             // the app's audio session; without an explicitly activated
@@ -93,7 +94,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                 try session.setIntendedSpatialExperience(.bypassed)
                 try session.setActive(true)
             } catch {
-                print("[LambdaVision] AVAudioSession activation failed: \(error)")
+                AppLog.app.line("[LambdaVision] AVAudioSession activation failed: \(error)")
             }
             // System interruptions (Siri, alerts, route changes) stop the
             // AudioQueue and nothing restarts it — the game goes silent
@@ -106,10 +107,10 @@ struct ImmersiveSpaceContent: CompositorContent {
                           let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
                     switch type {
                     case .began:
-                        print("[LambdaVision] audio interruption began — pausing queue")
+                        AppLog.app.line("[LambdaVision] audio interruption began — pausing queue")
                         Task { @MainActor in AudioSessionRecovery.interruptionBegan() }
                     case .ended:
-                        print("[LambdaVision] audio interruption ended — restarting queue")
+                        AppLog.app.line("[LambdaVision] audio interruption ended — restarting queue")
                         Task { @MainActor in AudioSessionRecovery.interruptionEnded() }
                     @unknown default:
                         break
@@ -120,7 +121,7 @@ struct ImmersiveSpaceContent: CompositorContent {
             NotificationCenter.default.addObserver(
                 forName: AVAudioSession.mediaServicesWereResetNotification,
                 object: nil, queue: .main) { _ in
-                    print("[LambdaVision] media services reset — restarting audio")
+                    AppLog.app.line("[LambdaVision] media services reset — restarting audio")
                     let session = AVAudioSession.sharedInstance()
                     try? session.setCategory(.playback, options: [.mixWithOthers])
                     try? session.setActive(true)
@@ -225,6 +226,13 @@ struct LambdaVisionApp: App {
                 // freeze after a stick release (a known GCController quirk).
                 .handlesGameControllerEvents(matching: .gamepad)
         }
+
+        // In-app log viewer. This app renders through CompositorServices and
+        // has no tab bar, so the console is its own window.
+        Window("Console", id: "console") {
+            RAVEConsoleScreen()
+        }
+        .defaultLaunchBehavior(.suppressed)
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)

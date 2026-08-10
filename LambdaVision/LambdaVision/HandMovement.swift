@@ -123,7 +123,7 @@ nonisolated final class HandMovement {
               let anchor = movementHand, anchor.isTracked,
               let hand = RAVEHandSample(anchor) else {
             if doLog {
-                print("[HM] inactive/no-hand: active=\(active) hand=\(movementHand != nil) "
+                AppLog.input.line("[HM] inactive/no-hand: active=\(active) hand=\(movementHand != nil) "
                     + "tracked=\(movementHand?.isTracked ?? false) skel=\(movementHand?.handSkeleton != nil)")
             }
             Renderer.aimDiag.moveHandSeen = false
@@ -169,7 +169,7 @@ nonisolated final class HandMovement {
         Renderer.aimDiag.useHeld = useHeld
 
         if doLog {
-            print(String(format: "[HM] hand=seen pinch=%.3f fist=%d reach=%.2f use=%@ train=%@",
+            AppLog.input.line(String(format: "[HM] hand=seen pinch=%.3f fist=%d reach=%.2f use=%@ train=%@",
                          idxDist, curled, fwdReach, useHeld ? "Y" : "N", onTrain ? "Y" : "N"))
         }
 

@@ -201,7 +201,7 @@ final class WeaponPass {
         self.bbmax = SIMD3(mesh.bbmax.0, mesh.bbmax.1, mesh.bbmax.2)
         self.uploadedGeneration = gen
 
-        print("[WeaponPass] uploaded gen=\(gen) verts=\(flat.count/8) submeshes=\(subs.count) textures=\(texs.count) handbone=\(hasHandBone)")
+        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(flat.count/8) submeshes=\(subs.count) textures=\(texs.count) handbone=\(hasHandBone)")
     }
 
     /// Allocate/resize the weapon depth to match the drawable colour slice.
