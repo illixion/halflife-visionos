@@ -18,7 +18,6 @@ Vendor/angle-build/
 
 # Reference projects (their own repos)
 Lambda1VR/
-Spatialcraft/
 
 # MoltenVK xcframework binary (download via setup script)
 LambdaVision/Vendor/MoltenVK.xcframework/

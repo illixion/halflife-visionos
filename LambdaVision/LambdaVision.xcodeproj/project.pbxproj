@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		1DB96E902FB0522300F1ADA2 /* RealityKitContent in Frameworks */ = {isa = PBXBuildFile; productRef = 1DB96E8F2FB0522300F1ADA2 /* RealityKitContent */; };
+		AA04000000000000000000A3 /* RAVEInput in Frameworks */ = {isa = PBXBuildFile; productRef = AA04000000000000000000A2 /* RAVEInput */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,6 +59,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1DB96E902FB0522300F1ADA2 /* RealityKitContent in Frameworks */,
+				AA04000000000000000000A3 /* RAVEInput in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -120,6 +122,7 @@
 			name = LambdaVision;
 			packageProductDependencies = (
 				1DB96E8F2FB0522300F1ADA2 /* RealityKitContent */,
+				AA04000000000000000000A2 /* RAVEInput */,
 			);
 			productName = LambdaVision;
 			productReference = 1DB96E8A2FB0522300F1ADA2 /* LambdaVision.app */;
@@ -176,6 +179,9 @@
 			);
 			mainGroup = 1DB96E812FB0522300F1ADA2;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA04000000000000000000A1 /* XCLocalSwiftPackageReference "../../RAVEEngine" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1DB96E8B2FB0522300F1ADA2 /* Products */;
 			projectDirPath = "";
@@ -563,10 +569,21 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		AA04000000000000000000A1 /* XCLocalSwiftPackageReference "../../RAVEEngine" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../RAVEEngine;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		1DB96E8F2FB0522300F1ADA2 /* RealityKitContent */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = RealityKitContent;
+		};
+		AA04000000000000000000A2 /* RAVEInput */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = RAVEInput;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

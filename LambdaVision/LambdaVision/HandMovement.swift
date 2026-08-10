@@ -4,7 +4,8 @@
 //
 //  Off-hand (non-dominant) interaction for the immersive gesture model:
 //
-//  • Locomotion (ported from an earlier app): a thumb+index
+//  • Locomotion (the pinch clutch and wrist joystick come from RAVE Engine's
+//    RAVEInput, shared with Spatialcraft and Longwave): a thumb+index
 //    pinch is a clutch that anchors the wrist; while held, wrist
 //    displacement drives a head-relative analog joystick via the same joy
 //    axes the gamepad uses. Vertical displacement past a deadzone triggers
@@ -32,19 +33,19 @@
 //
 
 import ARKit
+import RAVEInput
 import simd
 
 nonisolated final class HandMovement {
     nonisolated(unsafe) static let shared = HandMovement()
 
-    // Pinch/joystick tuning. Enter/exit hysteresis is the "deadzone" that
-    // rejects accidental pinches — the clutch engages immediately on a clean
-    // pinch (no hold delay); a small joystick deadzone keeps a stationary
-    // pinch from drifting.
-    private let pinchEnter: Float = 0.025      // 2.5cm thumb↔index → engage
-    private let pinchExit: Float  = 0.045      // 4.5cm → release (hysteresis)
+    // Pinch/joystick tuning lives in RAVEInput now — `.clutch` is the shared
+    // tuning for exactly this shape of gesture: index finger only, engaging the
+    // instant the fingers touch, with the 2.5/4.5cm enter/exit hysteresis as
+    // the whole filter. A hold debounce would read as input lag on locomotion,
+    // which is why the shared `.standard` tuning (used where a pinch presses a
+    // button) is the wrong one here.
     private let fistCurl: Float = 0.06         // fingertip↔metacarpal < 6cm = curled
-    private let fullScaleM: Float = 0.18       // wrist 18cm from anchor = full speed
     nonisolated(unsafe) static var deadzoneM: Float = 0.03  // <3cm wrist travel = no move
 
     // Vertical jump/duck thresholds (our addition). Live-tunable.
@@ -79,10 +80,13 @@ nonisolated final class HandMovement {
     }
     nonisolated(unsafe) static var throttleGauge: ThrottleGauge? = nil
 
-    private struct Pinch { var startTime: TimeInterval; var fired: Bool }
+    private var pinchDetector = RAVEPinchDetector(tuning: .clutch)
+    private var joystick = RAVEHandJoystick(
+        fullScaleMeters: 0.18,                 // wrist 18cm from anchor = full speed
+        deadzoneMeters: HandMovement.deadzoneM
+    )
     private var jumpStart: TimeInterval = 0
-    private var pinch: Pinch?
-    private var anchorWrist: SIMD3<Float>?
+    private var clutchHeld = false
     private var jumpHeld = false
     private var duckHeld = false
     private var useHeld = false
@@ -110,9 +114,14 @@ nonisolated final class HandMovement {
         logTick += 1
         let doLog = (logTick % 30 == 0)   // ~3×/s, avoids per-frame spam
 
+        // One framework-free snapshot of the joints, taken once per frame. Every
+        // measurement below reads from it instead of re-walking the skeleton,
+        // and it is what lets the shared pinch/joystick code run here at all —
+        // both are plain value types with no isolation, so they work the same
+        // on this render thread as they do on another app's main actor.
         guard active,
               let anchor = movementHand, anchor.isTracked,
-              let skel = anchor.handSkeleton else {
+              let hand = RAVEHandSample(anchor) else {
             if doLog {
                 print("[HM] inactive/no-hand: active=\(active) hand=\(movementHand != nil) "
                     + "tracked=\(movementHand?.isTracked ?? false) skel=\(movementHand?.handSkeleton != nil)")
@@ -124,34 +133,14 @@ nonisolated final class HandMovement {
             return nil
         }
 
-        let o = anchor.originFromAnchorTransform
-        func jw(_ j: HandSkeleton.JointName) -> SIMD3<Float> {
-            let m = o * skel.joint(j).anchorFromJointTransform
-            return SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
-        }
-
         // Per-finger curl (tip↔metacarpal). Used by the fist suppressor,
         // the poke pose (index out, rest curled is FINE) and the palm pose.
-        let tips: [(HandSkeleton.JointName, HandSkeleton.JointName)] = [
-            (.indexFingerTip,  .indexFingerMetacarpal),
-            (.middleFingerTip, .middleFingerMetacarpal),
-            (.ringFingerTip,   .ringFingerMetacarpal),
-            (.littleFingerTip, .littleFingerMetacarpal),
-        ]
-        var curled = 0
-        var extended = 0
-        var indexExtended = false
-        for (i, (tip, meta)) in tips.enumerated() {
-            let d = simd_distance(jw(tip), jw(meta))
-            if d < fistCurl { curled += 1 }
-            if d > HandMovement.useFingerExt {
-                extended += 1
-                if i == 0 { indexExtended = true }
-            }
-        }
+        let curled = hand.curledFingerCount(threshold: fistCurl)
+        let extended = hand.extendedFingerCount(threshold: HandMovement.useFingerExt)
+        let indexExtended = hand.index.extension_ > HandMovement.useFingerExt
 
-        let wrist = jw(.wrist)
-        let idxDist = simd_distance(jw(.indexFingerTip), jw(.thumbTip))
+        let wrist = hand.wrist
+        let idxDist = hand.pinchDistance(to: .index)
         Renderer.aimDiag.moveHandSeen = true
         Renderer.aimDiag.pinchDist = idxDist
         Renderer.aimDiag.fistCount = curled
@@ -161,14 +150,14 @@ nonisolated final class HandMovement {
         // fingertip reached out forward and the ray to agree with the view.
         // The pinch clutch and +use are mutually exclusive: a pinched hand
         // is driving (or throttling), not pressing.
-        let indexTip = jw(.indexFingerTip)
+        let indexTip = hand.index.tip
         let toTip = indexTip - headPos
         let fwdReach = simd_dot(toTip, headForward)
         let rayDir = simd_normalize(toTip)
         let gazeAgree = simd_dot(rayDir, simd_normalize(headForward))
         let poseOK = indexExtended || extended >= 4
         var wantUse = useHeld
-        if pinch != nil || !poseOK || gazeAgree < HandMovement.useGazeDot {
+        if clutchHeld || !poseOK || gazeAgree < HandMovement.useGazeDot {
             wantUse = false
         } else if fwdReach > HandMovement.useReachOn {
             wantUse = true
@@ -185,29 +174,17 @@ nonisolated final class HandMovement {
         }
 
         // --- Clutch (locomotion or throttle) --------------------------------
-        // Fist suppressor: 3+ fingertips curled = a clenched hand (or a poke
-        // pose) — never a pinch. Drops the clutch but NOT +use above.
-        if curled >= 3 || useHeld {
-            pinch = nil
+        // The shared detector owns the fist suppressor (3+ curled fingertips =
+        // a clenched hand, or a poke pose — never a pinch) and the enter/exit
+        // hysteresis. Feeding it `nil` while +use is held is how "a pressing
+        // hand is not a driving hand" is expressed: the clutch drops, +use
+        // above is untouched, and the hysteresis resets cleanly rather than
+        // half-remembering a pinch through the press.
+        clutchHeld = pinchDetector.update(sample: useHeld ? nil : hand, now: now).held != nil
+        guard clutchHeld else {
             zeroMovement()
             releaseThrottle()
             return useHeld ? rayDir : nil
-        }
-
-        // Clutch: engage immediately on a clean pinch (no hold delay — the
-        // enter/exit hysteresis is the deadzone that rejects accidental
-        // taps). Persist `pinch` across frames; only zeroMovement() (not
-        // fullReset()) runs when disengaged, so the hysteresis stays
-        // coherent.
-        if pinch != nil {
-            if idxDist > pinchExit { pinch = nil }
-        } else if idxDist < pinchEnter {
-            pinch = Pinch(startTime: now, fired: true)
-        }
-        guard pinch != nil else {
-            zeroMovement()
-            releaseThrottle()
-            return nil
         }
 
         if onTrain {
@@ -234,25 +211,19 @@ nonisolated final class HandMovement {
         }
         releaseThrottle()
 
-        // Wrist delta from the anchor captured on the first engaged frame.
-        if anchorWrist == nil { anchorWrist = wrist }
-        let delta = wrist - (anchorWrist ?? wrist)
-
-        // Horizontal → analog joystick, projected onto the head-facing frame
-        // (Y flattened) so it moves relative to gaze and survives snap turns.
-        // A small deadzone keeps a stationary pinch from drifting.
-        let fwd = normalizeSafe(SIMD3(headForward.x, 0, headForward.z))
-        let right = normalizeSafe(SIMD3(headRight.x, 0, headRight.z))
-        let s = simd_dot(delta, right)
-        let f = simd_dot(delta, fwd)
-        var x: Float = 0, y: Float = 0
-        if (s * s + f * f).squareRoot() > HandMovement.deadzoneM {
-            let scale = 1.0 / fullScaleM
-            x = s * scale
-            y = f * scale
-            let mag = (x * x + y * y).squareRoot()
-            if mag > 1 { x /= mag; y /= mag }
-        }
+        // Horizontal wrist delta → analog joystick, projected onto the
+        // head-facing frame (Y flattened) so it moves relative to gaze and
+        // survives snap turns. The anchor is captured on the first engaged
+        // frame; a small deadzone keeps a stationary pinch from drifting.
+        joystick.deadzoneMeters = HandMovement.deadzoneM   // live-tunable
+        let stick = joystick.update(
+            wristWorld: wrist,
+            engaged: true,
+            worldForward: headForward,
+            worldRight: headRight
+        )
+        let x = stick.vector.x
+        let y = stick.vector.y
         lambda_joy_set_axis(0, Int32((x * 32767).rounded()))    // side, + = right
         lambda_joy_set_axis(1, Int32((-y * 32767).rounded()))   // fwd (engine forward is negative)
         axesActive = true
@@ -260,7 +231,8 @@ nonisolated final class HandMovement {
         // Vertical → jump / duck past a deadzone, with auto crouch-jump:
         // a jump also holds +duck after a short delay (once airborne) so a
         // plain up-flick clears ledges the way a manual crouch-jump would.
-        let dy = delta.y
+        // Read off the raw delta, which the horizontal deadzone must not eat.
+        let dy = stick.delta.y
         let wantJump = dy > HandMovement.jumpRiseM
         if wantJump && !jumpHeld { jumpStart = now }   // rising edge
         let autoDuck = HandMovement.autoCrouchJump && wantJump
@@ -279,7 +251,7 @@ nonisolated final class HandMovement {
     /// engage) WITHOUT touching the clutch state machine — used while a pinch
     /// is disengaged, so the enter/exit hysteresis stays coherent. Idempotent.
     private func zeroMovement() {
-        anchorWrist = nil
+        joystick.release()
         if axesActive {
             lambda_joy_set_axis(0, 0)
             lambda_joy_set_axis(1, 0)
@@ -308,7 +280,8 @@ nonisolated final class HandMovement {
     /// lost/inactive hand — never mid-hold, or the hysteresis would restart
     /// every frame.
     private func fullReset() {
-        pinch = nil
+        pinchDetector.reset()
+        clutchHeld = false
         zeroMovement()
         releaseThrottle()
         setHold(&useHeld, want: false, cmd: "use")
@@ -322,8 +295,4 @@ nonisolated final class HandMovement {
         _ = full.withCString { lambda_gl_worker_cmd($0) }
     }
 
-    private func normalizeSafe(_ v: SIMD3<Float>) -> SIMD3<Float> {
-        let l = simd_length(v)
-        return l > 1e-5 ? v / l : SIMD3(0, 0, -1)
-    }
 }
