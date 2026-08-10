@@ -5,6 +5,7 @@
 //  Created by Ixion on 10/05/2026.
 //
 
+import RAVEDiagnostics
 import CompositorServices
 import Metal
 import QuartzCore
@@ -49,35 +50,38 @@ extension LayerRenderer.Clock.Instant {
 ///   angleGPU — eye-submit end → ANGLE's queue finished both eyes
 ///   frameGPU — eye-submit end → our compositor pass finished too
 ///   total    — whole renderFrame
-final class FrameTimingStats {
-    static let shared = FrameTimingStats()
-    private let lock = NSLock()
-    private var cols: [String: [Double]] = [:]
-    private var frames = 0
+/// The per-column store, the 512-frame window and the p50/p95/max reduction all
+/// come from RAVE Engine now — four apps had grown four copies of that same
+/// shape. What stays here is this renderer's column vocabulary and its console
+/// line, which are specific to a CompositorServices eye-submit pipeline.
+///
+/// The collector underneath is lock-guarded rather than an actor for this
+/// caller's sake: `add` is a synchronous call on the render thread and cannot
+/// await anything.
+enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
 
-    func add(_ name: String, _ ms: Double) {
-        lock.lock()
-        cols[name, default: []].append(ms)
-        lock.unlock()
-    }
-
-    func frameDone() {
-        lock.lock()
-        defer { lock.unlock() }
-        frames += 1
-        guard frames >= 512 else { return }
-        var line = "[FT] app(ms)"
-        for key in FrameTimingStats.order {
-            guard var v = cols[key], !v.isEmpty else { continue }
-            v.sort()
-            let p95 = v[min(Int(Double(v.count) * 0.95), v.count - 1)]
-            line += String(format: " %@ %.1f/%.1f/%.1f", key, v[v.count / 2], p95, v.last!)
+    static let shared: RAVEFrameProfiler = {
+        let profiler = RAVEFrameProfiler(
+            subsystem: "com.illixion.lambdavision",
+            category: "Frame",
+            window: .frames(count: 512),
+            capacity: 512
+        )
+        profiler.onWindowClosed = { snapshot in
+            print("[FT] app(ms) " + snapshot.percentileLine(keys: order))
         }
-        print(line)
-        cols.removeAll(keepingCapacity: true)
-        frames = 0
-    }
+        return profiler
+    }()
+}
+
+extension RAVEFrameProfiler {
+    /// Spelled `add` to match the ~8 render-thread call sites this replaced.
+    @inline(__always)
+    func add(_ name: String, _ ms: Double) { record(name, ms: ms) }
+
+    @inline(__always)
+    func frameDone() { frameEnded() }
 }
 
 final class RendererTaskExecutor: TaskExecutor {
