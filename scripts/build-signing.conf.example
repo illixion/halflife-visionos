@@ -1,9 +1,10 @@
 # Build & sign configuration — copy to build-signing.conf and edit.
 # build-signing.conf is gitignored and will never be committed.
 #
-# This configures signing for scripts/build-and-sign.sh. The script imports
-# the .p12 certs into a temporary keychain, so signing works over SSH without
-# any login-keychain setup. Nothing needs to be pre-installed on the machine.
+# This configures signing for an offline build-and-sign script (not
+# included in this repo — most people should just build & run from Xcode
+# instead). Such a script would import the .p12 certs into a temporary
+# keychain, so signing works over SSH without any login-keychain setup.
 #
 # BUILD_BUNDLE_ID overrides PRODUCT_BUNDLE_IDENTIFIER at build time — this
 # is the app's identity on device.
@@ -37,12 +38,14 @@ DEVICE_NAME="Apple Vision Pro"
 
 # --- Pre-build hook ---
 # Repo-specific pre-build logic (fetches vendored deps on a fresh clone,
-# verifies libxash.a exists). Lives in its own script so build-and-sign.sh
-# stays identical across repos.
+# verifies libxash.a exists). Lives in its own script so an offline
+# build-and-sign script can stay generic/shared across repos. Xcode itself
+# already runs the same script as a build phase, so this only matters if
+# you're driving builds through such a script instead of Xcode.
 PRE_BUILD_HOOK="./scripts/pre-build.sh"
 
 # --- Extra xcodebuild settings (bash array) ---
-# One-off settings can also be passed per-invocation with --set KEY=VALUE,
-# e.g. `./scripts/build-and-sign.sh --set BUNDLE_HL_ASSETS=1` to bake HL
-# assets into the bundle (default: ship via scripts/push-assets.sh).
+# e.g. BUNDLE_HL_ASSETS=1 to bake HL assets into the bundle (default: ship
+# via scripts/push-assets.sh). Pass this straight to xcodebuild if you're
+# not using an offline build script: `xcodebuild ... BUNDLE_HL_ASSETS=1`.
 # EXTRA_BUILD_SETTINGS=()

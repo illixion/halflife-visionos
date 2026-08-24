@@ -111,6 +111,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 1DB96EA32FB0522500F1ADA2 /* Build configuration list for PBXNativeTarget "LambdaVision" */;
 			buildPhases = (
+				A55E0DA70002000000DA7A02 /* Pre-Build Setup */,
 				1DB96E862FB0522300F1ADA2 /* Sources */,
 				1DB96E872FB0522300F1ADA2 /* Frameworks */,
 				1DB96E882FB0522300F1ADA2 /* Resources */,
@@ -218,6 +219,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		A55E0DA70002000000DA7A02 /* Pre-Build Setup */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Pre-Build Setup";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -eu\n\"$SRCROOT/../scripts/pre-build.sh\"\n";
+		};
 		A55E0DA70001000000DA7A01 /* Bundle HalfLifeAssets */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;

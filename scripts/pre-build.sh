@@ -1,10 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Lambda_VisionPro pre-build hook, run by build-and-sign.sh via
-# PRE_BUILD_HOOK (build-signing.conf). Repo-specific pre-build logic lives
-# HERE — scripts/build-and-sign.sh is a shared script kept byte-identical
-# across repos and must not carry it.
+# Lambda_VisionPro pre-build hook: fetches vendored deps and checks the
+# prebuilt engine archive before a real build starts. Runs two ways —
+# automatically as an Xcode Run Script build phase (LambdaVision target,
+# first phase, before Compile Sources), and via PRE_BUILD_HOOK
+# (build-signing.conf) for anyone driving builds through their own
+# external build-and-sign-style script instead of Xcode directly. Both
+# paths are safe to run redundantly since every step here is idempotent.
 #
 # Repo-specific build knobs (passed as `--set KEY=VALUE`):
 #   --set BUNDLE_HL_ASSETS=1   bake HL assets into the app bundle for a

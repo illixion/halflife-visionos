@@ -29,15 +29,16 @@ rendering) in progress.
 git clone <this-repo> Lambda_VisionPro
 cd Lambda_VisionPro
 
-# Fetch xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework
-./VisionPort/setup.sh
-
 # Open the Xcode project
 open LambdaVision/LambdaVision.xcodeproj
 ```
 
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
-your team ID, then build & run on your AVP.
+your team ID, then build & run on your AVP — a build phase fetches
+xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework automatically on
+first build (idempotent no-op afterwards). To fetch them ahead of time
+instead (e.g. to review what gets cloned before building), run
+`./VisionPort/setup.sh` yourself.
 
 ## Half-Life assets — pre-25th anniversary build
 
@@ -94,10 +95,11 @@ warning to re-run `push-assets.sh`. The engine prefers `Documents/GameData`
 as `-rodir` when `valve/liblist.gam` is present there.
 
 For a self-contained app (assets baked into the bundle — e.g. handing a
-build to someone), pass `--set BUNDLE_HL_ASSETS=1` to
-`scripts/build-and-sign.sh` (re-enables the "Bundle HalfLifeAssets" Run
-Script phase); the engine falls back to `<bundle>/GameData` when no
-Documents copy exists.
+build to someone), build with `BUNDLE_HL_ASSETS=1` set (re-enables the
+"Bundle HalfLifeAssets" Run Script phase), e.g.
+`xcodebuild ... build BUNDLE_HL_ASSETS=1`, or add it as a build setting in
+Xcode; the engine falls back to `<bundle>/GameData` when no Documents copy
+exists.
 
 The folder is NOT redistributable; it's already gitignored.
 
