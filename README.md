@@ -26,12 +26,48 @@ rendering) in progress.
 ## First-time setup
 
 ```bash
+# This repo and both RAVE packages must sit in the same parent directory
 git clone <this-repo> Lambda_VisionPro
+git clone https://github.com/illixion/RAVESDK.git
+git clone https://github.com/illixion/RAVEEngine.git
+
 cd Lambda_VisionPro
 
 # Open the Xcode project
 open LambdaVision/LambdaVision.xcodeproj
 ```
+
+### RAVE packages
+
+Lambda VisionPro links two shared packages:
+
+| Package | Products used |
+|---|---|
+| [`RAVESDK`](https://github.com/illixion/RAVESDK) | `RAVEConsole` |
+| [`RAVEEngine`](https://github.com/illixion/RAVEEngine) | `RAVEInput`, `RAVEDiagnostics` |
+
+Both are referenced as **local** Swift packages by relative path —
+`../../RAVESDK` and `../../RAVEEngine`, resolved against the directory holding
+`LambdaVision.xcodeproj` — not as versioned remote dependencies. A clone
+therefore does not fetch them, which is why the commands above clone all three
+side by side:
+
+```
+some-parent/
+├── RAVESDK/
+├── RAVEEngine/
+└── Lambda_VisionPro/
+```
+
+The requirement is only that this repo's parent directory also contains
+directories named exactly `RAVESDK` and `RAVEEngine`; this repo's own directory
+name does not matter. Get it wrong and Xcode fails at package resolution, before
+compiling anything — and before the build phase that fetches xash3d-fwgs runs.
+
+Why path references and not versions: the packages and the apps co-evolve
+continuously — the hand input this app uses was converged into `RAVEInput` out of
+this app and two others — and a path reference keeps "move this into the package
+and update its callers" a single atomic edit.
 
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
 your team ID, then build & run on your AVP — a build phase fetches
@@ -143,6 +179,9 @@ LambdaVision/      Xcode visionOS app (Swift + C bridge + MoltenVK)
 VisionPort/        Engine cross-compile workspace (xash3d-fwgs + patch + setup)
 PLAN.md            Architecture, phase plan, risks
 README.md          You are here
+
+../RAVESDK/        Shared package, cloned as a sibling (see First-time setup)
+../RAVEEngine/     Shared package, cloned as a sibling (see First-time setup)
 ```
 
 ## Licensing
