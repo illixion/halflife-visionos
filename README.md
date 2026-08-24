@@ -48,7 +48,17 @@ the **pre-anniversary** game data.
 
 Valve archived the pre-anniversary build to a public Steam beta branch
 called **`steam_legacy`** ("Pre-25th Anniversary Build") for app **70**
-(Half-Life). Download it via SteamCMD:
+(Half-Life). Fetch it with:
+
+```bash
+./scripts/fetch-assets.sh YOUR_STEAM_USERNAME       # macOS / Linux
+.\scripts\fetch-assets.ps1 -SteamUsername YOUR_STEAM_USERNAME   # Windows
+```
+
+Either script downloads SteamCMD to `~/bin/steamcmd` first if it isn't
+there already, then runs it non-interactively except for the password /
+Steam Guard prompts (never passed as an argument, never stored). Equivalent
+manual invocation, if you'd rather run SteamCMD yourself:
 
 ```bash
 ~/bin/steamcmd/steamcmd.sh \
@@ -76,9 +86,12 @@ device out of band: after installing the app once, run
 `./scripts/push-assets.sh` to copy every gamedir (valve/, valve_hd/,
 mods…) into the app's `Documents/GameData` via `devicectl`. The copy is
 incremental (unchanged files are skipped; `--delete` mirrors removals), it
-survives reinstalls, and code-only rebuilds no longer re-send ~450 MB per
-install. The engine prefers `Documents/GameData` as `-rodir` when
-`valve/liblist.gam` is present there.
+survives plain reinstalls (rebuilding over the existing app), and code-only
+rebuilds no longer re-send ~450 MB per install. It does NOT survive
+deleting the app from the headset first — that wipes the data container,
+so `Documents/GameData` is empty again and the app shows an on-screen
+warning to re-run `push-assets.sh`. The engine prefers `Documents/GameData`
+as `-rodir` when `valve/liblist.gam` is present there.
 
 For a self-contained app (assets baked into the bundle — e.g. handing a
 build to someone), pass `--set BUNDLE_HL_ASSETS=1` to

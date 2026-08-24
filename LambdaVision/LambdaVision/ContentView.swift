@@ -13,6 +13,7 @@ import IOSurface
 struct ContentView: View {
 
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
     @State private var showSettings = false
     @State private var cheatsEnabled = false
@@ -25,6 +26,10 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 16) {
+                if let message = appModel.engineFailureMessage {
+                    engineFailureBanner(message)
+                }
+
                 // Half-Life lambda mark (placeholder logo; swap a real HL
                 // asset later). Replaced the RealityKit demo globe, which
                 // rendered a volumetric sphere on top of the window content.
@@ -85,6 +90,17 @@ struct ContentView: View {
                 SettingsView().environment(appModel)
             }
             .onAppear { runSmokeTests() }
+            // The engine can only fail this way from inside the (full,
+            // passthrough-blocking) immersive space, where the player can't
+            // see this window's banner. Drop back to it so they do.
+            .onChange(of: appModel.engineFailureMessage) { _, message in
+                guard message != nil, appModel.immersiveSpaceState != .closed else { return }
+                Task { @MainActor in
+                    appModel.immersiveSpaceState = .inTransition
+                    await dismissImmersiveSpace()
+                    appModel.immersiveSpaceState = .closed
+                }
+            }
         }
     }
 
@@ -149,6 +165,22 @@ struct ContentView: View {
             .padding(.top, 4)
         }
         .padding(.top, 8)
+    }
+
+    /// Shown in place of the game when the engine couldn't start — most
+    /// commonly missing Half-Life assets (see Renderer.ensureEngineInitialized).
+    private func engineFailureBanner(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Game data not ready", systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.yellow)
+            Text(message)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func cheatButton(_ label: String, _ command: String) -> some View {
