@@ -234,6 +234,13 @@ struct LambdaVisionApp: App {
         }
         .defaultLaunchBehavior(.suppressed)
 
+        // Live FPS/frame-time HUD, same window-based approach as Console —
+        // stays visible over the immersive space since it's never dismissed.
+        Window("Performance", id: "performance") {
+            PerformanceHUDScreen()
+        }
+        .defaultLaunchBehavior(.suppressed)
+
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }

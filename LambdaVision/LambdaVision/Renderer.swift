@@ -69,10 +69,18 @@ enum FrameTimingStats {
             capacity: 512
         )
         profiler.onWindowClosed = { snapshot in
-            AppLog.render.line("[FT] app(ms) " + snapshot.percentileLine(keys: order))
+            AppLog.perf.line("[FT] app(ms) " + snapshot.percentileLine(keys: order))
         }
         return profiler
     }()
+
+    /// Raw per-frame "total" samples, oldest first — what the Performance
+    /// window's scrolling graph plots.
+    static func livePeriods() -> [Double] { shared.collector.samples(for: "total") }
+
+    /// The full per-stage reduction (wait0/wait1/eyes/angleGPU/frameGPU/total),
+    /// polled live rather than waiting for the 512-frame window to close.
+    static func liveSnapshot() -> RAVEMetricSnapshot { shared.snapshot() }
 }
 
 extension RAVEFrameProfiler {

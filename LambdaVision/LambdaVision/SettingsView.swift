@@ -74,6 +74,15 @@ struct SettingsView: View {
                     Text("Live view of this app's log output, readable on the headset without a cable.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+
+                    Button {
+                        openWindow(id: "performance")
+                    } label: {
+                        Label("Open Performance HUD", systemImage: "speedometer")
+                    }
+                    Text("Live FPS, frame-time graph, and per-stage breakdown — keep it open in view while playing.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
 
                 Section("Audio") {
