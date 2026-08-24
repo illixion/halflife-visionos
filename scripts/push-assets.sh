@@ -46,7 +46,19 @@ done
     exit 1
 }
 
-DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null | grep "$DEVICE_NAME" | awk '{print $3}')
+# Resolve by pattern, never by column position: the Hostname column is empty
+# while a device sits in the `connected` state, which shifts every later
+# field left and makes `awk '{print $3}'` return the literal string
+# "connected" instead of the identifier (see ~/bin/build-and-sign for the
+# same fix). Simulator rows are skipped since devicectl only installs to
+# physical devices.
+DEVICE_LIST=$(xcrun devicectl list devices 2>/dev/null || true)
+_device_uuid() {
+    grep -v "simulated" \
+        | grep -oiE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' \
+        | head -1
+}
+DEVICE_ID=$(printf '%s\n' "$DEVICE_LIST" | grep -E "^${DEVICE_NAME}[[:space:]]" | _device_uuid || true)
 [[ -n "$DEVICE_ID" ]] || {
     echo "ERROR: Device '$DEVICE_NAME' not found. Is it connected and paired?" >&2
     exit 1
