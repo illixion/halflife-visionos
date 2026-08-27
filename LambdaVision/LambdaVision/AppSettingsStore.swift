@@ -40,6 +40,10 @@ enum AppSettingsStore {
         get { double(renderScaleKey, 0.75) }
         set { defaults.set(newValue, forKey: renderScaleKey) }
     }
+    /// Currently IGNORED as a startup value: the MetalFX toggle is hidden and
+    /// GameSettings forces the chain off regardless of what's stored here (see
+    /// GameSettings.metalFXEnabled for the frame-time numbers). Kept so the
+    /// setting can come back without a migration.
     static var metalFXEnabled: Bool {
         get { bool(metalFXEnabledKey, false) }
         set { defaults.set(newValue, forKey: metalFXEnabledKey) }

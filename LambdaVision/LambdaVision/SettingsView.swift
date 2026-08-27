@@ -27,7 +27,6 @@ struct SettingsView: View {
     // Snapshot of the reload-requiring settings when the sheet opened, so we
     // can offer a reload on close if they changed.
     @State private var snapScale = 0.0
-    @State private var snapMetalFX = false
     @State private var showReloadPrompt = false
 
     // A handful of chapter-start maps for the Advanced loader.
@@ -48,8 +47,14 @@ struct SettingsView: View {
                     slider("Render scale", $settings.renderScale, 0.5...1.0, 0.05) {
                         String(format: "%.0f%%", $0 * 100)
                     }
-                    Toggle("MetalFX upscaling", isOn: $settings.metalFXEnabled)
-                        .disabled(settings.renderScale > GameSettings.metalFXMaxScale)
+                    // No MetalFX toggle here on purpose: the optional
+                    // FXAA-pass → MetalFX-spatial chain added two
+                    // full-logical-resolution passes per eye and measured
+                    // ~13-14 ms GPU/frame (~50 FPS), and its upscale to the
+                    // full drawable fought the compositor's own foveated
+                    // upsampling. GameSettings.metalFXEnabled forces it off
+                    // at startup; the scaler code stays compiled in case a
+                    // cheaper configuration brings it back.
                     slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
                         String(format: "%.1f", $0)
                     }
@@ -62,7 +67,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale and MetalFX resize the render targets, so they apply when the immersive space restarts — you'll be offered a reload on closing. MetalFX only helps below \(Int(GameSettings.metalFXMaxScale * 100))% (it upscales the reduced render back to full resolution).")
+                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing.")
                 }
 
                 Section("Diagnostics") {
@@ -150,13 +155,12 @@ struct SettingsView: View {
         .frame(minWidth: 520, minHeight: 640)
         .onAppear {
             snapScale = appModel.gameSettings.renderScale
-            snapMetalFX = appModel.gameSettings.metalFXEnabled
         }
         .alert("Reload game to apply changes?", isPresented: $showReloadPrompt) {
             Button("Reload") { reloadImmersiveSpace(); dismiss() }
             Button("Later", role: .cancel) { dismiss() }
         } message: {
-            Text("Render scale and MetalFX only take effect when the immersive space restarts.")
+            Text("Render scale only takes effect when the immersive space restarts.")
         }
     }
 
@@ -164,7 +168,7 @@ struct SettingsView: View {
     // game is running (otherwise the next launch/open picks it up anyway).
     private func done() {
         let s = appModel.gameSettings
-        let changed = s.renderScale != snapScale || s.metalFXEnabled != snapMetalFX
+        let changed = s.renderScale != snapScale
         if changed && appModel.immersiveSpaceState == .open {
             showReloadPrompt = true
         } else {

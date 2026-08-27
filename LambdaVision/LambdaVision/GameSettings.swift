@@ -45,8 +45,8 @@ final class GameSettings {
     private(set) var isEngineReady = false
 
     // MARK: Graphics
-    /// Render scale above this leaves nothing for MetalFX to upscale, so the
-    /// toggle is disabled/forced-off above it (SettingsView greys it out).
+    /// Render scale above this leaves nothing for MetalFX to upscale. Only
+    /// meaningful if the (currently hidden) MetalFX setting ever returns.
     static let metalFXMaxScale = 0.75
 
     var renderScale: Double = AppSettingsStore.renderScale {
@@ -58,7 +58,17 @@ final class GameSettings {
                  }
         }
     }
-    var metalFXEnabled: Bool = AppSettingsStore.metalFXEnabled {
+    /// HIDDEN from SettingsView and deliberately NOT seeded from
+    /// AppSettingsStore: the optional FXAA-pass → MetalFX-spatial-upscale
+    /// chain adds two full-logical-resolution passes per eye and measured
+    /// ~13-14 ms GPU/frame (frameGPU p50 14-16 ms vs angleGPU p50 0.7 ms),
+    /// pinning the app at ~50 FPS; upscaling to the full drawable also fights
+    /// the compositor's own foveated upsampling. Starting from `false` rather
+    /// than the stored value means a user who enabled it before the toggle
+    /// disappeared isn't stranded at 50 FPS. The scaler code path stays
+    /// compiled (Renderer.useMetalFXChain / ensureColorMap) in case it
+    /// returns behind a cheaper configuration.
+    var metalFXEnabled: Bool = false {
         didSet { AppSettingsStore.metalFXEnabled = metalFXEnabled
                  Renderer.useMetalFXChain = metalFXEnabled }
     }

@@ -159,7 +159,11 @@ instead of deleting them.
   from rodir (app bundle); plus `Hgrunt03.mdl` capitalization crash on
   case-sensitive filesystems.
 - ~~~50 FPS everywhere~~ — FXAA+MetalFX+composite chain cost ~13-14 ms
-  GPU/frame; disabled → stable 120 FPS.
+  GPU/frame; disabled → stable 120 FPS. The Settings toggle is now gone:
+  `GameSettings.metalFXEnabled` starts `false` regardless of what
+  UserDefaults holds (a user who had enabled it isn't stranded at 50 FPS)
+  and the scaler code stays compiled behind `Renderer.useMetalFXChain` in
+  case a cheaper configuration brings it back.
 - ~~HUD left-eye-only / double vision / microscopic text~~ — per-eye
   V_PostRender + tangent-derived 2D viewport with convergence; hud_scale
   4, con_fontscale 3.

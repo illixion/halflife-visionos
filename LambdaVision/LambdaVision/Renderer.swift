@@ -196,6 +196,11 @@ actor Renderer {
     // targets, so these are read once at drawable setup — a change applies on
     // the next immersive-space open, not live.
     nonisolated(unsafe) static var engineScale: Float = 0.75
+    // Hidden in Settings and forced false at startup (see GameSettings): the
+    // FXAA-pass → MetalFX-spatial chain adds two full-logical-resolution
+    // passes per eye for ~13-14 ms GPU/frame (~50 FPS), and upscaling to the
+    // full drawable fights the compositor's own foveated upsampling. Code
+    // kept compiled in case it returns behind a cheaper configuration.
     nonisolated(unsafe) static var useMetalFXChain: Bool = false
     // Dominant hand for the weapon anchor + aim, and the accessibility switch
     // that fires along gaze instead of the weapon barrel. Both live.
@@ -899,12 +904,14 @@ actor Renderer {
         // edge-directed reconstruction doubles as edge smoothing — the
         // engine render has no AA of its own (GL MSAA through ANGLE
         // measured +7 ms/pair; see Lambda_Bridge.c).
-        // DISABLED: frame timing showed the FXAA+MetalFX+composite chain
-        // costs ~13-14 ms GPU/frame (angleGPU p50 0.7 ms vs frameGPU p50
-        // 14-16 ms) — the whole app was GPU-bound at ~50 FPS on the post
-        // chain alone. At 0.75x engine scale the scaler's win over the
-        // composite pass's bilinear sample doesn't justify two extra
-        // full-res passes per eye.
+        // DISABLED (and no longer reachable from Settings — the toggle is
+        // hidden and GameSettings forces it false at startup): frame timing
+        // showed the FXAA+MetalFX+composite chain costs ~13-14 ms GPU/frame
+        // (angleGPU p50 0.7 ms vs frameGPU p50 14-16 ms) — the whole app was
+        // GPU-bound at ~50 FPS on the post chain alone. At 0.75x engine scale
+        // the scaler's win over the composite pass's bilinear sample doesn't
+        // justify two extra full-res passes per eye, and upscaling to the
+        // full drawable fights the compositor's own foveated upsampling.
         let useMetalFXChain = Renderer.useMetalFXChain
         if useMetalFXChain, logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
            let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
