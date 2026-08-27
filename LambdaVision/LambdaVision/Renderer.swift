@@ -124,6 +124,10 @@ actor Renderer {
     let dynamicUniformBuffer: MTLBuffer
     let pipelineState: MTLRenderPipelineState
     let fullscreenPipelineState: MTLRenderPipelineState
+    // Same composite pass with the FXAA kernel folded into its fragment
+    // shader — the default. Selected per frame from Renderer.compositeFXAA,
+    // so the Settings toggle is live without adding a pass or a uniform.
+    let fullscreenFXAAPipelineState: MTLRenderPipelineState
     let fxaaPipelineState: MTLRenderPipelineState
     let fxaaArgumentTable: MTL4ArgumentTable
     let depthState: MTLDepthStencilState
@@ -133,10 +137,13 @@ actor Renderer {
     // CompositorServices hands us a drawable.
     var colorMap: MTLTexture!
     var colorMapLayerViews: [MTLTexture] = [] // per-slice 2D views handed to ANGLE
-    // AA + upscale chain: colorMap (engine render, sub-logical)
-    // → FXAA → fxaaMap → MetalFX spatial → displayMap (full logical).
-    // The display pass samples displayMap when the chain is active,
-    // colorMap directly when MetalFX is unavailable.
+    // Normal path: colorMap (engine render, sub-logical) → composite pass,
+    // which samples it directly and applies FXAA in the same fragment shader
+    // (fragmentShaderFXAA) — no intermediate texture, no extra pass.
+    // Parked path (Renderer.useMetalFXChain, no longer reachable from
+    // Settings): colorMap → FXAA pass → fxaaMap → MetalFX spatial →
+    // displayMap (full logical), which the composite samples instead. That
+    // chain measured ~13-14 ms GPU/frame — see the note in ensureColorMap.
     var fxaaMap: MTLTexture!
     var displayMap: MTLTexture!
     private var spatialScalers: [any MTL4FXSpatialScaler] = []
@@ -202,6 +209,10 @@ actor Renderer {
     // full drawable fights the compositor's own foveated upsampling. Code
     // kept compiled in case it returns behind a cheaper configuration.
     nonisolated(unsafe) static var useMetalFXChain: Bool = false
+    // FXAA inside the composite fragment shader (the replacement for the
+    // chain above). Read on the render thread every frame, so the Settings
+    // toggle applies live — it only picks between two pipeline states.
+    nonisolated(unsafe) static var compositeFXAA: Bool = true
     // Dominant hand for the weapon anchor + aim, and the accessibility switch
     // that fires along gaze instead of the weapon barrel. Both live.
     nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
@@ -585,7 +596,11 @@ actor Renderer {
 
         do {
             fullscreenPipelineState = try Self.buildFullscreenPipeline(device: device,
-                                                                       layerRenderer: layerRenderer)
+                                                                       layerRenderer: layerRenderer,
+                                                                       fxaa: false)
+            fullscreenFXAAPipelineState = try Self.buildFullscreenPipeline(device: device,
+                                                                          layerRenderer: layerRenderer,
+                                                                          fxaa: true)
         } catch {
             fatalError("Unable to compile fullscreen pipeline state. Error info: \(error)")
         }
@@ -724,13 +739,19 @@ actor Renderer {
     // Replaces the plane-mesh sampler — colorMap now fills the entire
     // headset eye viewport, which (combined with per-eye AVP tangents) is
     // the fully-immersive path.
+    // `fxaa` picks the fragment function: the plain sampler, or the same
+    // composite with the FXAA kernel folded in (zero extra passes — just the
+    // neighbourhood taps at the sampled texture's texel size). Everything
+    // else about the two pipelines is identical.
     static func buildFullscreenPipeline(device: MTLDevice,
-                                        layerRenderer: LayerRenderer) throws -> MTLRenderPipelineState {
+                                        layerRenderer: LayerRenderer,
+                                        fxaa: Bool) throws -> MTLRenderPipelineState {
         let library = device.makeDefaultLibrary()
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.label = "FullscreenPipeline"
+        pipelineDescriptor.label = fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline"
         pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
-        pipelineDescriptor.fragmentFunction = library?.makeFunction(name: "fragmentShader")
+        pipelineDescriptor.fragmentFunction = library?.makeFunction(
+            name: fxaa ? "fragmentShaderFXAA" : "fragmentShader")
         pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
         pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
         pipelineDescriptor.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
@@ -912,6 +933,8 @@ actor Renderer {
         // the scaler's win over the composite pass's bilinear sample doesn't
         // justify two extra full-res passes per eye, and upscaling to the
         // full drawable fights the compositor's own foveated upsampling.
+        // Edge smoothing now happens inside the composite pass instead
+        // (fragmentShaderFXAA / Renderer.compositeFXAA).
         let useMetalFXChain = Renderer.useMetalFXChain
         if useMetalFXChain, logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
            let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
@@ -1767,7 +1790,12 @@ actor Renderer {
                                   visibilityOptions: .device)
         }
         renderEncoder.setCullMode(.none)
-        renderEncoder.setRenderPipelineState(fullscreenPipelineState)
+        // FXAA rides along in this pass's fragment shader. Skipped when the
+        // MetalFX chain is live: that path already ran a dedicated FXAA pass
+        // into fxaaMap, and displayMap is what we'd be filtering here.
+        let compositeFXAA = Renderer.compositeFXAA && spatialScalers.isEmpty
+        renderEncoder.setRenderPipelineState(compositeFXAA ? fullscreenFXAAPipelineState
+                                                           : fullscreenPipelineState)
         // Depth must still be set since the pass has a depth attachment;
         // fullscreen triangle outputs z=1 which wins under reverse-Z
         // (drawable cleared to 0, compareFunction = greater).

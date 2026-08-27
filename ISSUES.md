@@ -163,7 +163,15 @@ instead of deleting them.
   `GameSettings.metalFXEnabled` starts `false` regardless of what
   UserDefaults holds (a user who had enabled it isn't stranded at 50 FPS)
   and the scaler code stays compiled behind `Renderer.useMetalFXChain` in
-  case a cheaper configuration brings it back.
+  case a cheaper configuration brings it back. The aliasing it was hiding
+  is now handled by folding the FXAA kernel into the composite/display
+  fragment shader (`fragmentShaderFXAA`, selected per frame from
+  `Renderer.compositeFXAA` via a second pipeline state) — zero extra
+  passes, zero intermediate textures, offsets taken from the sampled
+  texture's own texel size (engine resolution, not drawable). Exposed as
+  Settings → Graphics → "Edge smoothing (FXAA)", default on, live (it only
+  swaps the pipeline). Taps are per drawable fragment, so watch `frameGPU`
+  in the `[FT]` line when A/B-ing it.
 - ~~HUD left-eye-only / double vision / microscopic text~~ — per-eye
   V_PostRender + tangent-derived 2D viewport with convergence; hud_scale
   4, con_fontscale 3.

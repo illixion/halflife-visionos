@@ -62,12 +62,58 @@ vertex ColorInOut fullscreenVertexShader(uint vid [[vertex_id]],
     return out;
 }
 
-// FXAA (compact quality variant, Lottes). Runs on the engine render BEFORE
-// the MetalFX upscale so stairstep edges are smoothed rather than magnified.
-// The engine has no AA of its own (GL MSAA through ANGLE costs ~7 ms/pair).
+// FXAA (compact quality variant, Lottes). The engine has no AA of its own
+// (GL MSAA through ANGLE costs ~7 ms/pair) and the composite pass bilinearly
+// upsamples a sub-logical engine render, so edges stairstep twice over.
+//
+// The kernel lives here as an inline helper with two entry points:
+//   • fragmentShaderFXAA — the DEFAULT path. Runs inside the composite pass,
+//     so edge smoothing costs zero extra passes and zero intermediate
+//     textures (only the neighbourhood taps).
+//   • fxaaFragmentShader — the standalone pass that feeds the (currently
+//     hidden) MetalFX upscale chain. Kept compiled; see Renderer.
+//
+// Every tap is a symmetric pair about `uv`, so the filter is invariant under
+// a vertical mirror of the sample space: the two entry points may disagree
+// on the V flip and still produce identical output.
 static inline half fxaaLuma(half3 c)
 {
     return dot(c, half3(0.299h, 0.587h, 0.114h));
+}
+
+// `px` must be ONE TEXEL of the sampled texture (engine resolution when the
+// raw colorMap is bound), never a drawable-resolution pixel — the edges being
+// smoothed are engine-raster edges.
+static inline half3 fxaaResolve(texture2d_array<half> tex, sampler s,
+                                float2 uv, float2 px, ushort eye,
+                                half3 rgbM)
+{
+    half lM  = fxaaLuma(rgbM);
+    half lNW = fxaaLuma(tex.sample(s, uv + float2(-px.x, -px.y), eye).rgb);
+    half lNE = fxaaLuma(tex.sample(s, uv + float2( px.x, -px.y), eye).rgb);
+    half lSW = fxaaLuma(tex.sample(s, uv + float2(-px.x,  px.y), eye).rgb);
+    half lSE = fxaaLuma(tex.sample(s, uv + float2( px.x,  px.y), eye).rgb);
+
+    half lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+    half lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+
+    // Early out on low local contrast (flat area — nothing to smooth). Most
+    // pixels take this branch, which is what keeps the folded cost low.
+    if (lMax - lMin < max(0.0312h, lMax * 0.125h))
+        return rgbM;
+
+    float2 dir = float2(-float((lNW + lNE) - (lSW + lSE)),
+                         float((lNW + lSW) - (lNE + lSE)));
+    float dirReduce = max(float(lNW + lNE + lSW + lSE) * 0.25 * 0.125, 1.0 / 128.0);
+    float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+    dir = clamp(dir * rcpDirMin, -8.0, 8.0) * px;
+
+    half3 rgbA = 0.5h * (tex.sample(s, uv + dir * (1.0 / 3.0 - 0.5), eye).rgb
+                       + tex.sample(s, uv + dir * (2.0 / 3.0 - 0.5), eye).rgb);
+    half3 rgbB = rgbA * 0.5h + 0.25h * (tex.sample(s, uv + dir * -0.5, eye).rgb
+                                      + tex.sample(s, uv + dir *  0.5, eye).rgb);
+    half lB = fxaaLuma(rgbB);
+    return (lB < lMin || lB > lMax) ? rgbA : rgbB;
 }
 
 fragment float4 fxaaFragmentShader(ColorInOut in [[stage_in]],
@@ -83,33 +129,8 @@ fragment float4 fxaaFragmentShader(ColorInOut in [[stage_in]],
     // shader works identically with either texture.
     const float2 uv = float2(in.texCoord.x, 1.0 - in.texCoord.y);
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
-
     half3 rgbM = colorMap.sample(s, uv, in.eye).rgb;
-    half lM  = fxaaLuma(rgbM);
-    half lNW = fxaaLuma(colorMap.sample(s, uv + float2(-px.x, -px.y), in.eye).rgb);
-    half lNE = fxaaLuma(colorMap.sample(s, uv + float2( px.x, -px.y), in.eye).rgb);
-    half lSW = fxaaLuma(colorMap.sample(s, uv + float2(-px.x,  px.y), in.eye).rgb);
-    half lSE = fxaaLuma(colorMap.sample(s, uv + float2( px.x,  px.y), in.eye).rgb);
-
-    half lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
-    half lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
-
-    // Early out on low local contrast (flat area — nothing to smooth).
-    if (lMax - lMin < max(0.0312h, lMax * 0.125h))
-        return float4(float3(rgbM), 1.0);
-
-    float2 dir = float2(-float((lNW + lNE) - (lSW + lSE)),
-                         float((lNW + lSW) - (lNE + lSE)));
-    float dirReduce = max(float(lNW + lNE + lSW + lSE) * 0.25 * 0.125, 1.0 / 128.0);
-    float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
-    dir = clamp(dir * rcpDirMin, -8.0, 8.0) * px;
-
-    half3 rgbA = 0.5h * (colorMap.sample(s, uv + dir * (1.0 / 3.0 - 0.5), in.eye).rgb
-                       + colorMap.sample(s, uv + dir * (2.0 / 3.0 - 0.5), in.eye).rgb);
-    half3 rgbB = rgbA * 0.5h + 0.25h * (colorMap.sample(s, uv + dir * -0.5, in.eye).rgb
-                                      + colorMap.sample(s, uv + dir *  0.5, in.eye).rgb);
-    half lB = fxaaLuma(rgbB);
-    return float4(float3((lB < lMin || lB > lMax) ? rgbA : rgbB), 1.0);
+    return float4(float3(fxaaResolve(colorMap, s, uv, px, in.eye, rgbM)), 1.0);
 }
 
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
@@ -130,4 +151,24 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
 
     return float4(colorSample);
+}
+
+// Composite pass with FXAA folded in (Renderer.compositeFXAA, default on).
+// Identical to fragmentShader apart from resolving rgb through the FXAA
+// kernel at the SAMPLED texture's texel size; alpha still comes straight
+// from the centre tap so the drawable's alpha behaviour is unchanged.
+fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
+                                   texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
+{
+    constexpr sampler colorSampler(mip_filter::linear,
+                                   mag_filter::linear,
+                                   min_filter::linear,
+                                   address::clamp_to_edge);
+
+    // Same un-flipped UV convention as fragmentShader (see the note there).
+    float2 uv = in.texCoord;
+    const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
+    half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
+    return float4(float3(rgb), float(colorSample.a));
 }

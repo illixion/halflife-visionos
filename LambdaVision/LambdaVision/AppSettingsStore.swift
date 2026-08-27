@@ -32,6 +32,7 @@ enum AppSettingsStore {
     // MARK: Graphics
     private static let renderScaleKey     = "lambdavision.settings.renderScale"
     private static let metalFXEnabledKey  = "lambdavision.settings.metalFXEnabled"
+    private static let fxaaEnabledKey     = "lambdavision.settings.fxaaEnabled"
     private static let gammaKey           = "lambdavision.settings.gamma"
     private static let brightnessKey      = "lambdavision.settings.brightness"
     private static let snapTurnDegreesKey = "lambdavision.settings.snapTurnDegrees"
@@ -47,6 +48,12 @@ enum AppSettingsStore {
     static var metalFXEnabled: Bool {
         get { bool(metalFXEnabledKey, false) }
         set { defaults.set(newValue, forKey: metalFXEnabledKey) }
+    }
+    /// FXAA inside the composite pass. On by default — it replaced the
+    /// FXAA-pass + MetalFX chain and costs no extra render pass.
+    static var fxaaEnabled: Bool {
+        get { bool(fxaaEnabledKey, true) }
+        set { defaults.set(newValue, forKey: fxaaEnabledKey) }
     }
     static var gamma: Double {
         get { double(gammaKey, 2.5) }

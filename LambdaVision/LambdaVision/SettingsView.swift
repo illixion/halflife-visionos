@@ -54,7 +54,9 @@ struct SettingsView: View {
                     // full drawable fought the compositor's own foveated
                     // upsampling. GameSettings.metalFXEnabled forces it off
                     // at startup; the scaler code stays compiled in case a
-                    // cheaper configuration brings it back.
+                    // cheaper configuration brings it back. Edge smoothing is
+                    // the toggle below, folded into the composite pass.
+                    Toggle("Edge smoothing (FXAA)", isOn: $settings.fxaaEnabled)
                     slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
                         String(format: "%.1f", $0)
                     }
@@ -67,7 +69,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing.")
+                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft.")
                 }
 
                 Section("Diagnostics") {

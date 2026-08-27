@@ -16,7 +16,8 @@
 //      Two of them (engineScale, useMetalFXChain) size the render targets and
 //      are only read at drawable setup, so they take effect on the next
 //      immersive-space open; applyRendererStatics() runs at init so the first
-//      setup already sees the stored values.
+//      setup already sees the stored values. The rest (including
+//      compositeFXAA) are read per frame and so apply live.
 //
 
 import Foundation
@@ -67,10 +68,19 @@ final class GameSettings {
     /// than the stored value means a user who enabled it before the toggle
     /// disappeared isn't stranded at 50 FPS. The scaler code path stays
     /// compiled (Renderer.useMetalFXChain / ensureColorMap) in case it
-    /// returns behind a cheaper configuration.
+    /// returns; edge smoothing now lives in the composite pass instead
+    /// (`fxaaEnabled`).
     var metalFXEnabled: Bool = false {
         didSet { AppSettingsStore.metalFXEnabled = metalFXEnabled
                  Renderer.useMetalFXChain = metalFXEnabled }
+    }
+    /// FXAA folded into the composite/display fragment shader — the cheap
+    /// replacement for the chain above (no extra pass, no intermediate
+    /// texture, just the neighbourhood taps at engine texel size). Live: the
+    /// renderer picks between two pipeline states per frame.
+    var fxaaEnabled: Bool = AppSettingsStore.fxaaEnabled {
+        didSet { AppSettingsStore.fxaaEnabled = fxaaEnabled
+                 Renderer.compositeFXAA = fxaaEnabled }
     }
     var gamma: Double = AppSettingsStore.gamma {
         didSet { AppSettingsStore.gamma = gamma; cvar("gamma", gamma) }
@@ -128,6 +138,7 @@ final class GameSettings {
     func applyRendererStatics() {
         Renderer.engineScale       = Float(renderScale)
         Renderer.useMetalFXChain   = metalFXEnabled
+        Renderer.compositeFXAA     = fxaaEnabled
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
