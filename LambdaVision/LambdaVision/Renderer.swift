@@ -5,12 +5,13 @@
 //  Created by Ixion on 10/05/2026.
 //
 
-import RAVEDiagnostics
 import CompositorServices
 import Metal
-import QuartzCore
 import MetalFX
 import MetalKit
+import QuartzCore
+import RAVEDiagnostics
+import RAVEInput
 import simd
 
 // The 256 byte aligned size of our uniform structure
@@ -1687,7 +1688,9 @@ actor Renderer {
         }
         weaponPass.uploadIfNeeded()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
-        if weaponActive {
+        let joystickVisible = HandMovement.joystickVisualization != nil
+        let supplementalPassActive = weaponActive || joystickVisible
+        if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
                                    height: drawable.colorTextures[0].height,
                                    slices: drawable.views.count)
@@ -1734,7 +1737,7 @@ actor Renderer {
             drawable.depthTextures[0],
             drawableTarget.viewProjectionBuffer
         ])
-        if weaponActive {
+        if supplementalPassActive {
             residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex))
         }
         residencySet.commit()
@@ -1821,12 +1824,67 @@ actor Renderer {
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
 
-        if weaponActive {
+        if supplementalPassActive {
             let anchorM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+            let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
+            let headUp = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
+            var model = matrix_identity_float4x4
+            var lightColor = SIMD3<Float>(repeating: 0.5)
+            var ambient = SIMD3<Float>(repeating: 0.5)
+            var drawWeapon = false
+            var arcs: [WeaponPass.Arc] = []
+
+            if let stick = HandMovement.joystickVisualization {
+                let visualRadius: Float = 0.065
+                let fullScale = max(stick.fullScaleMeters, 0.0001)
+                let displacement = stick.handle - stick.center
+                let x = simd_dot(displacement, stick.basis.right) / fullScale
+                let y = simd_dot(displacement, stick.basis.forward) / fullScale
+                let center = stick.center + SIMD3<Float>(0, 0.08, 0)
+                let deadzoneRadius = visualRadius
+                    * min(1, max(0, stick.deadzoneMeters / fullScale))
+                let handle = center + headRight * (x * visualRadius) + headUp * (y * visualRadius)
+                let active = simd_length(stick.value) > 0.001
+
+                arcs.append(WeaponPass.Arc(
+                    center: center,
+                    right: headRight,
+                    up: headUp,
+                    innerR: visualRadius - 0.004,
+                    outerR: visualRadius,
+                    color: SIMD4(0.55, 0.58, 0.64, 1),
+                    startTurns: 0,
+                    sweepTurns: 1
+                ))
+                arcs.append(WeaponPass.Arc(
+                    center: center,
+                    right: headRight,
+                    up: headUp,
+                    innerR: max(0, deadzoneRadius - 0.002),
+                    outerR: deadzoneRadius,
+                    color: SIMD4(0.35, 0.37, 0.42, 1),
+                    startTurns: 0,
+                    sweepTurns: 1
+                ))
+                arcs.append(WeaponPass.Arc(
+                    center: handle,
+                    right: headRight,
+                    up: headUp,
+                    innerR: 0,
+                    outerR: 0.011,
+                    color: active
+                        ? SIMD4(1.0, 0.78, 0.25, 1)
+                        : SIMD4(0.72, 0.74, 0.78, 1),
+                    startTurns: 0,
+                    sweepTurns: 1
+                ))
+            }
+
             // Hand-anchored placement from the LIVE hand frame this frame — no
             // engine round-trip, so head rotation can't shear it (the drift the
             // engine-side path had). Skip drawing when the hand isn't tracked.
-            if let hand = sampleDominantHand(headTransform: anchorM) {
+            if weaponActive, let hand = sampleDominantHand(headTransform: anchorM) {
+                drawWeapon = true
                 let fwd = hand.worldForward
                 let up  = hand.worldUp
                 let right = simd_normalize(simd_cross(up, fwd))
@@ -1853,7 +1911,7 @@ actor Renderer {
                 // hand: model = handWorld · C · B · inverse(handBone).
                 let handBoneInv = weaponPass.hasHandBone ? weaponPass.handBone.inverse
                                                          : matrix_identity_float4x4
-                let model = handWorld * C * B * handBoneInv
+                model = handWorld * C * B * handBoneInv
 
                 // World light sampled at the eye by the engine (R_LightPoint),
                 // split into an ambient floor + a soft top-down directional so
@@ -1861,13 +1919,12 @@ actor Renderer {
                 var lrgb: [Float] = [0.5, 0.5, 0.5]
                 lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
+                lightColor = lc * 0.7
+                ambient = lc * 0.6
                 // UI arcs, billboarded to the head so they read from any
                 // angle: the reload-hold ring floats above the weapon; the
                 // radial weapon menu draws five sector wedges around the
                 // point where the 🤌 engaged, the armed one highlighted.
-                var arcs: [WeaponPass.Arc] = []
-                let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
-                let headUp    = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
                 if reloadRingProgress > 0 {
                     arcs.append(WeaponPass.Arc(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
                                                right: headRight, up: headUp,
@@ -1908,14 +1965,18 @@ actor Renderer {
                                                    startTurns: 0, sweepTurns: 1))
                     }
                 }
+            }
+
+            if drawWeapon || !arcs.isEmpty {
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
                                   viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
                                   viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
                                   uniformBufferIndex: uniformBufferIndex,
                                   model: model,
                                   lightDir: normalize(SIMD3<Float>(0.2, 1.0, 0.3)),
-                                  lightColor: lc * 0.7,
-                                  ambient: lc * 0.6,
+                                  lightColor: lightColor,
+                                  ambient: ambient,
+                                  drawWeapon: drawWeapon,
                                   arcs: arcs)
             }
         }

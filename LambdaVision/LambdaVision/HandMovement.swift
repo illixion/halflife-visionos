@@ -79,6 +79,9 @@ nonisolated final class HandMovement {
         var target: Int
     }
     nonisolated(unsafe) static var throttleGauge: ThrottleGauge? = nil
+    /// Shared RAVEInput geometry for the locomotion stick. The Metal weapon/UI
+    /// pass billboards this above the movement wrist while the clutch is held.
+    nonisolated(unsafe) static var joystickVisualization: RAVEJoystickVisualization? = nil
 
     private var pinchDetector = RAVEPinchDetector(tuning: .clutch)
     private var joystick = RAVEHandJoystick(
@@ -217,11 +220,11 @@ nonisolated final class HandMovement {
         // frame; a small deadzone keeps a stationary pinch from drifting.
         joystick.deadzoneMeters = HandMovement.deadzoneM   // live-tunable
         let stick = joystick.update(
-            wristWorld: wrist,
+            controlPoint: wrist,
             engaged: true,
-            worldForward: headForward,
-            worldRight: headRight
+            basis: RAVEPlanarBasis(forward: headForward, right: headRight)
         )
+        HandMovement.joystickVisualization = stick.visualization
         let x = stick.vector.x
         let y = stick.vector.y
         lambda_joy_set_axis(0, Int32((x * 32767).rounded()))    // side, + = right
@@ -252,6 +255,7 @@ nonisolated final class HandMovement {
     /// is disengaged, so the enter/exit hysteresis stays coherent. Idempotent.
     private func zeroMovement() {
         joystick.release()
+        HandMovement.joystickVisualization = nil
         if axesActive {
             lambda_joy_set_axis(0, 0)
             lambda_joy_set_axis(1, 0)

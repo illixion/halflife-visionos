@@ -69,6 +69,12 @@ continuously — the hand input this app uses was converged into `RAVEInput` out
 this app and two others — and a path reference keeps "move this into the package
 and update its callers" a single atomic edit.
 
+While the off-hand locomotion clutch is held, LambdaVision renders RAVEInput's
+shared joystick visualization as a head-facing outer ring, deadzone ring, and
+handle above the movement wrist. It uses the existing Metal weapon/UI arc pass,
+so the feedback remains stereoscopic and world-anchored without adding a
+RealityKit overlay to the Compositor Services renderer.
+
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
 your team ID, then build & run on your AVP — a build phase fetches
 xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework automatically on

@@ -32,7 +32,7 @@ final class WeaponPass {
         var startTurns: Float
         var sweepTurns: Float
     }
-    static let maxArcs = 12
+    static let maxArcs = 16
     private static let arcSlotStride = 256   // constant-buffer slot alignment
 
     private let device: MTLDevice
@@ -241,8 +241,9 @@ final class WeaponPass {
                 lightDir: SIMD3<Float>,
                 lightColor: SIMD3<Float>,
                 ambient: SIMD3<Float>,
+                drawWeapon: Bool = true,
                 arcs: [Arc] = []) {
-        guard isReady, let depth else { return }
+        guard let depth else { return }
 
         let ub = uniformBuffers[uniformBufferIndex]
         var u = WeaponUniforms(modelMatrix: model,
@@ -268,9 +269,6 @@ final class WeaponPass {
         // colour writes on the same queue (MTL4 = no hazard tracking).
         enc.barrier(afterQueueStages: .all, beforeStages: .fragment, visibilityOptions: .device)
 
-        enc.setRenderPipelineState(pipeline)
-        enc.setDepthStencilState(depthState)
-        enc.setCullMode(.none)   // GoldSrc winding varies; cull nothing for now
         enc.setViewports(drawable.views.map { $0.textureMap.viewport })
         if drawable.views.count > 1 {
             enc.setVertexAmplificationCount((0..<drawable.views.count).map {
@@ -281,18 +279,26 @@ final class WeaponPass {
 
         enc.setArgumentTable(vertexArgTable, stages: .vertex)
         enc.setArgumentTable(fragmentArgTable, stages: .fragment)
-        vertexArgTable.setAddress(vertexBuffer!.gpuAddress, index: BufferIndex.meshPositions.rawValue)
         vertexArgTable.setAddress(ub.gpuAddress, index: BufferIndex.uniforms.rawValue)
         vertexArgTable.setAddress(viewProjectionBuffer.gpuAddress + UInt64(viewProjectionOffset),
                                   index: BufferIndex.viewProjection.rawValue)
         fragmentArgTable.setAddress(ub.gpuAddress, index: BufferIndex.uniforms.rawValue)
 
-        for sm in submeshes {
-            guard !textures.isEmpty else { break }
-            let tex = textures[min(sm.texture, textures.count - 1)]
-            fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
-            enc.drawPrimitives(primitiveType: .triangle,
-                               vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
+        if drawWeapon, isReady, let vertexBuffer {
+            enc.setRenderPipelineState(pipeline)
+            enc.setDepthStencilState(depthState)
+            enc.setCullMode(.none)   // GoldSrc winding varies; cull nothing for now
+            vertexArgTable.setAddress(
+                vertexBuffer.gpuAddress,
+                index: BufferIndex.meshPositions.rawValue
+            )
+            for sm in submeshes {
+                guard !textures.isEmpty else { break }
+                let tex = textures[min(sm.texture, textures.count - 1)]
+                fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
+                enc.drawPrimitives(primitiveType: .triangle,
+                                   vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
+            }
         }
 
         // UI arcs (reload ring, weapon-menu sectors), drawn last with depth
