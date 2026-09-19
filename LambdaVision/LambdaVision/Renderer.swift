@@ -253,6 +253,11 @@ actor Renderer {
     // ARKit hand frames don't line up perfectly; these Euler degrees + push
     // (metres, along the hand's forward) tune how the gun sits in the hand.
     // Tuned live; start neutral and adjust from device.
+    // Set once at engine init: whether the player-avatar model was found and
+    // baked (see lambda_body_load). Read by the body pass to decide whether a
+    // first-person body can be drawn at all.
+    nonisolated(unsafe) static var avatarAvailable = false
+
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
     nonisolated(unsafe) static var gripYawDeg: Float = 180   // barrel points along fingers
@@ -1147,6 +1152,18 @@ actor Renderer {
             }
         }
         AppLog.render.line("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
+
+        // First-person avatar. Nothing in the engine publishes a player model
+        // (you never see yourself in single-player), so load it straight off
+        // the read-only game data. The deathmatch Gordon is the best body we
+        // have: 343 source vertices, a full Bip01 skeleton with both arm
+        // chains, embedded textures, and life-size at 72 units. Body value 1
+        // selects its high-detail submodel over the low-detail one.
+        // Non-fatal: without it we simply draw no body.
+        let bodyModel = rodir + "/valve/models/player/gordon/gordon.mdl"
+        let bodyLoaded = bodyModel.withCString { lambda_body_load($0, 1) } != 0
+        Renderer.avatarAvailable = bodyLoaded
+        AppLog.render.line("[LambdaVision] avatar model \(bodyLoaded ? "loaded" : "MISSING"): \(bodyModel)")
         if rc == 0 {
             // Engine + GL worker are now up, so cvar commands are safe to post.
             // Flush the archived Graphics/Audio/Input cvars and enable live pushes.

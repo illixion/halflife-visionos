@@ -146,6 +146,24 @@ void     lambda_weapon_unlock(void);
 // internally). Returns its generation, 0 if no pose has been published yet.
 uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out);
 
+// --- player body -----------------------------------------------------------
+//
+// The first-person avatar. Unlike the weapon, no engine entity publishes it,
+// so it is read straight off disk once: pass the full path to a GoldSrc v10
+// .mdl with embedded textures, plus the `body` bodygroup value used to pick
+// submodels (the deathmatch player models put their high-detail body at 1).
+// Returns nonzero on success. Safe to call again to swap models; the previous
+// buffer is released.
+//
+// The pose this slot publishes is the model's REST pose, not an animation —
+// the avatar is posed by the platform's head/hand IK, so the rest pose serves
+// only as the reference the solver builds rotations against.
+int      lambda_body_load(const char *path, int body);
+uint32_t lambda_body_generation(void);
+uint32_t lambda_body_lock(lambda_weapon_mesh_t *out);
+void     lambda_body_unlock(void);
+uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -80,18 +80,23 @@ instead of deleting them.
   Physical per-weapon reloads can build on the exported bone table (mag =
   `Box02` / `clip`, pump = `Charger`, cylinder = `revolver` +
   `speed_loader`).
-- **Arms.** The viewmodel sleeve stops mid-forearm and is rigidly driven by
-  Valve's sequence, so it neither reaches nor follows the player's real arm.
-  The rig already carries the full chain (`Bip01 Spine*` → `R Clavicle` →
-  `R UpperArm` → `R Forearm` → `R Hand`), so no new skeleton is needed —
-  only geometry past the elbow and something to drive it. Order that
-  matters: (1) skin the model's hand to the ARKit joints (the Biped finger
-  rig `Finger0..4` × 3 maps 1:1 onto the 27-joint hand skeleton), (2) drive
-  `Forearm`/`UpperArm` with FABRIK from a shoulder estimated off the head
-  anchor, (3) only then extrude the sleeve's open elbow loop up the arm.
-  Extending before IK makes things worse, not better — a shoulder that
-  doesn't sit on the player's real shoulder reads far worse than a forearm
-  that ends at the elbow, which is why Alyx draws gloves and cuffs only.
+- **First-person avatar (in progress).** The viewmodel sleeve stops mid-forearm
+  and is rigidly driven by Valve's sequence, so it neither reaches nor follows
+  the player's real arm. Rather than extend the sleeve, draw the whole player
+  body and let the arms come with it. The extractor now has a second model
+  slot and loads `valve/models/player/gordon/gordon.mdl` at startup
+  (`lambda_body_load`): 343 source vertices, 42 bones with both full arm
+  chains, embedded textures, life-size at 72 units with a 55 cm shoulder-to-
+  wrist reach. Still to do: pose it from head and hand tracking instead of a
+  sequence (FABRIK per arm from `CharacterKit`, hips below a damped head yaw,
+  legs hidden at first), convert solved joint POSITIONS into bone rotations
+  for the palette, and suppress the viewmodel's own hands/sleeve submeshes so
+  the gun alone grips the avatar's hand. Risk to watch: a body you cannot
+  fully track can read worse than no body, so keep an arms-only fallback.
+  Rejected: Half-Life: Source and Half-Life Deathmatch: Source ship
+  recompiles, not remakes — their player models are 595 and 755 vertices with
+  *single-bone* rigid skinning, exactly like GoldSrc, so a whole Source asset
+  pipeline buys a 1.7x vertex bump and nothing else.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.

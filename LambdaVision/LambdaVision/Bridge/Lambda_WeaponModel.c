@@ -240,19 +240,63 @@ typedef struct {
     uint32_t generation;
 } snapshot_t;
 
-static snapshot_t      g_snap[2];
-static int             g_active = -1;          // index of the readable snapshot
-static uint32_t        g_generation = 0;
-static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
+// One independently baked model. The weapon slot is driven by the header the
+// client publishes each frame; the body slot holds the player avatar, loaded
+// once from disk (see lambda_body_load) and posed by the Swift side's IK
+// rather than by any authored sequence.
+typedef struct {
+    snapshot_t      snap[2];
+    int             active;         // index of the readable snapshot, -1 = none
+    uint32_t        generation;
+    pthread_mutex_t mtx;
+    lambda_weapon_pose_t pose;      // latest pose, written under mtx
 
-// Latest pose for the active snapshot (written every tick under g_mtx).
-static lambda_weapon_pose_t g_pose;
+    // Re-bake key: only walk the header again when the model actually changes.
+    void *last_hdr;
+    int   last_modelindex, last_body, last_valid;
 
-// Change key so we only re-bake when the model actually changes.
-static void   *g_last_hdr = NULL;
-static int      g_last_modelindex = -1;
-static int      g_last_body = -1;
-static int      g_last_valid = 0;   // last bake succeeded (header sane)
+    // File buffer owned by this slot (disk-loaded models only; the weapon
+    // slot borrows the engine's resident copy and owns nothing).
+    void *owned;
+} model_slot_t;
+
+static model_slot_t g_weapon = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
+                                 .last_modelindex = -1, .last_body = -1 };
+static model_slot_t g_body   = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
+                                 .last_modelindex = -1, .last_body = -1 };
+
+// The slot mutexes are RECURSIVE. lambda_*_lock hands out interior pointers
+// and returns still holding the lock, so a caller that reasonably reads the
+// pose while inspecting the mesh would otherwise self-deadlock on the very
+// first call. Recursion costs nothing here and removes the trap.
+static pthread_once_t g_slot_once = PTHREAD_ONCE_INIT;
+static void slot_mutexes_init(void) {
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_weapon.mtx, &attr);
+    pthread_mutex_init(&g_body.mtx, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+static void slot_lock_mutex(model_slot_t *slot) {
+    pthread_once(&g_slot_once, slot_mutexes_init);
+    pthread_mutex_lock(&slot->mtx);
+}
+
+// Generations are handed out globally so a reader can never mistake one
+// slot's generation for the other's.
+static uint32_t        g_generation_seq = 0;
+static pthread_mutex_t g_generation_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t next_generation(void) {
+    pthread_mutex_lock(&g_generation_mtx);
+    uint32_t g = ++g_generation_seq;
+    pthread_mutex_unlock(&g_generation_mtx);
+    return g;
+}
+
+// Published by the hlsdk client (cl_dll/entity.cpp) each frame when
+// vr_weapon_external is on; read here on the same (GL worker) thread.
 
 // Published by the hlsdk client (cl_dll/entity.cpp) each frame when
 // vr_weapon_external is on; read here on the same (GL worker) thread.
@@ -580,10 +624,10 @@ static void bake_mesh(snapshot_t *s, const uint8_t *base, const mstudiomesh_t *m
 // (the idle grip). Cheap, and only fires on model change while the external
 // weapon is active.
 // ---------------------------------------------------------------------------
-static void dump_obj(const snapshot_t *s, const matrix3x4 *bones) {
-    FILE *f = fopen("weapon_dump.obj", "w");
+static void dump_obj(const snapshot_t *s, const matrix3x4 *bones, const char *path) {
+    FILE *f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "# LambdaVision weapon dump (modelindex=%d, seq 0 frame 0)\n", s->modelindex);
+    fprintf(f, "# LambdaVision model dump (modelindex=%d, seq 0 frame 0)\n", s->modelindex);
     for (uint32_t i = 0; i < s->vcount; i++) {
         float p[3];
         Matrix3x4_Transform(bones[s->vertices[i].bone], s->vertices[i].pos, p);
@@ -597,8 +641,8 @@ static void dump_obj(const snapshot_t *s, const matrix3x4 *bones) {
                 s->indices[i+1]+1, s->indices[i+1]+1,
                 s->indices[i+2]+1, s->indices[i+2]+1);
     fclose(f);
-    fprintf(stderr, "[lambda_weapon] dumped weapon_dump.obj (%u verts, %u tris)\n",
-            s->vcount, s->icount / 3);
+    fprintf(stderr, "[lambda_weapon] dumped %s (%u verts, %u tris)\n",
+            path, s->vcount, s->icount / 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -694,8 +738,9 @@ static int choose_grip_bone(const uint8_t *base, const studiohdr_t *hdr, int bod
     return right;
 }
 
-// Bake `hdr` into the back snapshot and publish it. Returns 1 on success.
-static int bake_model(const uint8_t *base, const studiohdr_t *hdr, int modelindex, int body) {
+// Bake `hdr` into `slot`'s back snapshot and publish it. Returns 1 on success.
+static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t *hdr,
+                      int modelindex, int body, const char *dump_path) {
     if (hdr->numbones <= 0 || hdr->numbones > LAMBDA_WEAPON_MAX_BONES) {
         fprintf(stderr, "[lambda_weapon] modelindex=%d has %d bones (max %d)\n",
                 modelindex, hdr->numbones, LAMBDA_WEAPON_MAX_BONES);
@@ -703,8 +748,8 @@ static int bake_model(const uint8_t *base, const studiohdr_t *hdr, int modelinde
     }
 
     // Bake into the back buffer (the one that isn't currently active).
-    int back = (g_active == 0) ? 1 : 0;
-    snapshot_t *s = &g_snap[back];
+    int back = (slot->active == 0) ? 1 : 0;
+    snapshot_t *s = &slot->snap[back];
     snapshot_reset(s);
     s->modelindex = modelindex;
 
@@ -777,28 +822,31 @@ static int bake_model(const uint8_t *base, const studiohdr_t *hdr, int modelinde
     matrix3x4 pose0[LAMBDA_WEAPON_MAX_BONES];
     compute_pose_bones(base, hdr, 0, 0.0f, pose0);
 
-    pthread_mutex_lock(&g_mtx);
-    s->generation = ++g_generation;
-    g_active = back;
-    g_pose.generation = s->generation;
-    g_pose.bone_count = (uint32_t)hdr->numbones;
-    g_pose.sequence = 0;
-    g_pose.frame = 0.0f;
-    memcpy(g_pose.bones, pose0, sizeof(matrix3x4) * (size_t)hdr->numbones);
-    pthread_mutex_unlock(&g_mtx);
+    uint32_t gen = next_generation();
+    slot_lock_mutex(slot);
+    s->generation = gen;
+    slot->generation = gen;
+    slot->active = back;
+    slot->pose.generation = gen;
+    slot->pose.bone_count = (uint32_t)hdr->numbones;
+    slot->pose.sequence = 0;
+    slot->pose.frame = 0.0f;
+    memcpy(slot->pose.bones, pose0, sizeof(matrix3x4) * (size_t)hdr->numbones);
+    pthread_mutex_unlock(&slot->mtx);
 
     fprintf(stderr,
         "[lambda_weapon] baked modelindex=%d gen=%u verts=%u tris=%u submeshes=%u "
         "textures=%u bones=%u handbone=%d seqs=%d bbox=[%.1f %.1f %.1f]..[%.1f %.1f %.1f]\n",
-        modelindex, g_generation, s->vcount, s->icount/3, s->scount, s->tcount,
+        modelindex, gen, s->vcount, s->icount/3, s->scount, s->tcount,
         s->bcount, s->hand_bone_index, hdr->numseq,
         s->bbmin[0], s->bbmin[1], s->bbmin[2], s->bbmax[0], s->bbmax[1], s->bbmax[2]);
 
-    dump_obj(s, pose0);
+    if (dump_path) dump_obj(s, pose0, dump_path);
     return 1;
 }
 
 void lambda_weapon_extract(void) {
+    model_slot_t *slot = &g_weapon;
     void *hdrp = g_vr_weapon_hdr;
     int   modelindex = g_vr_weapon_modelindex;
     int   body = g_vr_weapon_body;
@@ -809,17 +857,20 @@ void lambda_weapon_extract(void) {
     const studiohdr_t *hdr = (const studiohdr_t *)hdrp;
     const uint8_t *base = (const uint8_t *)hdrp;
 
-    if (hdrp != g_last_hdr || modelindex != g_last_modelindex || body != g_last_body) {
-        g_last_hdr = hdrp; g_last_modelindex = modelindex; g_last_body = body;
-        g_last_valid = 0;
+    if (hdrp != slot->last_hdr || modelindex != slot->last_modelindex ||
+        body != slot->last_body) {
+        slot->last_hdr = hdrp;
+        slot->last_modelindex = modelindex;
+        slot->last_body = body;
+        slot->last_valid = 0;
         if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
             fprintf(stderr, "[lambda_weapon] bad studio header (ident=%d ver=%d)\n",
                     hdr->ident, hdr->version);
             return;
         }
-        g_last_valid = bake_model(base, hdr, modelindex, body);
+        slot->last_valid = bake_model(slot, base, hdr, modelindex, body, "weapon_dump.obj");
     }
-    if (!g_last_valid) return;
+    if (!slot->last_valid) return;
 
     // Per-tick pose for the published animation state.
     int sequence = g_vr_weapon_sequence;
@@ -833,27 +884,25 @@ void lambda_weapon_extract(void) {
     matrix3x4 bones[LAMBDA_WEAPON_MAX_BONES];
     compute_pose_bones(base, hdr, sequence, f, bones);
 
-    pthread_mutex_lock(&g_mtx);
-    g_pose.generation = g_generation;
-    g_pose.bone_count = (uint32_t)hdr->numbones;
-    g_pose.sequence = sequence;
-    g_pose.frame = f;
-    memcpy(g_pose.bones, bones, sizeof(matrix3x4) * (size_t)hdr->numbones);
-    pthread_mutex_unlock(&g_mtx);
+    slot_lock_mutex(slot);
+    slot->pose.generation = slot->generation;
+    slot->pose.bone_count = (uint32_t)hdr->numbones;
+    slot->pose.sequence = sequence;
+    slot->pose.frame = f;
+    memcpy(slot->pose.bones, bones, sizeof(matrix3x4) * (size_t)hdr->numbones);
+    pthread_mutex_unlock(&slot->mtx);
 }
 
-uint32_t lambda_weapon_generation(void) {
-    return g_generation;
-}
+// --- slot-generic accessors ------------------------------------------------
 
-uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) {
-    pthread_mutex_lock(&g_mtx);
-    if (g_active < 0) {
+static uint32_t slot_lock(model_slot_t *slot, lambda_weapon_mesh_t *out) {
+    slot_lock_mutex(slot);
+    if (slot->active < 0) {
         memset(out, 0, sizeof(*out));
         out->hand_bone_index = -1;
         return 0;
     }
-    const snapshot_t *s = &g_snap[g_active];
+    const snapshot_t *s = &slot->snap[slot->active];
     out->generation   = s->generation;
     out->vertex_count = s->vcount;   out->vertices  = s->vertices;
     out->index_count  = s->icount;   out->indices   = s->indices;
@@ -867,23 +916,89 @@ uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) {
     return s->generation;
 }
 
-void lambda_weapon_unlock(void) {
-    pthread_mutex_unlock(&g_mtx);
-}
-
-uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out) {
-    pthread_mutex_lock(&g_mtx);
-    if (g_pose.generation == 0) {
-        pthread_mutex_unlock(&g_mtx);
+static uint32_t slot_copy_pose(model_slot_t *slot, lambda_weapon_pose_t *out) {
+    slot_lock_mutex(slot);
+    if (slot->pose.generation == 0) {
+        pthread_mutex_unlock(&slot->mtx);
         memset(out, 0, sizeof(*out));
         return 0;
     }
     // Header + only the live bones; the tail of the array is left untouched.
-    out->generation = g_pose.generation;
-    out->bone_count = g_pose.bone_count;
-    out->sequence   = g_pose.sequence;
-    out->frame      = g_pose.frame;
-    memcpy(out->bones, g_pose.bones, sizeof(g_pose.bones[0]) * g_pose.bone_count);
-    pthread_mutex_unlock(&g_mtx);
+    out->generation = slot->pose.generation;
+    out->bone_count = slot->pose.bone_count;
+    out->sequence   = slot->pose.sequence;
+    out->frame      = slot->pose.frame;
+    memcpy(out->bones, slot->pose.bones, sizeof(slot->pose.bones[0]) * slot->pose.bone_count);
+    pthread_mutex_unlock(&slot->mtx);
     return out->generation;
+}
+
+uint32_t lambda_weapon_generation(void) { return g_weapon.generation; }
+
+uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_weapon, out); }
+
+void lambda_weapon_unlock(void) { pthread_mutex_unlock(&g_weapon.mtx); }
+
+uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out) {
+    return slot_copy_pose(&g_weapon, out);
+}
+
+// --- player body -----------------------------------------------------------
+//
+// The avatar is not an engine entity, so nothing publishes it: we read the
+// .mdl off disk once and keep the buffer for the process lifetime. Its pose
+// is authored by the Swift side from head and hand tracking rather than by
+// any authored sequence, so the pose this slot publishes is only the rest
+// pose, which the IK uses as its reference.
+
+int lambda_body_load(const char *path, int body) {
+    model_slot_t *slot = &g_body;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[lambda_body] cannot open %s\n", path);
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long size = ftell(f);
+    if (size <= (long)sizeof(studiohdr_t)) { fclose(f); return 0; }
+    rewind(f);
+    void *buf = malloc((size_t)size);
+    if (!buf) { fclose(f); return 0; }
+    size_t got = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    if (got != (size_t)size) { free(buf); return 0; }
+
+    const studiohdr_t *hdr = (const studiohdr_t *)buf;
+    if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
+        fprintf(stderr, "[lambda_body] %s is not a studio v10 model\n", path);
+        free(buf);
+        return 0;
+    }
+    // Textures may live in a companion <name>T.mdl; the player models we use
+    // embed theirs, so an external table is a hard failure rather than a
+    // silent magenta model.
+    if (hdr->numtextures <= 0) {
+        fprintf(stderr, "[lambda_body] %s has no embedded textures\n", path);
+        free(buf);
+        return 0;
+    }
+
+    int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, "body_dump.obj");
+    if (!ok) { free(buf); return 0; }
+
+    free(slot->owned);          // release any previous body buffer
+    slot->owned = buf;          // snapshots point into this; keep it alive
+    slot->last_valid = 1;
+    return 1;
+}
+
+uint32_t lambda_body_generation(void) { return g_body.generation; }
+
+uint32_t lambda_body_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_body, out); }
+
+void lambda_body_unlock(void) { pthread_mutex_unlock(&g_body.mtx); }
+
+uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out) {
+    return slot_copy_pose(&g_body, out);
 }
