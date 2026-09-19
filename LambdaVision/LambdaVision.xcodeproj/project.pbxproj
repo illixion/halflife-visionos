@@ -130,6 +130,7 @@
 				AA04000000000000000000A2 /* RAVEInput */,
 				AA04000000000000000000A4 /* RAVEDiagnostics */,
 				AA09000000000000000000F2 /* RAVEConsole */,
+				AA11000000000000000000B2 /* RigKit */,
 			);
 			productName = LambdaVision;
 			productReference = 1DB96E8A2FB0522300F1ADA2 /* LambdaVision.app */;
@@ -189,6 +190,7 @@
 			packageReferences = (
 				AA04000000000000000000A1 /* XCLocalSwiftPackageReference "../../RAVEEngine" */,
 				AA09000000000000000000F1 /* XCLocalSwiftPackageReference "../../RAVESDK" */,
+				AA11000000000000000000B1 /* XCLocalSwiftPackageReference "../../RigKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1DB96E8B2FB0522300F1ADA2 /* Products */;
@@ -605,6 +607,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../../RAVEEngine;
 		};
+		AA11000000000000000000B1 /* XCLocalSwiftPackageReference "../../RigKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../RigKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -624,6 +630,11 @@
 		AA04000000000000000000A4 /* RAVEDiagnostics */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = RAVEDiagnostics;
+		};
+		AA11000000000000000000B2 /* RigKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA11000000000000000000B1 /* XCLocalSwiftPackageReference "../../RigKit" */;
+			productName = RigKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

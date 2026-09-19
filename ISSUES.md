@@ -87,12 +87,29 @@ instead of deleting them.
   slot and loads `valve/models/player/gordon/gordon.mdl` at startup
   (`lambda_body_load`): 343 source vertices, 42 bones with both full arm
   chains, embedded textures, life-size at 72 units with a 55 cm shoulder-to-
-  wrist reach. Still to do: pose it from head and hand tracking instead of a
-  sequence (FABRIK per arm from `CharacterKit`, hips below a damped head yaw,
-  legs hidden at first), convert solved joint POSITIONS into bone rotations
-  for the palette, and suppress the viewmodel's own hands/sleeve submeshes so
-  the gun alone grips the avatar's hand. Risk to watch: a body you cannot
-  fully track can read worse than no body, so keep an arms-only fallback.
+  wrist reach. `AvatarRig.swift` now poses it: the root is placed so the rest
+  head lands on the tracked head under a damped yaw (deliberately *not*
+  parented to the head, which would swing the torso every time you looked
+  down), and both arms are solved with FABRIK. Verified on the Mac against the
+  real `gordon.mdl` — rest pose round-trips to 0.00002 units, head placement is
+  exact at every yaw, and over 277 hand targets the worst miss is 1.76 mm with
+  the elbow correctly dropping 7.3 units below the shoulder-hand line. The IK
+  is `RigKit`, a framework-free sibling package (`../../RigKit`) split out of
+  spatial-ai-character so both games share one solver; everything GoldSrc —
+  Z-up inches, `Bip01` names, the row-major palette — stops at `AvatarRig`.
+  Solving happens in GoldSrc model space, so the palette stays native and no
+  axis conversion sits between the tracker and the bones. Still to do: draw it
+  (a body pass, or extend `WeaponPass`), apply head orientation to the head
+  bone, hide the legs until they can be tracked, and suppress the viewmodel's
+  own hands/sleeve submeshes so the gun alone grips the avatar's hand. Risk to
+  watch: a body you cannot fully track can read worse than no body, so keep an
+  arms-only fallback.
+  - Gotcha found on the way: the pose the body slot publishes is sequence 0
+    frame 0, not the studio bind pose — origin at the pelvis, one arm already
+    raised, and rotated 90° from the bind pose. That is harmless, because
+    vertices are baked bone-local and skin correctly against any palette, but
+    the bbox the bake logs is measured in the *other* pose, so the two never
+    agree and neither is wrong.
   Rejected: Half-Life: Source and Half-Life Deathmatch: Source ship
   recompiles, not remakes — their player models are 595 and 755 vertices with
   *single-bone* rigid skinning, exactly like GoldSrc, so a whole Source asset
