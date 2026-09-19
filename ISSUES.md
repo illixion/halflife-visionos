@@ -59,12 +59,20 @@ instead of deleting them.
   RealityKit/`RealityRenderer` was ruled out — a CompositorLayer immersive
   space is CompositorLayer XOR RealityView — so it's a 2nd Metal pass into the
   drawable colour slice with its own depth (leaves `drawable.depthTextures`
-  for reprojection). Backlog: bind-pose only (no fire/reload/idle — needs
-  `mstudioanim_t` decode), no muzzle flash, chrome faces drawn flat, external
-  `…T.mdl` textures fall back to magenta, egon has no `Bip01 R Hand`
-  (origin-at-hand), and it's a manual cvar (wire into Settings). Custom
-  skinned hands/arms are now just another mesh in this pass — the original
-  motivation, and the path to properly IK'd limbs in a 1998 game.
+  for reprojection). The pass now draws the **v_ viewmodel** (HEV hands, gun,
+  separate magazine/pump/cylinder bones) skinned on the GPU from a per-tick
+  bone palette that replays the engine's own sequence math
+  (`R_StudioEstimateFrame`/`CalcBones` ported into `Lambda_WeaponModel.c`),
+  with the posed `Bip01 R Hand` pinned to the tracked hand — so idle, shoot,
+  reload and draw play as authored. Backlog: grip constants
+  (`Renderer.gripRollDeg/gripYawDeg/gripPushM`) were tuned against the p_
+  hand bone and want a re-check on device; the model's own right hand is
+  rigid Valve animation, not the user's fingers (skin it to ARKit joints
+  next); no muzzle flash, chrome faces drawn flat, external `…T.mdl` textures
+  fall back to magenta, classic `v_9mmAR`/`v_hgun` have no hand bone
+  (origin-at-hand), and it's a manual cvar (wire into Settings). Physical
+  per-weapon reloads can build on the exported bone table (mag = `Box02` /
+  `clip`, pump = `Charger`, cylinder = `revolver` + `speed_loader`).
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.

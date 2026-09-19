@@ -2,9 +2,10 @@
 //  WeaponShaders.metal
 //  LambdaVision
 //
-//  Renders the bind-pose weapon mesh (baked from the GoldSrc .mdl by
-//  Lambda_WeaponModel.c) as a second pass over the engine image, hand-anchored
-//  and lit by a single ambient+directional probe sampled from the game world.
+//  Renders the skinned weapon viewmodel (baked from the GoldSrc .mdl by
+//  Lambda_WeaponModel.c, posed per frame through a bone palette) as a second
+//  pass over the engine image, hand-anchored and lit by a single
+//  ambient+directional probe sampled from the game world.
 //
 
 #include <metal_stdlib>
@@ -15,9 +16,10 @@ using namespace metal;
 
 struct WeaponVertex
 {
-    float3 position [[attribute(VertexAttributePosition)]];
-    float3 normal   [[attribute(VertexAttributeNormal)]];
+    float3 position [[attribute(VertexAttributePosition)]];   // bone-local
+    float3 normal   [[attribute(VertexAttributeNormal)]];     // bone-local
     float2 texCoord [[attribute(VertexAttributeTexcoord)]];
+    uint   bone     [[attribute(VertexAttributeBoneIndex)]];
 };
 
 struct WeaponInOut
@@ -31,14 +33,18 @@ struct WeaponInOut
 vertex WeaponInOut weaponVertexShader(WeaponVertex in [[stage_in]],
                                       ushort amp_id [[amplification_id]],
                                       constant WeaponUniforms & u [[ buffer(BufferIndexUniforms) ]],
-                                      constant ViewProjectionArray & vp [[ buffer(BufferIndexViewProjection) ]])
+                                      constant ViewProjectionArray & vp [[ buffer(BufferIndexViewProjection) ]],
+                                      constant WeaponBonePalette & pal [[ buffer(BufferIndexBones) ]])
 {
     WeaponInOut out;
-    float4 world = u.modelMatrix * float4(in.position, 1.0);
+    // GoldSrc skinning is rigid single-bone: bone-local → model space via
+    // the palette, then model → world via the hand-anchor transform.
+    float4x4 m = u.modelMatrix * pal.bones[min(in.bone, uint(WEAPON_MAX_BONES - 1))];
+    float4 world = m * float4(in.position, 1.0);
     out.position = vp.viewProjectionMatrix[amp_id] * world;
-    // modelMatrix is rotation + uniform scale, so the upper 3x3 rotates
-    // normals correctly (no separate inverse-transpose needed).
-    out.normal = (u.modelMatrix * float4(in.normal, 0.0)).xyz;
+    // Both factors are rotation (+ uniform scale in modelMatrix), so the
+    // upper 3x3 rotates normals correctly (no inverse-transpose needed).
+    out.normal = (m * float4(in.normal, 0.0)).xyz;
     out.texCoord = in.texCoord;
     out.eye = amp_id;
     return out;

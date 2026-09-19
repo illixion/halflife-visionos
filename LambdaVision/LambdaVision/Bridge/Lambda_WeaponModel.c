@@ -1,11 +1,13 @@
 // Lambda_WeaponModel.c — see Lambda_WeaponModel.h.
 //
-// Walks a resident GoldSrc studiohdr_t and bakes its bind pose into a triangle
-// mesh. The studio struct layout and the bone math are replicated locally
-// (rather than pulling engine headers onto the app target's include path) so
-// this stays a self-contained unit; the layouts are the frozen v10 format and
-// the math is copied verbatim from the engine's matrixlib/mathlib so the bind
-// pose matches what R_StudioSetupBones would produce.
+// Walks a resident GoldSrc studiohdr_t and bakes it into a bone-local triangle
+// mesh (once per model), then poses the bones every tick from the viewmodel's
+// published animation state. The studio struct layout and the bone math are
+// replicated locally (rather than pulling engine headers onto the app target's
+// include path) so this stays a self-contained unit; the layouts are the frozen
+// v10 format and the math is copied from the engine's matrixlib / mathlib /
+// gl_studio.c (R_StudioEstimateFrame, R_StudioCalcRotations, R_StudioCalcBones)
+// so the pose matches what the engine would have drawn.
 
 #include "Lambda_WeaponModel.h"
 
@@ -26,6 +28,12 @@
 #define STUDIO_NF_ADDITIVE  0x0020
 #define STUDIO_NF_MASKED    0x0040
 #define STUDIO_NF_UV_COORDS (1U<<31)
+
+// sequence flags / motion types
+#define STUDIO_LOOPING   0x0001
+#define STUDIO_X         0x0001
+#define STUDIO_Y         0x0002
+#define STUDIO_Z         0x0004
 
 typedef struct {
     int32_t ident, version;
@@ -59,6 +67,38 @@ typedef struct {
 } mstudiobone_t;
 
 typedef struct {
+    char    label[MAXSTUDIONAME];
+    float   fps;
+    int32_t flags;
+    int32_t activity, actweight;
+    int32_t numevents, eventindex;
+    int32_t numframes;
+    int32_t numpivots, pivotindex;
+    int32_t motiontype, motionbone;
+    float   linearmovement[3];
+    int32_t automoveposindex, automoveangleindex;
+    float   bbmin[3], bbmax[3];
+    int32_t numblends;
+    int32_t animindex;      // -> mstudioanim_t[numblends][numbones], hdr-relative when seqgroup == 0
+    int32_t blendtype[2];
+    float   blendstart[2], blendend[2];
+    int32_t blendparent;
+    int32_t seqgroup;
+    int32_t entrynode, exitnode, nodeflags;
+    int32_t nextseq;
+} mstudioseqdesc_t;
+
+// Per-bone, per-DOF offsets (relative to this struct) to RLE animvalue runs.
+typedef struct {
+    uint16_t offset[6];
+} mstudioanim_t;
+
+typedef union {
+    struct { uint8_t valid, total; } num;
+    int16_t value;
+} mstudioanimvalue_t;
+
+typedef struct {
     char    name[64];
     int32_t nummodels;
     int32_t base;
@@ -88,9 +128,20 @@ typedef struct {
     int32_t  index;     // offset to palettized image data, relative to hdr base
 } mstudiotexture_t;
 
+_Static_assert(sizeof(studiohdr_t) == 244,        "studiohdr_t layout");
+_Static_assert(sizeof(mstudiobone_t) == 112,      "mstudiobone_t layout");
+_Static_assert(sizeof(mstudioseqdesc_t) == 176,   "mstudioseqdesc_t layout");
+_Static_assert(sizeof(mstudioanim_t) == 12,       "mstudioanim_t layout");
+_Static_assert(sizeof(mstudioanimvalue_t) == 2,   "mstudioanimvalue_t layout");
+_Static_assert(sizeof(mstudiobodyparts_t) == 76,  "mstudiobodyparts_t layout");
+_Static_assert(sizeof(mstudiomodel_t) == 112,     "mstudiomodel_t layout");
+_Static_assert(sizeof(mstudiomesh_t) == 20,       "mstudiomesh_t layout");
+_Static_assert(sizeof(mstudiotexture_t) == 80,    "mstudiotexture_t layout");
+_Static_assert(sizeof(lambda_weapon_vertex_t) == 36, "vertex layout mirrored by WeaponPass");
+
 // ---------------------------------------------------------------------------
-// Bone math, copied verbatim from the engine (public/matrixlib.c) and
-// gl_studio.c's studio-quaternion convention, so the bind pose is identical.
+// Bone math, copied from the engine (public/matrixlib.c, xash3d_mathlib.c) and
+// gl_studio.c's studio-quaternion convention, so the pose is identical.
 // ---------------------------------------------------------------------------
 typedef float matrix3x4[3][4];
 
@@ -105,6 +156,37 @@ static void AngleQuaternionStudio(const float angles[3], float q[4]) {
     q[1] = cr * sp * cy + sr * cp * sy;
     q[2] = cr * cp * sy - sr * sp * cy;
     q[3] = cr * cp * cy + sr * sp * sy;
+}
+
+// QuaternionSlerp = QuaternionAlign + QuaternionSlerpNoAlign (xash3d_mathlib.c).
+static void QuaternionSlerp(const float p[4], const float q0[4], float t, float qt[4]) {
+    float q[4];
+    float a = 0.0f, b = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        a += (p[i] - q0[i]) * (p[i] - q0[i]);
+        b += (p[i] + q0[i]) * (p[i] + q0[i]);
+    }
+    for (int i = 0; i < 4; i++) q[i] = (a > b) ? -q0[i] : q0[i];
+
+    float cosom = p[0]*q[0] + p[1]*q[1] + p[2]*q[2] + p[3]*q[3];
+    if ((1.0f + cosom) > 0.000001f) {
+        float sclp, sclq;
+        if ((1.0f - cosom) > 0.000001f) {
+            float omega = acosf(cosom);
+            float sinom = sinf(omega);
+            sclp = sinf((1.0f - t) * omega) / sinom;
+            sclq = sinf(t * omega) / sinom;
+        } else {
+            sclp = 1.0f - t;
+            sclq = t;
+        }
+        for (int i = 0; i < 4; i++) qt[i] = sclp * p[i] + sclq * q[i];
+    } else {
+        qt[0] = -q[1]; qt[1] = q[0]; qt[2] = -q[3]; qt[3] = q[2];
+        float sclp = sinf((1.0f - t) * (0.5f * (float)M_PI));
+        float sclq = sinf(t * (0.5f * (float)M_PI));
+        for (int i = 0; i < 3; i++) qt[i] = sclp * p[i] + sclq * qt[i];
+    }
 }
 
 static void Matrix3x4_FromOriginQuat(matrix3x4 out, const float q[4], const float o[3]) {
@@ -141,12 +223,6 @@ static void Matrix3x4_Transform(const matrix3x4 m, const float v[3], float out[3
     out[2] = v[0]*m[2][0] + v[1]*m[2][1] + v[2]*m[2][2] + m[2][3];
 }
 
-static void Matrix3x4_Rotate(const matrix3x4 m, const float v[3], float out[3]) {
-    out[0] = v[0]*m[0][0] + v[1]*m[0][1] + v[2]*m[0][2];
-    out[1] = v[0]*m[1][0] + v[1]*m[1][1] + v[2]*m[1][2];
-    out[2] = v[0]*m[2][0] + v[1]*m[2][1] + v[2]*m[2][2];
-}
-
 // ---------------------------------------------------------------------------
 // Snapshot storage: double-buffered, mutex-guarded. Writers (GL worker) fill
 // the back buffer then flip; readers (render thread) hold the lock briefly.
@@ -157,7 +233,8 @@ typedef struct {
     lambda_weapon_submesh_t *submeshes; uint32_t scount, scap;
     lambda_weapon_texture_t *textures;  uint32_t tcount, tcap;
     uint8_t                 *texdata;   size_t   texbytes;  // packed RGBA blobs
-    float hand_bone[12]; int has_hand_bone;
+    lambda_weapon_bone_t    *bones;     uint32_t bcount, bcap;
+    int   hand_bone_index;
     float bbmin[3], bbmax[3];
     int   modelindex;
     uint32_t generation;
@@ -168,16 +245,25 @@ static int             g_active = -1;          // index of the readable snapshot
 static uint32_t        g_generation = 0;
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+// Latest pose for the active snapshot (written every tick under g_mtx).
+static lambda_weapon_pose_t g_pose;
+
 // Change key so we only re-bake when the model actually changes.
 static void   *g_last_hdr = NULL;
 static int      g_last_modelindex = -1;
 static int      g_last_body = -1;
+static int      g_last_valid = 0;   // last bake succeeded (header sane)
 
-// Published by the hlsdk client (cl_dll/view.cpp) each frame when
+// Published by the hlsdk client (cl_dll/entity.cpp) each frame when
 // vr_weapon_external is on; read here on the same (GL worker) thread.
 extern void *g_vr_weapon_hdr;
 extern int   g_vr_weapon_modelindex;
 extern int   g_vr_weapon_body;
+extern int   g_vr_weapon_sequence;
+extern float g_vr_weapon_frame;
+extern float g_vr_weapon_animtime;
+extern float g_vr_weapon_framerate;
+extern float g_vr_weapon_time;
 
 // --- dynamic-array helpers -------------------------------------------------
 static uint32_t push_vertex(snapshot_t *s, const lambda_weapon_vertex_t *v) {
@@ -205,9 +291,9 @@ static lambda_weapon_submesh_t *push_submesh(snapshot_t *s) {
 
 static void snapshot_reset(snapshot_t *s) {
     // Keep allocations, reset counts (buffers are reused across bakes).
-    s->vcount = s->icount = s->scount = s->tcount = 0;
+    s->vcount = s->icount = s->scount = s->tcount = s->bcount = 0;
     s->texbytes = 0;
-    s->has_hand_bone = 0;
+    s->hand_bone_index = -1;
     s->bbmin[0] = s->bbmin[1] = s->bbmin[2] =  1e30f;
     s->bbmax[0] = s->bbmax[1] = s->bbmax[2] = -1e30f;
 }
@@ -283,8 +369,12 @@ static void bake_textures(snapshot_t *s, const uint8_t *base, const studiohdr_t 
 }
 
 // ---------------------------------------------------------------------------
-// Bind-pose bone world matrices (model space; entity transform = identity).
+// Bone posing.
 // ---------------------------------------------------------------------------
+
+// Bind-pose bone world matrices (model space; entity transform = identity):
+// each bone at its mstudiobone_t default values. Used for the bbox and the
+// debug dump, and as the fallback pose when a sequence can't be decoded.
 static void compute_bind_bones(const uint8_t *base, const studiohdr_t *hdr,
                                matrix3x4 *bones /* [numbones] */) {
     const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
@@ -300,6 +390,130 @@ static void compute_bind_bones(const uint8_t *base, const studiohdr_t *hdr,
     }
 }
 
+// R_StudioEstimateFrame (gl_studio.c), interpolate=true: fractional frame of
+// `seq` for an entity whose animation state is (frame, animtime, framerate)
+// at client time `time`.
+static float estimate_frame(const mstudioseqdesc_t *seq, float frame,
+                            float animtime, float framerate, float time) {
+    double dfdt, f;
+    if (time < animtime) dfdt = 0.0;
+    else dfdt = (double)(time - animtime) * framerate * seq->fps;
+
+    if (seq->numframes <= 1) f = 0.0;
+    else f = (frame * (seq->numframes - 1)) / 256.0;
+
+    f += dfdt;
+
+    if (seq->flags & STUDIO_LOOPING) {
+        if (seq->numframes > 1)
+            f -= (int)(f / (seq->numframes - 1)) * (seq->numframes - 1);
+        if (f < 0) f += (seq->numframes - 1);
+    } else {
+        if (f >= seq->numframes - 1.001) f = seq->numframes - 1.001;
+        if (f < 0.0) f = 0.0;
+    }
+    return (float)f;
+}
+
+// R_StudioCalcBones (xash3d_mathlib.c) with no bone controllers (adj = NULL —
+// no HL viewmodel has any): decode the RLE animvalue runs of one bone for
+// integer frame `frame`, lerp toward frame+1 by `s`, and emit pos + quat.
+static void calc_bone(int frame, float s, const mstudiobone_t *pbone,
+                      const mstudioanim_t *panim, float pos[3], float q[4]) {
+    float v1[6], v2[6];
+
+    for (int i = 0; i < 6; i++) {
+        if (panim->offset[i] == 0) {
+            v1[i] = v2[i] = pbone->value[i];
+            continue;
+        }
+        const mstudioanimvalue_t *pv =
+            (const mstudioanimvalue_t *)((const uint8_t *)panim + panim->offset[i]);
+        int j = frame;
+        int guard = 0;
+
+        if (pv->num.total < pv->num.valid) j = 0;
+        while (pv->num.total <= j) {
+            j -= pv->num.total;
+            pv += pv->num.valid + 1;
+            if (pv->num.total < pv->num.valid) j = 0;
+            if (++guard > 4096) { j = 0; break; }   // malformed run list
+        }
+
+        float a, b;
+        if (pv->num.valid > j) {
+            a = pv[j + 1].value;
+            if (pv->num.valid > j + 1)      b = pv[j + 2].value;
+            else if (pv->num.total > j + 1) b = a;
+            else                            b = pv[pv->num.valid + 2].value;
+        } else {
+            a = pv[pv->num.valid].value;
+            if (pv->num.total > j + 1)      b = a;
+            else                            b = pv[pv->num.valid + 2].value;
+        }
+        v1[i] = pbone->value[i] + a * pbone->scale[i];
+        v2[i] = pbone->value[i] + b * pbone->scale[i];
+    }
+
+    for (int k = 0; k < 3; k++)
+        pos[k] = (v1[k] == v2[k]) ? v1[k] : v1[k] + s * (v2[k] - v1[k]);
+
+    if (v1[3] == v2[3] && v1[4] == v2[4] && v1[5] == v2[5]) {
+        AngleQuaternionStudio(&v1[3], q);
+    } else {
+        float q1[4], q2[4];
+        AngleQuaternionStudio(&v1[3], q1);
+        AngleQuaternionStudio(&v2[3], q2);
+        QuaternionSlerp(q1, q2, s, q);
+    }
+}
+
+// Pose every bone of `hdr` for `sequence` at fractional frame `f`
+// (R_StudioCalcRotations + the parent concat of R_StudioSetupBones, entity
+// transform = identity). Falls back to the bind pose — and returns 0 — when
+// the sequence lives in an external sequence-group file (never the case for
+// the stock HL viewmodels) or the model has no sequences at all.
+static int compute_pose_bones(const uint8_t *base, const studiohdr_t *hdr,
+                              int sequence, float f, matrix3x4 *bones) {
+    if (hdr->numseq <= 0) { compute_bind_bones(base, hdr, bones); return 0; }
+    if (sequence < 0 || sequence >= hdr->numseq) sequence = 0;
+    const mstudioseqdesc_t *seq = (const mstudioseqdesc_t *)(base + hdr->seqindex) + sequence;
+    if (seq->seqgroup != 0 || seq->animindex <= 0 || seq->animindex >= hdr->length) {
+        compute_bind_bones(base, hdr, bones);
+        return 0;
+    }
+    // Blend 0 only: viewmodels don't use blend controllers.
+    const mstudioanim_t *panim = (const mstudioanim_t *)(base + seq->animindex);
+    const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
+
+    // "bah, fix this bug with changing sequences too fast" — engine clamps.
+    if (f > seq->numframes - 1) f = 0.0f;
+    else if (f < -0.01f) f = -0.01f;
+    int frame = (int)f;
+    float s = f - (float)frame;
+
+    float pos[LAMBDA_WEAPON_MAX_BONES][3];
+    float q[LAMBDA_WEAPON_MAX_BONES][4];
+    for (int i = 0; i < hdr->numbones; i++)
+        calc_bone(frame, s, &pb[i], &panim[i], pos[i], q[i]);
+
+    if (seq->motionbone >= 0 && seq->motionbone < hdr->numbones) {
+        if (seq->motiontype & STUDIO_X) pos[seq->motionbone][0] = 0.0f;
+        if (seq->motiontype & STUDIO_Y) pos[seq->motionbone][1] = 0.0f;
+        if (seq->motiontype & STUDIO_Z) pos[seq->motionbone][2] = 0.0f;
+    }
+
+    for (int i = 0; i < hdr->numbones; i++) {
+        matrix3x4 local;
+        Matrix3x4_FromOriginQuat(local, q[i], pos[i]);
+        if (pb[i].parent < 0)
+            memcpy(bones[i], local, sizeof(local));
+        else
+            Matrix3x4_Concat(bones[i], bones[pb[i].parent], local);
+    }
+    return 1;
+}
+
 static void account_bbox(snapshot_t *s, const float p[3]) {
     for (int k = 0; k < 3; k++) {
         if (p[k] < s->bbmin[k]) s->bbmin[k] = p[k];
@@ -308,12 +522,16 @@ static void account_bbox(snapshot_t *s, const float p[3]) {
 }
 
 // Decode one mesh's tricmd list (tristrips/trifans) into the global triangle
-// list, baking each trivert through its bone. Winding follows GL's strip rule
-// so faces stay consistently oriented in the emitted index list.
+// list. Vertices stay in their bone's local space (the GPU skins them); the
+// bind pose is only used here to grow the bounding box. Winding follows GL's
+// strip rule so faces stay consistently oriented in the emitted index list.
+// Normals share the vertex's bone: verified over every stock v_*.mdl that
+// normbone[ni] == vertbone[vi] for all tricmd entries, so a single bone index
+// per vertex is exact.
 static void bake_mesh(snapshot_t *s, const uint8_t *base, const mstudiomesh_t *mesh,
                       const float *verts, const uint8_t *vertbone,
-                      const float *norms, const uint8_t *normbone,
-                      const matrix3x4 *bones, float inv_w, float inv_h) {
+                      const float *norms, const matrix3x4 *bind_bones, int numbones,
+                      float inv_w, float inv_h) {
     const int16_t *cmd = (const int16_t *)(base + mesh->triindex);
     int n;
     while ((n = *cmd++)) {
@@ -325,15 +543,20 @@ static void bake_mesh(snapshot_t *s, const uint8_t *base, const mstudiomesh_t *m
         for (int k = 0; k < n; k++, cmd += 4) {
             int vi = cmd[0], ni = cmd[1];
             lambda_weapon_vertex_t v;
-            Matrix3x4_Transform(bones[vertbone[vi]], &verts[vi*3], v.pos);
-            Matrix3x4_Rotate(bones[normbone ? normbone[ni] : vertbone[vi]], &norms[ni*3], v.normal);
-            // normalize normal
+            int bone = vertbone[vi];
+            if (bone < 0 || bone >= numbones) bone = 0;
+            v.bone = (uint32_t)bone;
+            memcpy(v.pos, &verts[vi*3], sizeof(v.pos));
+            memcpy(v.normal, &norms[ni*3], sizeof(v.normal));
             float nl = sqrtf(v.normal[0]*v.normal[0] + v.normal[1]*v.normal[1] + v.normal[2]*v.normal[2]);
             if (nl > 1e-6f) { v.normal[0]/=nl; v.normal[1]/=nl; v.normal[2]/=nl; }
             v.uv[0] = cmd[2] * inv_w;
             v.uv[1] = cmd[3] * inv_h;
             push_vertex(s, &v);
-            account_bbox(s, v.pos);
+
+            float world[3];
+            Matrix3x4_Transform(bind_bones[bone], v.pos, world);
+            account_bbox(s, world);
         }
 
         // Assemble triangles from the run.
@@ -352,16 +575,20 @@ static void bake_mesh(snapshot_t *s, const uint8_t *base, const mstudiomesh_t *m
 }
 
 // ---------------------------------------------------------------------------
-// Optional OBJ dump for off-device verification (Phase 1). Written to the
-// engine basedir (cwd) whenever a new model is baked. Cheap, and only fires on
-// model change while the external weapon is active.
+// Optional OBJ dump for off-device verification. Written to the engine
+// basedir (cwd) whenever a new model is baked, posed at sequence 0 frame 0
+// (the idle grip). Cheap, and only fires on model change while the external
+// weapon is active.
 // ---------------------------------------------------------------------------
-static void dump_obj(const snapshot_t *s) {
+static void dump_obj(const snapshot_t *s, const matrix3x4 *bones) {
     FILE *f = fopen("weapon_dump.obj", "w");
     if (!f) return;
-    fprintf(f, "# LambdaVision weapon bind-pose dump (modelindex=%d)\n", s->modelindex);
-    for (uint32_t i = 0; i < s->vcount; i++)
-        fprintf(f, "v %.4f %.4f %.4f\n", s->vertices[i].pos[0], s->vertices[i].pos[1], s->vertices[i].pos[2]);
+    fprintf(f, "# LambdaVision weapon dump (modelindex=%d, seq 0 frame 0)\n", s->modelindex);
+    for (uint32_t i = 0; i < s->vcount; i++) {
+        float p[3];
+        Matrix3x4_Transform(bones[s->vertices[i].bone], s->vertices[i].pos, p);
+        fprintf(f, "v %.4f %.4f %.4f\n", p[0], p[1], p[2]);
+    }
     for (uint32_t i = 0; i < s->vcount; i++)
         fprintf(f, "vt %.4f %.4f\n", s->vertices[i].uv[0], s->vertices[i].uv[1]);
     for (uint32_t i = 0; i + 2 < s->icount; i += 3)
@@ -381,7 +608,7 @@ static int g_weapon_active = 0;
 
 int lambda_weapon_active(void) { return g_weapon_active; }
 
-// Published by the client (cl_dll/view.cpp) each frame in external mode.
+// Published by the client (cl_dll/entity.cpp) each frame in external mode.
 extern float g_vr_weapon_light[3];
 
 void lambda_weapon_get_light(float rgb[3]) {
@@ -390,23 +617,26 @@ void lambda_weapon_get_light(float rgb[3]) {
     rgb[2] = g_vr_weapon_light[2];
 }
 
-void lambda_weapon_extract(void) {
-    void *hdrp = g_vr_weapon_hdr;
-    int   modelindex = g_vr_weapon_modelindex;
-    int   body = g_vr_weapon_body;
+// Grip bone: exact "Bip01 R Hand" first, else any bone whose name ends in
+// " R Hand" (classic v_crossbow rigs "Xbow biped R Hand"). -1 if none.
+static int find_hand_bone(const mstudiobone_t *pb, int numbones) {
+    for (int i = 0; i < numbones; i++)
+        if (strcmp(pb[i].name, "Bip01 R Hand") == 0) return i;
+    static const char suffix[] = " R Hand";
+    for (int i = 0; i < numbones; i++) {
+        size_t n = strnlen(pb[i].name, MAXSTUDIONAME);
+        if (n >= sizeof(suffix) - 1 &&
+            strcmp(pb[i].name + n - (sizeof(suffix) - 1), suffix) == 0) return i;
+    }
+    return -1;
+}
 
-    g_weapon_active = (hdrp != NULL);                   // published this frame?
-    if (!hdrp) return;                                  // no external weapon
-    if (hdrp == g_last_hdr && modelindex == g_last_modelindex && body == g_last_body)
-        return;                                         // unchanged since last bake
-
-    const studiohdr_t *hdr = (const studiohdr_t *)hdrp;
-    const uint8_t *base = (const uint8_t *)hdrp;
-    if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
-        fprintf(stderr, "[lambda_weapon] bad studio header (ident=%d ver=%d)\n",
-                hdr->ident, hdr->version);
-        g_last_hdr = hdrp; g_last_modelindex = modelindex; g_last_body = body;
-        return;
+// Bake `hdr` into the back snapshot and publish it. Returns 1 on success.
+static int bake_model(const uint8_t *base, const studiohdr_t *hdr, int modelindex, int body) {
+    if (hdr->numbones <= 0 || hdr->numbones > LAMBDA_WEAPON_MAX_BONES) {
+        fprintf(stderr, "[lambda_weapon] modelindex=%d has %d bones (max %d)\n",
+                modelindex, hdr->numbones, LAMBDA_WEAPON_MAX_BONES);
+        return 0;
     }
 
     // Bake into the back buffer (the one that isn't currently active).
@@ -415,10 +645,24 @@ void lambda_weapon_extract(void) {
     snapshot_reset(s);
     s->modelindex = modelindex;
 
-    matrix3x4 *bones = (matrix3x4 *)malloc(sizeof(matrix3x4) * (hdr->numbones > 0 ? hdr->numbones : 1));
-    compute_bind_bones(base, hdr, bones);
+    matrix3x4 bind[LAMBDA_WEAPON_MAX_BONES];
+    compute_bind_bones(base, hdr, bind);
 
     bake_textures(s, base, hdr);
+
+    // Bone table.
+    const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
+    if ((uint32_t)hdr->numbones > s->bcap) {
+        s->bcap = (uint32_t)hdr->numbones;
+        s->bones = realloc(s->bones, s->bcap * sizeof(*s->bones));
+    }
+    for (int i = 0; i < hdr->numbones; i++) {
+        memcpy(s->bones[i].name, pb[i].name, MAXSTUDIONAME);
+        s->bones[i].name[MAXSTUDIONAME - 1] = '\0';
+        s->bones[i].parent = pb[i].parent;
+    }
+    s->bcount = (uint32_t)hdr->numbones;
+    s->hand_bone_index = find_hand_bone(pb, hdr->numbones);
 
     const int16_t *pskinref = (const int16_t *)(base + hdr->skinindex);
     const mstudiotexture_t *ptex = (const mstudiotexture_t *)(base + hdr->textureindex);
@@ -435,7 +679,6 @@ void lambda_weapon_extract(void) {
         const float   *verts    = (const float *)(base + sm->vertindex);
         const uint8_t *vertbone = (const uint8_t *)(base + sm->vertinfoindex);
         const float   *norms    = (const float *)(base + sm->normindex);
-        const uint8_t *normbone = sm->norminfoindex ? (const uint8_t *)(base + sm->norminfoindex) : NULL;
         const mstudiomesh_t *meshes = (const mstudiomesh_t *)(base + sm->meshindex);
 
         for (int m = 0; m < sm->nummesh; m++) {
@@ -451,7 +694,7 @@ void lambda_weapon_extract(void) {
             if (s->tcount && s->textures[texidx].height) inv_h = 1.0f / (float)s->textures[texidx].height;
 
             uint32_t idx0 = s->icount;
-            bake_mesh(s, base, &meshes[m], verts, vertbone, norms, normbone, bones, inv_w, inv_h);
+            bake_mesh(s, base, &meshes[m], verts, vertbone, norms, bind, hdr->numbones, inv_w, inv_h);
 
             lambda_weapon_submesh_t *ss = push_submesh(s);
             ss->index_offset = idx0;
@@ -461,40 +704,79 @@ void lambda_weapon_extract(void) {
         }
     }
 
-    // Hand-bone bind transform for grip alignment on the Swift side.
-    {
-        const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
-        for (int i = 0; i < hdr->numbones; i++) {
-            if (strcmp(pb[i].name, "Bip01 R Hand") == 0) {
-                memcpy(s->hand_bone, bones[i], sizeof(s->hand_bone));
-                s->has_hand_bone = 1;
-                break;
-            }
-        }
-    }
-
-    free(bones);
-
     if (s->vcount == 0) {
         fprintf(stderr, "[lambda_weapon] modelindex=%d produced no geometry\n", modelindex);
     }
 
     // Publish: bump generation and flip the active buffer under the lock.
+    // Seed the pose with sequence 0 / frame 0 so a reader that uploads this
+    // generation always finds a matching pose, even before the next tick.
+    matrix3x4 pose0[LAMBDA_WEAPON_MAX_BONES];
+    compute_pose_bones(base, hdr, 0, 0.0f, pose0);
+
     pthread_mutex_lock(&g_mtx);
     s->generation = ++g_generation;
     g_active = back;
+    g_pose.generation = s->generation;
+    g_pose.bone_count = (uint32_t)hdr->numbones;
+    g_pose.sequence = 0;
+    g_pose.frame = 0.0f;
+    memcpy(g_pose.bones, pose0, sizeof(matrix3x4) * (size_t)hdr->numbones);
     pthread_mutex_unlock(&g_mtx);
 
     fprintf(stderr,
         "[lambda_weapon] baked modelindex=%d gen=%u verts=%u tris=%u submeshes=%u "
-        "textures=%u handbone=%d bbox=[%.1f %.1f %.1f]..[%.1f %.1f %.1f]\n",
+        "textures=%u bones=%u handbone=%d seqs=%d bbox=[%.1f %.1f %.1f]..[%.1f %.1f %.1f]\n",
         modelindex, g_generation, s->vcount, s->icount/3, s->scount, s->tcount,
-        s->has_hand_bone, s->bbmin[0], s->bbmin[1], s->bbmin[2],
-        s->bbmax[0], s->bbmax[1], s->bbmax[2]);
+        s->bcount, s->hand_bone_index, hdr->numseq,
+        s->bbmin[0], s->bbmin[1], s->bbmin[2], s->bbmax[0], s->bbmax[1], s->bbmax[2]);
 
-    dump_obj(s);
+    dump_obj(s, pose0);
+    return 1;
+}
 
-    g_last_hdr = hdrp; g_last_modelindex = modelindex; g_last_body = body;
+void lambda_weapon_extract(void) {
+    void *hdrp = g_vr_weapon_hdr;
+    int   modelindex = g_vr_weapon_modelindex;
+    int   body = g_vr_weapon_body;
+
+    g_weapon_active = (hdrp != NULL);                   // published this frame?
+    if (!hdrp) return;                                  // no external weapon
+
+    const studiohdr_t *hdr = (const studiohdr_t *)hdrp;
+    const uint8_t *base = (const uint8_t *)hdrp;
+
+    if (hdrp != g_last_hdr || modelindex != g_last_modelindex || body != g_last_body) {
+        g_last_hdr = hdrp; g_last_modelindex = modelindex; g_last_body = body;
+        g_last_valid = 0;
+        if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
+            fprintf(stderr, "[lambda_weapon] bad studio header (ident=%d ver=%d)\n",
+                    hdr->ident, hdr->version);
+            return;
+        }
+        g_last_valid = bake_model(base, hdr, modelindex, body);
+    }
+    if (!g_last_valid) return;
+
+    // Per-tick pose for the published animation state.
+    int sequence = g_vr_weapon_sequence;
+    if (sequence < 0 || sequence >= hdr->numseq) sequence = 0;
+    float f = 0.0f;
+    if (hdr->numseq > 0) {
+        const mstudioseqdesc_t *seq = (const mstudioseqdesc_t *)(base + hdr->seqindex) + sequence;
+        f = estimate_frame(seq, g_vr_weapon_frame, g_vr_weapon_animtime,
+                           g_vr_weapon_framerate, g_vr_weapon_time);
+    }
+    matrix3x4 bones[LAMBDA_WEAPON_MAX_BONES];
+    compute_pose_bones(base, hdr, sequence, f, bones);
+
+    pthread_mutex_lock(&g_mtx);
+    g_pose.generation = g_generation;
+    g_pose.bone_count = (uint32_t)hdr->numbones;
+    g_pose.sequence = sequence;
+    g_pose.frame = f;
+    memcpy(g_pose.bones, bones, sizeof(matrix3x4) * (size_t)hdr->numbones);
+    pthread_mutex_unlock(&g_mtx);
 }
 
 uint32_t lambda_weapon_generation(void) {
@@ -505,6 +787,7 @@ uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) {
     pthread_mutex_lock(&g_mtx);
     if (g_active < 0) {
         memset(out, 0, sizeof(*out));
+        out->hand_bone_index = -1;
         return 0;
     }
     const snapshot_t *s = &g_snap[g_active];
@@ -513,8 +796,8 @@ uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) {
     out->index_count  = s->icount;   out->indices   = s->indices;
     out->submesh_count= s->scount;   out->submeshes = s->submeshes;
     out->texture_count= s->tcount;   out->textures  = s->textures;
-    memcpy(out->hand_bone, s->hand_bone, sizeof(out->hand_bone));
-    out->has_hand_bone = s->has_hand_bone;
+    out->bone_count   = s->bcount;   out->bones     = s->bones;
+    out->hand_bone_index = s->hand_bone_index;
     memcpy(out->bbmin, s->bbmin, sizeof(out->bbmin));
     memcpy(out->bbmax, s->bbmax, sizeof(out->bbmax));
     out->modelindex = s->modelindex;
@@ -523,4 +806,21 @@ uint32_t lambda_weapon_lock(lambda_weapon_mesh_t *out) {
 
 void lambda_weapon_unlock(void) {
     pthread_mutex_unlock(&g_mtx);
+}
+
+uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out) {
+    pthread_mutex_lock(&g_mtx);
+    if (g_pose.generation == 0) {
+        pthread_mutex_unlock(&g_mtx);
+        memset(out, 0, sizeof(*out));
+        return 0;
+    }
+    // Header + only the live bones; the tail of the array is left untouched.
+    out->generation = g_pose.generation;
+    out->bone_count = g_pose.bone_count;
+    out->sequence   = g_pose.sequence;
+    out->frame      = g_pose.frame;
+    memcpy(out->bones, g_pose.bones, sizeof(g_pose.bones[0]) * g_pose.bone_count);
+    pthread_mutex_unlock(&g_mtx);
+    return out->generation;
 }

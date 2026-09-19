@@ -27,6 +27,7 @@ typedef NS_ENUM(EnumBackingType, BufferIndex)
     BufferIndexMeshGenerics   = 1,
     BufferIndexUniforms       = 2,
     BufferIndexViewProjection = 3,
+    BufferIndexBones          = 4,
 };
 
 typedef NS_ENUM(EnumBackingType, VertexAttribute)
@@ -35,6 +36,7 @@ typedef NS_ENUM(EnumBackingType, VertexAttribute)
     VertexAttributeTexcoord   = 1,
     VertexAttributeNormal     = 2,
     VertexAttributeColor      = 3,
+    VertexAttributeBoneIndex  = 4,
 };
 
 typedef NS_ENUM(EnumBackingType, TextureIndex)
@@ -62,6 +64,16 @@ typedef struct
     simd_float4     lightColor;  // rgb = directional term
     simd_float4     ambient;     // rgb = ambient term, w = alpha-test flag
 } WeaponUniforms;
+
+// Weapon bone palette: bone→model-space transforms for the current pose,
+// indexed by each vertex's bone attribute (GoldSrc rigid single-bone
+// skinning). 128 = GoldSrc MAXSTUDIOBONES = LAMBDA_WEAPON_MAX_BONES in
+// Bridge/Lambda_WeaponModel.h.
+#define WEAPON_MAX_BONES 128
+typedef struct
+{
+    matrix_float4x4 bones[WEAPON_MAX_BONES];
+} WeaponBonePalette;
 
 // UI arc (reload-progress ring, radial-menu sectors): an unlit
 // world-anchored arc billboard drawn at the end of the weapon pass. The

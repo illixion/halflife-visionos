@@ -8,6 +8,23 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# llvm-objcopy is needed for the --redefine-sym prelink fixups below (Apple's
+# toolchain ships no objcopy). Prefer an explicit $LLVM_OBJCOPY, then Homebrew
+# LLVM, then PATH, then the emsdk's bundled LLVM — any recent build handles
+# Mach-O.
+OBJCOPY="${LLVM_OBJCOPY:-}"
+for cand in /opt/homebrew/opt/llvm/bin/llvm-objcopy \
+            "$(command -v llvm-objcopy 2>/dev/null || true)" \
+            "$HOME/Projects/emsdk/upstream/bin/llvm-objcopy"; do
+  [[ -n "$OBJCOPY" && -x "$OBJCOPY" ]] && break
+  [[ -n "$cand" && -x "$cand" ]] && OBJCOPY="$cand"
+done
+if [[ -z "$OBJCOPY" || ! -x "$OBJCOPY" ]]; then
+  echo "ERROR: llvm-objcopy not found — brew install llvm, or set LLVM_OBJCOPY=/path/to/llvm-objcopy" >&2
+  exit 1
+fi
+echo "Using llvm-objcopy: $OBJCOPY"
+
 # --- xash3d-fwgs ---
 cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
@@ -68,7 +85,7 @@ xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
 # `r_showtextures->value` inside the same combined.o) while letting the
 # engine's struct win at the final image. GetRefAPI stays exported so
 # dlsym(RTLD_DEFAULT) can find it.
-/opt/homebrew/opt/llvm/bin/llvm-objcopy \
+"$OBJCOPY" \
   --globalize-symbol=_GetRefAPI \
   --redefine-sym _r_showtextures=_refgl_r_showtextures \
   --redefine-sym _r_decals=_refgl_r_decals \
@@ -117,7 +134,7 @@ xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
 # were a pointer and dereferences ASCII garbage. Unexports don't hide
 # common symbols, so rename filesystem's _FI here. Filesystem-internal
 # references already resolved within the prelink above.
-/opt/homebrew/opt/llvm/bin/llvm-objcopy --redefine-sym _FI=_xash_fs_FI "$FS_OBJ" "$FS_OBJ"
+"$OBJCOPY" --redefine-sym _FI=_xash_fs_FI "$FS_OBJ" "$FS_OBJ"
 XASH_OBJS+=("$FS_OBJ")
 
 # --- hlsdk-portable ---
@@ -177,9 +194,10 @@ printf '_g_vr_hand_pose\n_g_vr_hand_pose_active\n_g_vr_cam_override\n' >> "$HLSD
 # Client-side barrel-aim offset (view.cpp), written by the bridge so the
 # bullet decal/tracer trace (ev_hldm.cpp) matches the server damage trace.
 printf '_g_vr_aim_offset_cl\n' >> "$HLSDK_CL_EXPORTS"
-# Active-weapon publish (view.cpp), read by Lambda_WeaponModel.c to bake the
-# bind-pose weapon mesh for the external (visionOS) renderer.
+# Viewmodel publish (view.cpp), read by Lambda_WeaponModel.c to bake the
+# skinned weapon mesh and pose its bones for the external (visionOS) renderer.
 printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLSDK_CL_EXPORTS"
+printf '_g_vr_weapon_sequence\n_g_vr_weapon_frame\n_g_vr_weapon_animtime\n_g_vr_weapon_framerate\n_g_vr_weapon_time\n' >> "$HLSDK_CL_EXPORTS"
 # World light sampled at the eye, read by Lambda_WeaponModel.c to shade the gun.
 printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
 
@@ -196,7 +214,7 @@ printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
 # cdll_exports mandatory check). HLSDK's own client mouse path is inert in
 # Stage A.
 ENGINE_INPUT_OBJ="$HERE/xash3d-fwgs/build/engine/client/input/input.c.2.o"
-/opt/homebrew/opt/llvm/bin/llvm-objcopy \
+"$OBJCOPY" \
   --redefine-sym _IN_ActivateMouse=_xash_engine_IN_ActivateMouse \
   --redefine-sym _IN_DeactivateMouse=_xash_engine_IN_DeactivateMouse \
   --redefine-sym _IN_MouseEvent=_xash_engine_IN_MouseEvent \

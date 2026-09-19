@@ -1,5 +1,5 @@
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..3931a57 100644
+index 3670546..0c0feb0 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
 @@ -17,12 +17,37 @@
@@ -41,7 +41,7 @@ index 3670546..3931a57 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +522,298 @@ void Beams( void )
+@@ -497,15 +522,317 @@ void Beams( void )
  }
  #endif
  
@@ -155,6 +155,11 @@ index 3670546..3931a57 100644
 +	extern void *g_vr_weapon_hdr;
 +	extern int   g_vr_weapon_modelindex;
 +	extern int   g_vr_weapon_body;
++	extern int   g_vr_weapon_sequence;
++	extern float g_vr_weapon_frame;
++	extern float g_vr_weapon_animtime;
++	extern float g_vr_weapon_framerate;
++	extern float g_vr_weapon_time;
 +	g_vr_weapon_hdr = NULL; // reset each frame; republished below in external mode
 +
 +	static cvar_t *vr_weapon_external = NULL;
@@ -163,16 +168,30 @@ index 3670546..3931a57 100644
 +	if( vr_weapon_external && vr_weapon_external->value )
 +	{
 +		g_vr_hand_weapon_drawn = 1;
-+		// Publish the active weapon's resident studio header so the platform
-+		// weapon pass can bake a bind-pose mesh from it.
-+		cl_entity_t *pl = gEngfuncs.GetLocalPlayer();
-+		model_t *wm = ( pl && pl->curstate.weaponmodel )
-+			? gEngfuncs.pfnGetModelByIndex( pl->curstate.weaponmodel ) : NULL;
++		// Publish the VIEWMODEL (v_*.mdl) — not the third-person p_ model
++		// the local player entity carries. Only the v_ model has Gordon's
++		// HEV hands, the separable magazine/pump/cylinder bones and the
++		// authored idle/shoot/reload sequences; a p_ model is a one-bone gun
++		// mesh with a single 'idle'. The engine refills viewent.curstate every
++		// frame regardless of view->model (V_SetupViewModel: modelindex /
++		// sequence / animtime, CL_WeaponAnim: body / framerate) — and
++		// V_CalcNormalRefdef nulls view->model to hide the camera-locked
++		// draw — so resolve the model from the index, not the pointer. The
++		// animation state is what R_StudioEstimateFrame consumes; the
++		// platform extractor replicates that math to pose the bones.
++		cl_entity_t *view = gEngfuncs.GetViewModel();
++		model_t *wm = ( view && view->curstate.modelindex )
++			? gEngfuncs.pfnGetModelByIndex( view->curstate.modelindex ) : NULL;
 +		if( wm && wm->type == mod_studio && wm->cache.data )
 +		{
 +			g_vr_weapon_hdr        = wm->cache.data;
-+			g_vr_weapon_modelindex = pl->curstate.weaponmodel;
-+			g_vr_weapon_body       = pl->curstate.body;
++			g_vr_weapon_modelindex = view->curstate.modelindex;
++			g_vr_weapon_body       = view->curstate.body;
++			g_vr_weapon_sequence   = view->curstate.sequence;
++			g_vr_weapon_frame      = view->curstate.frame;
++			g_vr_weapon_animtime   = view->curstate.animtime;
++			g_vr_weapon_framerate  = view->curstate.framerate;
++			g_vr_weapon_time       = gEngfuncs.GetClientTime();
 +		}
 +		// Sample the world light at the eye (R_LightPoint via the tri API,
 +		// 0..255) and publish it normalised for the external weapon shader.
@@ -430,10 +449,10 @@ index e28742f..3f08c40 100644
  	if( args->bparam2 )
  	{
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..6c6f6a8 100644
+index 3b3187d..c5bb74e 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,46 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,54 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -467,12 +486,20 @@ index 3b3187d..6c6f6a8 100644
 +// files link into the same cl_dll object, so a plain global suffices.
 +int g_vr_hand_weapon_drawn = 0;
 +// Published by VR_AddHandWeapon (entity.cpp) each frame when vr_weapon_external
-+// is on: the active weapon's resident studio header, its engine model index and
-+// body value. The visionOS Metal weapon pass (Lambda_WeaponModel.c) reads these
-+// to bake a bind-pose mesh. NULL header = no external weapon this frame.
++// is on: the viewmodel's resident studio header, its engine model index, body
++// value and animation state (sequence / frame / animtime / framerate + the
++// client time they are relative to — the inputs of R_StudioEstimateFrame). The
++// visionOS Metal weapon pass (Lambda_WeaponModel.c) reads these to bake the
++// skinned mesh once and pose its bones every tick. NULL header = no external
++// weapon this frame.
 +extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_hdr = 0;
 +extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_modelindex = 0;
 +extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_body = 0;
++extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_sequence = 0;
++extern "C" __attribute__((visibility("default"))) float g_vr_weapon_frame = 0.0f;
++extern "C" __attribute__((visibility("default"))) float g_vr_weapon_animtime = 0.0f;
++extern "C" __attribute__((visibility("default"))) float g_vr_weapon_framerate = 1.0f;
++extern "C" __attribute__((visibility("default"))) float g_vr_weapon_time = 0.0f;
 +// World light sampled at the view origin (R_LightPoint via the triangle API),
 +// normalised 0..1, published each frame for the external weapon renderer to
 +// shade the gun to match the room.
@@ -481,7 +508,7 @@ index 3b3187d..6c6f6a8 100644
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +816,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +824,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  

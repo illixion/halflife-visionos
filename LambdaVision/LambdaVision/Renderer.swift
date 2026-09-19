@@ -1747,13 +1747,14 @@ actor Renderer {
 
         drawableTarget.updateViewProjectionArray(drawable: drawable)
 
-        // Weapon pass: upload any freshly-baked mesh, gate on external mode,
-        // and size the weapon depth to the drawable colour slice.
+        // Weapon pass: upload any freshly-baked mesh, pull this tick's bone
+        // pose, gate on external mode, and size the weapon depth to the
+        // drawable colour slice.
         if weaponPass == nil {
             weaponPass = WeaponPass(device: device, layerRenderer: layerRenderer,
                                     maxBuffersInFlight: maxBuffersInFlight)
         }
-        weaponPass.uploadIfNeeded()
+        weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
         let supplementalPassActive = weaponActive || joystickVisible
@@ -2000,8 +2001,11 @@ actor Renderer {
                       * matrix4x4_rotation(radians: Renderer.gripYawDeg   * .pi/180, axis: SIMD3(0,1,0))
                       * matrix4x4_rotation(radians: Renderer.gripPitchDeg * .pi/180, axis: SIMD3(1,0,0))
                       * matrix4x4_rotation(radians: Renderer.gripRollDeg  * .pi/180, axis: SIMD3(0,0,1))
-                // Place the model's Bip01 R Hand bind frame onto the physical
-                // hand: model = handWorld · C · B · inverse(handBone).
+                // Place the viewmodel's POSED Bip01 R Hand frame onto the
+                // physical hand: model = handWorld · C · B · inverse(handBone).
+                // handBone comes from this tick's sequence pose, so the grip
+                // stays pinned while the gun (recoil), the off-hand and the
+                // magazine animate around it exactly as Valve authored them.
                 let handBoneInv = weaponPass.hasHandBone ? weaponPass.handBone.inverse
                                                          : matrix_identity_float4x4
                 model = handWorld * C * B * handBoneInv
