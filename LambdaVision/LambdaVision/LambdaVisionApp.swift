@@ -245,5 +245,11 @@ struct LambdaVisionApp: App {
             ImmersiveSpaceContent(appModel: appModel)
         }
         .immersionStyle(selection: .constant(.full), in: .full)
+        // visionOS composites the user's real hands/forearms over full
+        // immersion by default (a safety passthrough, independent of
+        // immersionStyle) — that layer sits on top of our render and
+        // occludes any weapon model drawn "in" the hand. Hide it; ArmPass
+        // draws a wireframe skeleton in its place (see Renderer.swift).
+        .upperLimbVisibility(.hidden)
     }
 }

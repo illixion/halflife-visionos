@@ -152,6 +152,12 @@ actor Renderer {
     // Weapon model rendered by RealityKit-style Metal pass instead of the
     // engine (see WeaponPass). Lazily created on the first frame.
     private var weaponPass: WeaponPass!
+    // Wireframe hand+forearm skeleton drawn in place of the real passthrough
+    // arms, which visionOS otherwise always composites over full immersion
+    // (a safety feature independent of immersionStyle) — see ArmPass and
+    // .upperLimbVisibility(.hidden) in LambdaVisionApp. Lazily created on
+    // the first frame, like weaponPass.
+    private var armPass: ArmPass!
 
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
@@ -506,6 +512,67 @@ actor Renderer {
                           pinchAllSpread: spread,
                           middleCurlM: middleCurl)
     }
+
+    // Bone list for the wireframe arm skeleton: parent→child joint pairs,
+    // drawn as line segments. Forearm (elbow→wrist) plus a full per-finger
+    // chain from the wrist outward. Deliberately not gated on per-joint
+    // isTracked, same reasoning as sampleDominantHand above — anchor-level
+    // tracking is enough; self-occluded joints still carry a usable
+    // estimated pose.
+    private static let armBones: [(HandSkeleton.JointName, HandSkeleton.JointName)] = [
+        (.forearmArm, .forearmWrist), (.forearmWrist, .wrist),
+        (.wrist, .thumbKnuckle),
+        (.thumbKnuckle, .thumbIntermediateBase),
+        (.thumbIntermediateBase, .thumbIntermediateTip),
+        (.thumbIntermediateTip, .thumbTip),
+        (.wrist, .indexFingerMetacarpal),
+        (.indexFingerMetacarpal, .indexFingerKnuckle),
+        (.indexFingerKnuckle, .indexFingerIntermediateBase),
+        (.indexFingerIntermediateBase, .indexFingerIntermediateTip),
+        (.indexFingerIntermediateTip, .indexFingerTip),
+        (.wrist, .middleFingerMetacarpal),
+        (.middleFingerMetacarpal, .middleFingerKnuckle),
+        (.middleFingerKnuckle, .middleFingerIntermediateBase),
+        (.middleFingerIntermediateBase, .middleFingerIntermediateTip),
+        (.middleFingerIntermediateTip, .middleFingerTip),
+        (.wrist, .ringFingerMetacarpal),
+        (.ringFingerMetacarpal, .ringFingerKnuckle),
+        (.ringFingerKnuckle, .ringFingerIntermediateBase),
+        (.ringFingerIntermediateBase, .ringFingerIntermediateTip),
+        (.ringFingerIntermediateTip, .ringFingerTip),
+        (.wrist, .littleFingerMetacarpal),
+        (.littleFingerMetacarpal, .littleFingerKnuckle),
+        (.littleFingerKnuckle, .littleFingerIntermediateBase),
+        (.littleFingerIntermediateBase, .littleFingerIntermediateTip),
+        (.littleFingerIntermediateTip, .littleFingerTip),
+    ]
+    private static let leftArmColor  = SIMD4<Float>(0.25, 0.95, 1.00, 1.0)  // cyan
+    private static let rightArmColor = SIMD4<Float>(0.35, 1.00, 0.55, 1.0)  // green
+
+    /// Flat [pos.xyz, color.rgba] x N array (world space, metres) for every
+    /// tracked hand's skeleton — see ArmPass. Empty when hand tracking isn't
+    /// running or neither hand is currently tracked.
+    private func armSkeletonVertices() -> [Float] {
+        guard handTracking.state == .running else { return [] }
+        var verts: [Float] = []
+        verts.reserveCapacity(Renderer.armBones.count * 2 * ArmPass.floatsPerVertex * 2)
+        for (hand, color) in [(handTracking.latestAnchors.leftHand, Renderer.leftArmColor),
+                              (handTracking.latestAnchors.rightHand, Renderer.rightArmColor)] {
+            guard let hand, hand.isTracked, let skel = hand.handSkeleton else { continue }
+            let handT = hand.originFromAnchorTransform
+            func worldPos(_ name: HandSkeleton.JointName) -> SIMD3<Float> {
+                let t = handT * skel.joint(name).anchorFromJointTransform
+                return SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+            }
+            for (a, b) in Renderer.armBones {
+                let pa = worldPos(a), pb = worldPos(b)
+                verts.append(contentsOf: [pa.x, pa.y, pa.z, color.x, color.y, color.z, color.w])
+                verts.append(contentsOf: [pb.x, pb.y, pb.z, color.x, color.y, color.z, color.w])
+            }
+        }
+        return verts
+    }
+
     // Head position (xash basis, meters) captured together with the yaw
     // baseline; physical movement is delivered as a delta from here.
     private var headBaselinePos: SIMD3<Float>? = nil
@@ -1696,6 +1763,21 @@ actor Renderer {
                                    slices: drawable.views.count)
         }
 
+        // Wireframe arm skeleton: always active whenever a hand is tracked
+        // (independent of weapon/joystick state) — real passthrough arms are
+        // hidden for the whole immersive space via .upperLimbVisibility, so
+        // this is the only visual replacement for the user's hands/forearms.
+        if armPass == nil {
+            armPass = ArmPass(device: device, layerRenderer: layerRenderer,
+                              maxBuffersInFlight: maxBuffersInFlight)
+        }
+        let armVertices = armSkeletonVertices()
+        if !armVertices.isEmpty {
+            armPass.ensureDepth(width: drawable.colorTextures[0].width,
+                                height: drawable.colorTextures[0].height,
+                                slices: drawable.views.count)
+        }
+
         // colorMap was filled once by renderFrame() before this loop; both
         // eyes sample the same engine tick.
 
@@ -1739,6 +1821,9 @@ actor Renderer {
         ])
         if supplementalPassActive {
             residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex))
+        }
+        if !armVertices.isEmpty {
+            residencySet.addAllocations(armPass.residentResources(uniformBufferIndex: uniformBufferIndex))
         }
         residencySet.commit()
         #endif
@@ -1823,6 +1908,14 @@ actor Renderer {
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
+
+        if !armVertices.isEmpty {
+            armPass.encode(commandBuffer: commandBuffer, drawable: drawable,
+                           viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
+                           viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
+                           uniformBufferIndex: uniformBufferIndex,
+                           vertexFloats: armVertices)
+        }
 
         if supplementalPassActive {
             let anchorM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
