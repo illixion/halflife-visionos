@@ -222,3 +222,10 @@ are involved, and they're licensed separately:
 This project is a fan-made, non-commercial port and is not affiliated with
 or endorsed by Valve Corporation. Half-Life is a trademark of Valve
 Corporation.
+
+This app also links [RAVESDK](https://github.com/illixion/RAVESDK) and
+[RAVEEngine](https://github.com/illixion/RAVEEngine) as local Swift package
+dependencies; both are MIT-licensed (unaffected by the GPLv3 obligation
+above, since that only reaches the combined LambdaVision distribution, not
+the packages' own repos). See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)
+for their license text.
