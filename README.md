@@ -14,6 +14,11 @@ Phase 1 complete: app shell builds and runs on AVP, Vulkan via MoltenVK
 verified end-to-end (Vulkan 1.4.334, 151 extensions). Phase 2 (engine
 rendering) in progress.
 
+**Known limitations:** VR input (aiming, locomotion, gestures) is
+proof-of-concept quality — functional enough to play, but rough around the
+edges compared to the rest of the app. See [ISSUES.md](ISSUES.md) for
+specifics.
+
 ## Prerequisites
 
 * macOS with **Xcode 26.4+** (visionOS 26.4 SDK)
@@ -192,7 +197,28 @@ README.md          You are here
 
 ## Licensing
 
-Source under GPL (matches Xash3D-FWGS). Half-Life game assets remain Valve's
-property; users supply their own copy. See
-[Half-Life Legacy](https://developer.valvesoftware.com/wiki/Half-Life_Legacy)
-for Valve's policy.
+This repo doesn't contain a single license — three different bodies of code
+are involved, and they're licensed separately:
+
+* **This repo's own source** (Swift app, Metal passes, build scripts,
+  patches against xash3d-fwgs) — **GPLv3**, see [LICENSE](LICENSE). This
+  isn't just a style choice: `xash3d-fwgs` is GPLv3, and this app statically
+  links the engine into a single binary rather than running it as a separate
+  process, so the combined binary is a derivative work and GPLv3's copyleft
+  applies to the whole thing.
+* **`hlsdk-portable`** (cloned by `VisionPort/setup.sh`, patched by
+  `VisionPort/hlsdk-visionos.patch`) — Valve's original **Half-Life 1 SDK
+  LICENSE**, not GPL. It permits free copying, modification, and
+  distribution of the SDK and your modifications, in source or object form,
+  but only for free (no charge) and only distributed together with that
+  LICENSE file. `hlsdk-visionos.patch` is a derivative of Valve's SDK code
+  and is bound by those same terms, not GPLv3.
+* **Half-Life game assets** (`HalfLifeAssets/`) — Valve's property, never
+  redistributed here (gitignored; fetched by each user from their own Steam
+  account via `scripts/fetch-assets.sh`). See
+  [Half-Life Legacy](https://developer.valvesoftware.com/wiki/Half-Life_Legacy)
+  for Valve's policy.
+
+This project is a fan-made, non-commercial port and is not affiliated with
+or endorsed by Valve Corporation. Half-Life is a trademark of Valve
+Corporation.
