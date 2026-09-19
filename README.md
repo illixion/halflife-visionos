@@ -1,8 +1,12 @@
 # Lambda VisionPro
 
-Half-Life on Apple Vision Pro — a port of [Lambda1VR](https://github.com/DrBeef/Lambda1VR)
-(Quest VR Half-Life built on Xash3D-FWGS) to visionOS, using **MoltenVK** for
-GPU rendering and **CompositorServices** for the immersive frame loop.
+Half-Life on Apple Vision Pro — [Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs)
+running its `ref_gl` renderer via [ANGLE](https://github.com/google/angle)
+(GLES → Metal) under **CompositorServices**, with a Swift/Metal launcher,
+settings, and hand-tracked VR input layered on top. Inspired by
+[Lambda1VR](https://github.com/DrBeef/Lambda1VR) (the Quest VR Half-Life
+port); built independently from Xash3D-FWGS and hlsdk-portable, no
+Lambda1VR code is reused.
 
 GitHub-only distribution. No App Store target. Bring your own Half-Life copy.
 
@@ -10,14 +14,21 @@ See [PLAN.md](PLAN.md) for architecture, phase plan, and risks.
 
 ## Status
 
-Phase 1 complete: app shell builds and runs on AVP, Vulkan via MoltenVK
-verified end-to-end (Vulkan 1.4.334, 151 extensions). Phase 2 (engine
-rendering) in progress.
+Playable end-to-end on AVP: engine rendering (foveated, 120 FPS stable),
+hand-tracked weapons and locomotion, gaze/pinch menu navigation, a settings
+window (graphics/audio/input), spatial-ish audio, and a live performance
+HUD are all in and working. The renderer pivoted from an early Vulkan/
+MoltenVK prototype to Xash3D's own `ref_gl` driven by ANGLE in May 2026 —
+`ref_gl` is the complete, production renderer (studio models, lighting,
+particles, decals), whereas the from-scratch Vulkan path only ever reached
+~5% feature parity. A Vulkan/MoltenVK smoke test still lives in the
+launcher UI as a leftover diagnostic from that earlier phase; it's not
+part of the render path.
 
 **Known limitations:** VR input (aiming, locomotion, gestures) is
 proof-of-concept quality — functional enough to play, but rough around the
 edges compared to the rest of the app. See [ISSUES.md](ISSUES.md) for
-specifics.
+specifics, and [PLAN.md](PLAN.md) for the full phase history.
 
 ## Prerequisites
 
@@ -81,11 +92,21 @@ so the feedback remains stereoscopic and world-anchored without adding a
 RealityKit overlay to the Compositor Services renderer.
 
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
-your team ID, then build & run on your AVP — a build phase fetches
-xash3d-fwgs, hlsdk-portable, and MoltenVK.xcframework automatically on
-first build (idempotent no-op afterwards). To fetch them ahead of time
-instead (e.g. to review what gets cloned before building), run
-`./VisionPort/setup.sh` yourself.
+your team ID. Before the first build, two engine artifacts need to exist —
+Xcode's pre-build hook fetches source (`xash3d-fwgs`, `hlsdk-portable`,
+`MoltenVK.xcframework`) automatically and idempotently, but it only
+_checks_ for these, it doesn't build them:
+
+```bash
+./VisionPort/build_xash_libxash.sh   # libxash.a — pre-build hook errors if this is missing
+./VisionPort/build_angle_visionos.sh # ANGLE (libEGL/libGLESv2) — ~12 GiB gclient sync,
+                                      # first run is slow; pre-build hook does NOT check
+                                      # for this one, so skipping it fails as a linker
+                                      # error instead of a clear message
+```
+
+Both are idempotent — rerunning after the first successful build is a
+fast no-op. After that, build & run on your AVP from Xcode as normal.
 
 ## Half-Life assets — pre-25th anniversary build
 
@@ -162,6 +183,10 @@ The folder is NOT redistributable; it's already gitignored.
 ## Build & run cheat sheet
 
 ```bash
+# One-time engine builds (see First-time setup above for details)
+./VisionPort/build_xash_libxash.sh
+./VisionPort/build_angle_visionos.sh
+
 # Engine smoke build for visionOS simulator (dedicated server only, no GL)
 ./VisionPort/build_xash_xrsim.sh
 
@@ -186,7 +211,7 @@ Find your AVP's UDID with `xcrun xctrace list devices`.
 ## Layout
 
 ```
-LambdaVision/      Xcode visionOS app (Swift + C bridge + MoltenVK)
+LambdaVision/      Xcode visionOS app (Swift + C bridge + ANGLE)
 VisionPort/        Engine cross-compile workspace (xash3d-fwgs + patch + setup)
 PLAN.md            Architecture, phase plan, risks
 README.md          You are here
