@@ -53,7 +53,16 @@ final class WeaponPass {
     private let layered: Bool
 
     // Uploaded mesh (deindexed into a flat vertex buffer for drawPrimitives).
-    private struct Submesh { var vertexStart: Int; var vertexCount: Int; var texture: Int }
+    // `flags` are the studio STUDIO_NF_* bits; they differ per submesh, which
+    // is why the uniforms are a per-submesh array rather than one struct.
+    private struct Submesh {
+        var vertexStart: Int
+        var vertexCount: Int
+        var texture: Int
+        var flags: UInt32
+    }
+    private static let studioChrome: UInt32 = 0x0002
+    private static let studioMasked: UInt32 = 0x0040
     private var vertexBuffer: MTLBuffer?
     private var submeshes: [Submesh] = []
     private var textures: [MTLTexture] = []
@@ -155,7 +164,7 @@ final class WeaponPass {
         self.fragmentArgTable = try! device.makeArgumentTable(descriptor: fDesc)
 
         self.uniformBuffers = (0..<maxBuffersInFlight).map { _ in
-            device.makeBuffer(length: MemoryLayout<WeaponUniforms>.stride,
+            device.makeBuffer(length: Int(WEAPON_UNIFORM_STRIDE) * Int(WEAPON_MAX_SUBMESHES),
                               options: .storageModeShared)!
         }
         self.boneBuffers = (0..<maxBuffersInFlight).map { i in
@@ -232,7 +241,8 @@ final class WeaponPass {
             }
             subs.append(Submesh(vertexStart: start,
                                 vertexCount: Int(sm.index_count),
-                                texture: Int(sm.texture)))
+                                texture: Int(sm.texture),
+                                flags: sm.flags))
         }
 
         let vbuf = device.makeBuffer(bytes: flat,
@@ -320,16 +330,36 @@ final class WeaponPass {
                 lightDir: SIMD3<Float>,
                 lightColor: SIMD3<Float>,
                 ambient: SIMD3<Float>,
+                eyePositions: [SIMD3<Float>],
+                eyeRights: [SIMD3<Float>],
                 drawWeapon: Bool = true,
                 arcs: [Arc] = []) {
         guard let depth else { return }
 
+        // One WeaponUniforms per submesh — the chrome/masked flags are
+        // per-submesh state, and rebinding the address per draw is cheaper
+        // than splitting the pipeline. Slot 0 doubles as the arcs' binding.
         let ub = uniformBuffers[uniformBufferIndex]
-        var u = WeaponUniforms(modelMatrix: model,
-                               lightDir: SIMD4(lightDir, 0),
-                               lightColor: SIMD4(lightColor, 0),
-                               ambient: SIMD4(ambient, 0))
-        memcpy(ub.contents(), &u, MemoryLayout<WeaponUniforms>.size)
+        let slotStride = Int(WEAPON_UNIFORM_STRIDE)
+        let eye0 = eyePositions.first ?? .zero
+        let eye1 = eyePositions.count > 1 ? eyePositions[1] : eye0
+        let right0 = eyeRights.first ?? SIMD3<Float>(1, 0, 0)
+        let right1 = eyeRights.count > 1 ? eyeRights[1] : right0
+        let drawnSubmeshes = drawWeapon ? min(submeshes.count, Int(WEAPON_MAX_SUBMESHES)) : 0
+        for k in 0..<max(drawnSubmeshes, 1) {
+            let flags = k < drawnSubmeshes ? submeshes[k].flags : 0
+            var u = WeaponUniforms(
+                modelMatrix: model,
+                lightDir: SIMD4(lightDir, 0),
+                lightColor: SIMD4(lightColor, 0),
+                ambient: SIMD4(ambient, 0),
+                eyePos: (SIMD4(eye0, 1), SIMD4(eye1, 1)),
+                eyeRight: (SIMD4(right0, 0), SIMD4(right1, 0)),
+                renderFlags: SIMD4((flags & WeaponPass.studioMasked) != 0 ? 1 : 0,
+                                   (flags & WeaponPass.studioChrome) != 0 ? 1 : 0,
+                                   0, 0))
+            memcpy(ub.contents() + k * slotStride, &u, MemoryLayout<WeaponUniforms>.size)
+        }
 
         let rpd = MTL4RenderPassDescriptor()
         rpd.colorAttachments[0].texture = drawable.colorTextures[0]
@@ -377,9 +407,13 @@ final class WeaponPass {
                 index: BufferIndex.meshPositions.rawValue
             )
             vertexArgTable.setAddress(bb.gpuAddress, index: BufferIndex.bones.rawValue)
-            for sm in submeshes {
+            for (k, sm) in submeshes.prefix(drawnSubmeshes).enumerated() {
                 guard !textures.isEmpty else { break }
                 let tex = textures[min(sm.texture, textures.count - 1)]
+                // This submesh's own uniform slot (chrome/masked flags).
+                let slot = ub.gpuAddress + UInt64(k * slotStride)
+                vertexArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
+                fragmentArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
                 fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
                 enc.drawPrimitives(primitiveType: .triangle,
                                    vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)

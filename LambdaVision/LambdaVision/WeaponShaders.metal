@@ -45,8 +45,26 @@ vertex WeaponInOut weaponVertexShader(WeaponVertex in [[stage_in]],
     // Both factors are rotation (+ uniform scale in modelMatrix), so the
     // upper 3x3 rotates normals correctly (no inverse-transpose needed).
     out.normal = (m * float4(in.normal, 0.0)).xyz;
-    out.texCoord = in.texCoord;
     out.eye = amp_id;
+
+    if (u.renderFlags.y > 0.5) {
+        // STUDIO_NF_CHROME: the .mdl stores NO usable texcoords on a chrome
+        // mesh — every vertex carries the same (s,t), so sampling them gives
+        // one flat texel (a black corner of the sphere map, which is why the
+        // .357 read as a black silhouette). GoldSrc synthesises the coords
+        // instead: build a basis from the viewer→surface vector and the
+        // camera's right axis, then project the normal onto it
+        // (R_StudioSetupChrome, engine ref/gl/gl_studio.c). The engine uses
+        // the owning bone's origin for the view vector; per-vertex position
+        // is the same construction, just smoother across a large mesh.
+        float3 toSurface = normalize(world.xyz - u.eyePos[amp_id].xyz);
+        float3 chromeUp    = normalize(cross(toSurface, u.eyeRight[amp_id].xyz));
+        float3 chromeRight = normalize(cross(toSurface, chromeUp));
+        float3 n = normalize(out.normal);
+        out.texCoord = float2(dot(n, chromeRight), dot(n, chromeUp)) * 0.5 + 0.5;
+    } else {
+        out.texCoord = in.texCoord;
+    }
     return out;
 }
 
@@ -54,12 +72,17 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
                                      constant WeaponUniforms & u [[ buffer(BufferIndexUniforms) ]],
                                      texture2d<float> tex [[ texture(TextureIndexColor) ]])
 {
-    constexpr sampler s(mag_filter::linear, min_filter::linear,
-                        mip_filter::linear, address::repeat);
-    float4 c = tex.sample(s, in.texCoord);
+    // Chrome coords are generated in [0,1] and must not wrap at the seam.
+    constexpr sampler repeatS(mag_filter::linear, min_filter::linear,
+                              mip_filter::linear, address::repeat);
+    constexpr sampler clampS(mag_filter::linear, min_filter::linear,
+                             mip_filter::linear, address::clamp_to_edge);
+    bool chrome = u.renderFlags.y > 0.5;
+    float4 c = chrome ? tex.sample(clampS, in.texCoord)
+                      : tex.sample(repeatS, in.texCoord);
 
     // Masked textures (STUDIO_NF_MASKED) use alpha as a 1-bit cutout.
-    if (u.ambient.w > 0.5 && c.a < 0.5)
+    if (u.renderFlags.x > 0.5 && c.a < 0.5)
         discard_fragment();
 
     float3 n = normalize(in.normal);

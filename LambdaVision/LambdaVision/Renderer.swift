@@ -2065,6 +2065,20 @@ actor Renderer {
             }
 
             if drawWeapon || !arcs.isEmpty {
+                // Per-eye camera position + right axis in world metres, for the
+                // chrome environment map (GoldSrc builds its sphere map from
+                // the viewer→surface vector and the camera's right axis).
+                var eyePositions: [SIMD3<Float>] = []
+                var eyeRights: [SIMD3<Float>] = []
+                for view in drawable.views {
+                    let eyeToWorld = anchorM * view.transform
+                    eyePositions.append(SIMD3(eyeToWorld.columns.3.x,
+                                              eyeToWorld.columns.3.y,
+                                              eyeToWorld.columns.3.z))
+                    eyeRights.append(simd_normalize(SIMD3(eyeToWorld.columns.0.x,
+                                                          eyeToWorld.columns.0.y,
+                                                          eyeToWorld.columns.0.z)))
+                }
                 weaponPass.encode(commandBuffer: commandBuffer, drawable: drawable,
                                   viewProjectionBuffer: drawableTarget.viewProjectionBuffer,
                                   viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
@@ -2073,6 +2087,8 @@ actor Renderer {
                                   lightDir: normalize(SIMD3<Float>(0.2, 1.0, 0.3)),
                                   lightColor: lightColor,
                                   ambient: ambient,
+                                  eyePositions: eyePositions,
+                                  eyeRights: eyeRights,
                                   drawWeapon: drawWeapon,
                                   arcs: arcs)
             }

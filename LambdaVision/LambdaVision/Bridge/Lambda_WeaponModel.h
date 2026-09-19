@@ -89,9 +89,11 @@ typedef struct {
     uint32_t bone_count;
     const lambda_weapon_bone_t *bones;
 
-    // Index of the grip hand bone ("Bip01 R Hand", or any bone whose name ends
-    // in " R Hand"), or -1 when the model has none. The Swift side pins this
-    // bone's POSED frame onto the tracked hand each frame.
+    // Index of the grip hand bone — normally the right hand, but whichever
+    // hand actually carries the weapon geometry (the satchel charge is
+    // skinned to the LEFT hand), or -1 when the rig has no hand bone at all.
+    // The Swift side pins this bone's POSED frame onto the tracked hand each
+    // frame. See choose_grip_bone().
     int32_t hand_bone_index;
 
     // Model-space bounding box of the geometry in the bind pose (sanity/log).

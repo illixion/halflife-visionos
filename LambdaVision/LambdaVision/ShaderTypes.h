@@ -56,14 +56,28 @@ typedef struct
 
 // Weapon pass uniforms: model→world transform plus a single-probe lighting
 // term (ambient + one dominant directional), sampled from the engine at the
-// weapon origin. ambient.w doubles as the masked-alpha-test flag (>0.5).
+// weapon origin, plus the per-eye camera data the chrome environment map
+// needs. One of these is written PER SUBMESH (the render flags differ per
+// submesh), at WEAPON_UNIFORM_STRIDE spacing in the per-frame buffer.
 typedef struct
 {
     matrix_float4x4 modelMatrix;
     simd_float4     lightDir;    // xyz = world-space direction TO the light
     simd_float4     lightColor;  // rgb = directional term
-    simd_float4     ambient;     // rgb = ambient term, w = alpha-test flag
+    simd_float4     ambient;     // rgb = ambient term
+    // Per-eye (vertex amplification id) camera position and right axis, in
+    // Apple world metres — the basis GoldSrc builds its chrome sphere map
+    // from (see R_StudioSetupChrome).
+    simd_float4     eyePos[2];
+    simd_float4     eyeRight[2];
+    // x = masked alpha test (STUDIO_NF_MASKED), y = chrome (STUDIO_NF_CHROME).
+    simd_float4     renderFlags;
 } WeaponUniforms;
+
+// Constant-buffer slot spacing for the per-submesh WeaponUniforms array, and
+// the number of submeshes one draw may bind (stock viewmodels top out at 11).
+#define WEAPON_UNIFORM_STRIDE 256
+#define WEAPON_MAX_SUBMESHES  32
 
 // Weapon bone palette: bone→model-space transforms for the current pose,
 // indexed by each vertex's bone attribute (GoldSrc rigid single-bone

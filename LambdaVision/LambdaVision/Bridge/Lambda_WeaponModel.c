@@ -617,18 +617,81 @@ void lambda_weapon_get_light(float rgb[3]) {
     rgb[2] = g_vr_weapon_light[2];
 }
 
-// Grip bone: exact "Bip01 R Hand" first, else any bone whose name ends in
-// " R Hand" (classic v_crossbow rigs "Xbow biped R Hand"). -1 if none.
-static int find_hand_bone(const mstudiobone_t *pb, int numbones) {
+static int name_ends_with(const char *name, const char *suffix) {
+    size_t n = strnlen(name, MAXSTUDIONAME), s = strlen(suffix);
+    return n >= s && strcmp(name + n - s, suffix) == 0;
+}
+
+// Right-hand bone: exact "Bip01 R Hand" first, else any bone whose name ends
+// in " R Hand" (classic v_crossbow rigs "Xbow biped R Hand"). -1 if none.
+static int find_right_hand_bone(const mstudiobone_t *pb, int numbones) {
     for (int i = 0; i < numbones; i++)
         if (strcmp(pb[i].name, "Bip01 R Hand") == 0) return i;
-    static const char suffix[] = " R Hand";
-    for (int i = 0; i < numbones; i++) {
-        size_t n = strnlen(pb[i].name, MAXSTUDIONAME);
-        if (n >= sizeof(suffix) - 1 &&
-            strcmp(pb[i].name + n - (sizeof(suffix) - 1), suffix) == 0) return i;
+    for (int i = 0; i < numbones; i++)
+        if (name_ends_with(pb[i].name, " R Hand")) return i;
+    return -1;
+}
+
+// Nearest ancestor (including `bone` itself) whose name ends in "Hand", or -1
+// when the chain reaches a root without passing through one — which is how a
+// gun modelled on its own root bone (Box02, carbine, Reciever) reads.
+static int nearest_hand_ancestor(const mstudiobone_t *pb, int numbones, int bone) {
+    for (int guard = 0; bone >= 0 && bone < numbones && guard < LAMBDA_WEAPON_MAX_BONES; guard++) {
+        if (name_ends_with(pb[bone].name, "Hand")) return bone;
+        bone = pb[bone].parent;
     }
     return -1;
+}
+
+// Which hand bone to pin onto the player's tracked hand.
+//
+// Nearly every viewmodel is held in the right hand, but not all: the satchel
+// charge is skinned entirely to "Bip01 L Hand" (and the classic v_satchel has
+// no right-hand bone at all), so pinning the right hand put the charge ~50 cm
+// away from the player's hand in the HD pack and ~1.5 m away in the classic
+// one — i.e. invisible.
+//
+// So weight each hand by how much geometry hangs off it and prefer a clear
+// winner. The shared Gordon-hands mesh contributes ~92 verts to each hand, so
+// a hand that merely grips the weapon's far end (the SPAS-12's pump hand, 112
+// vs 92) must NOT outvote the right hand — requiring twice the right hand's
+// share separates that (1.2x) from a genuinely left-handed model (7x) with
+// room to spare. Guns modelled on root bones contribute to neither hand and
+// correctly leave the right hand winning by default.
+static int choose_grip_bone(const uint8_t *base, const studiohdr_t *hdr, int body) {
+    const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
+    const mstudiobodyparts_t *bp = (const mstudiobodyparts_t *)(base + hdr->bodypartindex);
+    int right = find_right_hand_bone(pb, hdr->numbones);
+
+    uint32_t counts[LAMBDA_WEAPON_MAX_BONES] = { 0 };
+    int hand_of[LAMBDA_WEAPON_MAX_BONES];
+    for (int i = 0; i < hdr->numbones; i++)
+        hand_of[i] = nearest_hand_ancestor(pb, hdr->numbones, i);
+
+    for (int b = 0; b < hdr->numbodyparts; b++) {
+        int nmodels = bp[b].nummodels > 0 ? bp[b].nummodels : 1;
+        int sel = bp[b].base ? (body / bp[b].base) % nmodels : 0;
+        if (sel < 0 || sel >= nmodels) sel = 0;
+        const mstudiomodel_t *sm =
+            (const mstudiomodel_t *)(base + bp[b].modelindex) + sel;
+        const uint8_t *vertbone = (const uint8_t *)(base + sm->vertinfoindex);
+        for (int v = 0; v < sm->numverts; v++) {
+            int bone = vertbone[v];
+            if (bone < 0 || bone >= hdr->numbones) continue;
+            int h = hand_of[bone];
+            if (h >= 0) counts[h]++;
+        }
+    }
+
+    int best = -1;
+    uint32_t best_count = 0;
+    for (int i = 0; i < hdr->numbones; i++) {
+        if (counts[i] > best_count) { best = i; best_count = counts[i]; }
+    }
+    if (best < 0) return right;                 // no hand carries any geometry
+    if (right < 0) return best;                 // no right hand in this rig
+    if (best_count >= 2 * counts[right]) return best;
+    return right;
 }
 
 // Bake `hdr` into the back snapshot and publish it. Returns 1 on success.
@@ -662,7 +725,7 @@ static int bake_model(const uint8_t *base, const studiohdr_t *hdr, int modelinde
         s->bones[i].parent = pb[i].parent;
     }
     s->bcount = (uint32_t)hdr->numbones;
-    s->hand_bone_index = find_hand_bone(pb, hdr->numbones);
+    s->hand_bone_index = choose_grip_bone(base, hdr, body);
 
     const int16_t *pskinref = (const int16_t *)(base + hdr->skinindex);
     const mstudiotexture_t *ptex = (const mstudiotexture_t *)(base + hdr->textureindex);

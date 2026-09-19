@@ -64,15 +64,34 @@ instead of deleting them.
   bone palette that replays the engine's own sequence math
   (`R_StudioEstimateFrame`/`CalcBones` ported into `Lambda_WeaponModel.c`),
   with the posed `Bip01 R Hand` pinned to the tracked hand — so idle, shoot,
-  reload and draw play as authored. Backlog: grip constants
+  reload and draw play as authored. Chrome meshes (`STUDIO_NF_CHROME`) build
+  their sphere-map coords in the shader the way `R_StudioSetupChrome` does —
+  the .mdl stores one degenerate texel for every chrome vertex, which drew the
+  .357 (630 of 1007 gun tris are chrome) and every HEV glove as a black
+  silhouette. The grip bone is whichever hand actually carries the weapon
+  geometry, not always the right one — the satchel charge is skinned to
+  `Bip01 L Hand`. Backlog: grip constants
   (`Renderer.gripRollDeg/gripYawDeg/gripPushM`) were tuned against the p_
   hand bone and want a re-check on device; the model's own right hand is
   rigid Valve animation, not the user's fingers (skin it to ARKit joints
-  next); no muzzle flash, chrome faces drawn flat, external `…T.mdl` textures
-  fall back to magenta, classic `v_9mmAR`/`v_hgun` have no hand bone
-  (origin-at-hand), and it's a manual cvar (wire into Settings). Physical
-  per-weapon reloads can build on the exported bone table (mag = `Box02` /
-  `clip`, pump = `Charger`, cylinder = `revolver` + `speed_loader`).
+  next); arms end mid-forearm (see "Arms" below); no muzzle flash, external
+  `…T.mdl` textures fall back to magenta, classic `v_9mmAR`/`v_hgun` have no
+  hand bone (origin-at-hand), and it's a manual cvar (wire into Settings).
+  Physical per-weapon reloads can build on the exported bone table (mag =
+  `Box02` / `clip`, pump = `Charger`, cylinder = `revolver` +
+  `speed_loader`).
+- **Arms.** The viewmodel sleeve stops mid-forearm and is rigidly driven by
+  Valve's sequence, so it neither reaches nor follows the player's real arm.
+  The rig already carries the full chain (`Bip01 Spine*` → `R Clavicle` →
+  `R UpperArm` → `R Forearm` → `R Hand`), so no new skeleton is needed —
+  only geometry past the elbow and something to drive it. Order that
+  matters: (1) skin the model's hand to the ARKit joints (the Biped finger
+  rig `Finger0..4` × 3 maps 1:1 onto the 27-joint hand skeleton), (2) drive
+  `Forearm`/`UpperArm` with FABRIK from a shoulder estimated off the head
+  anchor, (3) only then extrude the sleeve's open elbow loop up the arm.
+  Extending before IK makes things worse, not better — a shoulder that
+  doesn't sit on the player's real shoulder reads far worse than a forearm
+  that ends at the elbow, which is why Alyx draws gloves and cuffs only.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.
