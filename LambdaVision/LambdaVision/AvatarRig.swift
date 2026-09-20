@@ -3,9 +3,9 @@
 //  LambdaVision
 //
 //  The first-person avatar's skeleton: GoldSrc studio bones on one side,
-//  RigKit's framework-free IK on the other.
+//  RAVERig's framework-free IK on the other.
 //
-//  `RigKit` is a sibling package (`../../RigKit`) shared with
+//  `RAVERig` is a target of the RAVEEngine sibling package shared with
 //  spatial-ai-character, which poses a RealityKit character with the same
 //  arithmetic. Everything specific to GoldSrc — the bone table, the row-major
 //  3x4 palette, the `Bip01` naming, Z-up inches — stops here. Everything
@@ -22,7 +22,7 @@
 //
 
 import Foundation
-import RigKit
+import RAVERig
 import simd
 
 /// A player model adapted for IK: the bone tree, its rest pose, and the
@@ -148,7 +148,7 @@ struct AvatarRig {
             return i
         }
 
-        // Named lookup rather than RigKit's `HumanoidInference`, which infers
+        // Named lookup rather than RAVERig's `HumanoidInference`, which infers
         // landmarks from topology and skin weights and needs none of these
         // names. That generality is worth having for arbitrary user content;
         // every GoldSrc player model is a Bip01 rig, so here it would only add

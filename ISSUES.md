@@ -94,8 +94,10 @@ instead of deleting them.
   real `gordon.mdl` — rest pose round-trips to 0.00002 units, head placement is
   exact at every yaw, and over 277 hand targets the worst miss is 1.76 mm with
   the elbow correctly dropping 7.3 units below the shoulder-hand line. The IK
-  is `RigKit`, a framework-free sibling package (`../../RigKit`) split out of
-  spatial-ai-character so both games share one solver; everything GoldSrc —
+  is `RAVERig`, a framework-free target of the shared `RAVEEngine` package
+  (`../../RAVEEngine`, which this app already linked for `RAVEInput` and
+  `RAVEDiagnostics`) split out of spatial-ai-character so both games share one
+  solver; everything GoldSrc —
   Z-up inches, `Bip01` names, the row-major palette — stops at `AvatarRig`.
   Solving happens in GoldSrc model space, so the palette stays native and no
   axis conversion sits between the tracker and the bones. Still to do: draw it
