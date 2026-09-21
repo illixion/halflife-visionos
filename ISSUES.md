@@ -100,12 +100,27 @@ instead of deleting them.
   solver; everything GoldSrc —
   Z-up inches, `Bip01` names, the row-major palette — stops at `AvatarRig`.
   Solving happens in GoldSrc model space, so the palette stays native and no
-  axis conversion sits between the tracker and the bones. Still to do: draw it
-  (a body pass, or extend `WeaponPass`), apply head orientation to the head
-  bone, hide the legs until they can be tracked, and suppress the viewmodel's
-  own hands/sleeve submeshes so the gun alone grips the avatar's hand. Risk to
-  watch: a body you cannot fully track can read worse than no body, so keep an
-  arms-only fallback.
+  axis conversion sits between the tracker and the bones. It now draws:
+  `WeaponPass` renders the body through the same pipeline and depth buffer as
+  the gun (so the two occlude each other), from a `StudioMesh` upload shared
+  with the viewmodel. Placement hangs the rig from the *eyes* — measured 4.4
+  units forward and 3.4 up of the head bone, off the glasses bone — with the
+  head bone taking the tracked orientation, so looking down pivots the skull
+  about the neck and the neck moves only by the eye offset's chord (4.3 units
+  at 45°, verified). Wrists take the tracked orientation outright, built from
+  the fingers' direction and the back of the hand; Bip01 hands measure X along
+  the fingers and +Y out of the palm on both sides, so one frame
+  (`AvatarRig.handRotation`) serves both with no per-hand tunable. An
+  untracked hand hangs by the side rather than holding sequence 0's raised
+  arm. The head is always cut (the camera is inside it) and the legs are cut
+  by default, as whole triangles at upload — 283 of 639 dropped — leaving an
+  open neck and hips. The body yaw trails the head yaw with a 0.35 s time
+  constant. Settings > Input > "First-person body" is the arms-only fallback
+  (`Renderer.avatarLegsVisible` shows the legs; no UI yet). Not yet on device:
+  the eye offset, the cull mode (none, like the weapon), the wireframe hands
+  overlapping the avatar's, and the viewmodel's own hands/sleeve still drawing
+  beside the body's — suppressing those so the gun alone grips the avatar's
+  hand is the next step.
   - Gotcha found on the way: the pose the body slot publishes is sequence 0
     frame 0, not the studio bind pose — origin at the pelvis, one arm already
     raised, and rotated 90° from the bind pose. That is harmless, because

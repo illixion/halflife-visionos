@@ -59,9 +59,12 @@ struct AvatarRig {
     let leftArm: Arm?
     let rightArm: Arm?
 
-    /// Where the head sits in the rest pose. The avatar is hung from this
-    /// point, so it is the one measurement the whole placement depends on.
+    /// Where the head bone sits in the rest pose. The eyes, which the avatar
+    /// actually hangs from, are `Targets.eyeOffset` forward and up of here.
     var restHeadPosition: SIMD3<Float> { PoseSolver.translation(of: restModel[head]) }
+
+    /// Where the eyes sit in the rest pose with the default eye offset.
+    var restEyePosition: SIMD3<Float> { restHeadPosition + AvatarRig.defaultEyeOffset }
 
     // MARK: - Construction
 
@@ -174,6 +177,41 @@ struct AvatarRig {
         return Arm(chain: chain, hand: hand, reach: reach)
     }
 
+    // MARK: - What not to draw
+
+    /// Every bone in the subtree rooted at `bone`, including `bone`.
+    func subtree(of bone: Int) -> Set<Int> {
+        var set: Set<Int> = [bone]
+        // Parents precede children in GoldSrc bone tables, so one forward
+        // pass closes the set; the loop is only insurance against a rig that
+        // breaks that rule.
+        var grew = true
+        while grew {
+            grew = false
+            for i in parents.indices where !set.contains(i) {
+                if let p = parents[i], set.contains(p) { set.insert(i); grew = true }
+            }
+        }
+        return set
+    }
+
+    /// Bones whose triangles the body upload leaves out.
+    ///
+    /// The head always: the camera sits inside it, so drawing it means a
+    /// skull's inner faces a few centimetres from each eye. The legs until
+    /// they are tracked — a leg standing where the player's is not reads
+    /// worse than no leg. Everything under the thigh bones goes, so the cut
+    /// falls at the hips.
+    func hiddenBones(legs: Bool) -> Set<Int> {
+        var hidden = subtree(of: head)
+        if !legs {
+            for name in ["Bip01 L Leg", "Bip01 R Leg"] {
+                if let i = boneNames.firstIndex(of: name) { hidden.formUnion(subtree(of: i)) }
+            }
+        }
+        return hidden
+    }
+
     // MARK: - Posing
 
     /// Where the avatar is and how it is bent, for one frame.
@@ -187,8 +225,18 @@ struct AvatarRig {
         var right: PoseSolver.Report?
     }
 
-    /// Targets for one frame, in world space (GoldSrc units, Z-up).
+    /// Where the eyes sit relative to the head bone, in the rest facing
+    /// (forward, left, up; GoldSrc units). Measured on gordon.mdl: the head
+    /// bone is at the base of the skull and the glasses' bone sits 5.2 units
+    /// forward and 3.5 up of it, so the eyes are a touch behind that.
+    static let defaultEyeOffset = SIMD3<Float>(4.4, 0, 3.4)
+
+    /// Targets for one frame, in world space (GoldSrc units, Z-up, +X the
+    /// direction a yaw of zero faces).
     struct Targets {
+        /// Where the player's eyes are. The rig hangs from this point, not
+        /// from the head bone, so looking down pivots the skull about the
+        /// neck instead of dragging the torso forward.
         var headPosition: SIMD3<Float>
         /// Which way the body faces, radians about the up axis. The caller
         /// damps this off the head's yaw — the body should follow a turn, not
@@ -196,6 +244,39 @@ struct AvatarRig {
         var bodyYaw: Float
         var leftHand: SIMD3<Float>?
         var rightHand: SIMD3<Float>?
+        /// Full head orientation, from `AvatarRig.headRotation(forward:up:)`.
+        /// nil leaves the head bone at rest.
+        var headRotation: simd_quatf? = nil
+        /// Wrist orientations, from `AvatarRig.handRotation(forward:back:)`.
+        /// nil leaves the hand in its rest orientation on the forearm.
+        var leftHandRotation: simd_quatf? = nil
+        var rightHandRotation: simd_quatf? = nil
+        var eyeOffset: SIMD3<Float> = AvatarRig.defaultEyeOffset
+    }
+
+    /// The head's world rotation from its forward and up axes (unit, GoldSrc
+    /// world). Identity faces +X and is level.
+    static func headRotation(forward: SIMD3<Float>, up: SIMD3<Float>) -> simd_quatf {
+        let f = simd_normalize(forward)
+        let l = simd_normalize(simd_cross(up, f))          // GoldSrc +Y is left
+        let u = simd_cross(f, l)
+        return simd_normalize(simd_quatf(simd_float3x3(f, l, u)))
+    }
+
+    /// A wrist's world rotation from the direction the fingers point and the
+    /// normal out of the back of the hand (unit, GoldSrc world). Same call
+    /// for both hands.
+    ///
+    /// Bip01 hands put X along the fingers, +Y out of the palm and Z across
+    /// the palm — toward the thumb on the right hand, away from it on the
+    /// left — measured on the rest pose rather than assumed. Those two
+    /// mirrored conventions collapse to one right-handed frame: X = fingers,
+    /// Y = −back, Z = back × fingers.
+    static func handRotation(forward: SIMD3<Float>, back: SIMD3<Float>) -> simd_quatf {
+        let f = simd_normalize(forward)
+        let z = simd_normalize(simd_cross(back, f))
+        let y = simd_cross(z, f)                            // = −back, re-orthogonalised
+        return simd_normalize(simd_quatf(simd_float3x3(f, y, z)))
     }
 
     /// Places the avatar under the tracked head and bends both arms to the
@@ -204,14 +285,10 @@ struct AvatarRig {
     /// The placement is deliberately not "parent the body to the head". A head
     /// anchor carries pitch and roll, and a body rigidly hung from it would
     /// swing bodily every time the player looked down at their feet. Instead
-    /// the root is positioned so the *rest* head lands at the tracked head
-    /// position, and rotated by yaw alone; the body then hangs below a head
-    /// that can look anywhere without dragging the torso with it.
-    ///
-    /// The head bone itself is left in its rest pose. In first person you
-    /// cannot see your own head, and a wrong head rotation is only visible as
-    /// a wrong neck — which is worth fixing after the arms read correctly,
-    /// not before.
+    /// the head bone takes the tracked orientation, the root is positioned so
+    /// the *eyes* of that turned head land at the tracked position, and the
+    /// root is rotated by yaw alone; the body then hangs below a head that
+    /// can look anywhere without dragging the torso with it.
     /// Iterations per arm.
     ///
     /// Measured on this rig rather than guessed. Sweeping hand targets from
@@ -225,12 +302,26 @@ struct AvatarRig {
 
     func pose(_ targets: Targets, iterations: Int = AvatarRig.armIterations) -> Pose {
         let yaw = simd_quatf(angle: targets.bodyYaw, axis: AvatarRig.up)
-        var root = float4x4(yaw)
-        root.columns.3 = SIMD4<Float>(targets.headPosition - yaw.act(restHeadPosition), 1)
-        let toModel = root.inverse
+        let worldToModelRotation = yaw.inverse
 
         var joints = restLocal
         var model = solver.modelMatrices(of: joints)
+
+        // Head first, because the eyes hang off it and the root hangs off
+        // the eyes. The tracked rotation is relative to "facing +X, level",
+        // which is what the rest head does, so it composes onto the rest
+        // orientation directly once brought into model space.
+        let restHead = PoseSolver.rotation(of: restModel[head])
+        if let tracked = targets.headRotation {
+            let delta = worldToModelRotation * tracked
+            setModelRotation(of: head, to: simd_normalize(delta * restHead), joints: &joints, model: &model)
+        }
+
+        let eyeLocal = restHead.inverse.act(targets.eyeOffset)
+        let eyeModel = (model[head] * SIMD4<Float>(eyeLocal, 1)).xyz
+        var root = float4x4(yaw)
+        root.columns.3 = SIMD4<Float>(targets.headPosition - yaw.act(eyeModel), 1)
+        let toModel = root.inverse
 
         // The pole is the direction the elbow is pushed toward — down and
         // back, which is where a human elbow sits when the hand is forward.
@@ -239,22 +330,65 @@ struct AvatarRig {
         let back = yaw.act(SIMD3<Float>(-1, 0, 0))
         let pole = simd_normalize(back - AvatarRig.up * 0.5)
 
-        func solve(_ arm: Arm?, _ worldTarget: SIMD3<Float>?) -> PoseSolver.Report? {
-            guard let arm, let worldTarget else { return nil }
-            let target = (toModel * SIMD4<Float>(worldTarget, 1)).xyz
-            return solver.solve(chain: arm.chain, target: target,
-                                pole: (toModel * SIMD4<Float>(pole, 0)).xyz,
-                                iterations: iterations,
-                                pose: &joints, model: &model)
+        // An untracked hand hangs by the side instead of holding whatever
+        // sequence 0 froze it in (the right arm raised, as it happens). The
+        // target is in model space — a little forward and out from the
+        // shoulder, most of the arm's length down — with the palm inward.
+        func relaxed(_ arm: Arm, side: Float) -> (target: SIMD3<Float>, rotation: simd_quatf) {
+            let shoulder = PoseSolver.translation(of: model[arm.chain.joints[0]])
+            let target = shoulder + SIMD3<Float>(3, 2 * side, -arm.reach * 0.88)
+            let rotation = AvatarRig.handRotation(forward: SIMD3<Float>(0.1, 0, -1),
+                                                  back: SIMD3<Float>(0, side, 0))
+            return (target, rotation)
         }
-        let left = solve(leftArm, targets.leftHand)
-        let right = solve(rightArm, targets.rightHand)
+
+        func solve(_ arm: Arm?, _ worldTarget: SIMD3<Float>?, _ worldRotation: simd_quatf?,
+                   side: Float) -> PoseSolver.Report? {
+            guard let arm else { return nil }
+            let target: SIMD3<Float>
+            let rotation: simd_quatf?
+            if let worldTarget {
+                target = (toModel * SIMD4<Float>(worldTarget, 1)).xyz
+                rotation = worldRotation.map { worldToModelRotation * $0 }
+            } else {
+                (target, rotation) = relaxed(arm, side: side)
+            }
+            let report = solver.solve(chain: arm.chain, target: target,
+                                      pole: (toModel * SIMD4<Float>(pole, 0)).xyz,
+                                      iterations: iterations,
+                                      pose: &joints, model: &model)
+            // The wrist takes the tracked orientation outright. FABRIK only
+            // decides where the hand is; which way it faces is the tracker's
+            // call, and the fingers ride along as children.
+            if let rotation {
+                setModelRotation(of: arm.hand, to: rotation, joints: &joints, model: &model)
+            }
+            return report
+        }
+        let left = solve(leftArm, targets.leftHand, targets.leftHandRotation, side: 1)
+        let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, side: -1)
 
         // The chains wrote their own matrices as they went, but joints hanging
         // off them — the fingers below each hand — are stale. One clean pass
         // is cheaper than reasoning about which ones moved.
         return Pose(palette: solver.modelMatrices(of: joints), root: root,
                     left: left, right: right)
+    }
+
+    /// Gives `bone` the model-space rotation `rotation` by rewriting its
+    /// local rotation against its parent's *current* model matrix, then
+    /// refreshes `model` for the bone and everything below it.
+    private func setModelRotation(of bone: Int, to rotation: simd_quatf,
+                                  joints: inout [JointPose], model: inout [float4x4]) {
+        let parentRotation: simd_quatf
+        if let p = parents[bone] { parentRotation = PoseSolver.rotation(of: model[p]) }
+        else { parentRotation = simd_quatf(angle: 0, axis: AvatarRig.up) }
+        joints[bone].rotation = simd_normalize(parentRotation.inverse * rotation)
+        let below = subtree(of: bone)
+        for i in solver.order where below.contains(i) {
+            let local = joints[i].matrix
+            model[i] = parents[i].map { model[$0] * local } ?? local
+        }
     }
 
     // MARK: - Conversions

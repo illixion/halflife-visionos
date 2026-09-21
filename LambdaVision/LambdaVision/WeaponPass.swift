@@ -13,10 +13,17 @@
 //  without disturbing drawable.depthTextures, which the compositor uses for
 //  reprojection.
 //
-//  Coordinates: the baked mesh is in GoldSrc model space (units, Z-up). The
-//  caller supplies the model→world (metres, Apple/RealityKit basis) transform,
-//  so placement (hand anchor, grip) lives in Renderer, not here; `handBone`
-//  exposes the POSED grip-bone frame the caller pins to the tracked hand.
+//  The player body (see AvatarRig) is drawn by the same pass, through the
+//  same pipeline and into the same depth buffer, so the gun and the hand that
+//  holds it occlude each other properly. The pass knows nothing about how the
+//  body is posed: it takes an uploaded StudioMesh, a palette and a model
+//  matrix, exactly as for the weapon.
+//
+//  Coordinates: the baked meshes are in GoldSrc model space (units, Z-up). The
+//  caller supplies each model→world (metres, Apple/RealityKit basis)
+//  transform, so placement (hand anchor, grip, avatar root) lives in Renderer,
+//  not here; `handBone` exposes the POSED grip-bone frame the caller pins to
+//  the tracked hand.
 //
 
 import Metal
@@ -41,6 +48,15 @@ final class WeaponPass {
     static let maxArcs = 16
     private static let arcSlotStride = 256   // constant-buffer slot alignment
 
+    /// A second skinned model drawn alongside the weapon: the player body.
+    /// `palette` is bone→model in GoldSrc units, `model` is model→world in
+    /// Apple metres, the same contract as the weapon's.
+    struct BodyDraw {
+        var mesh: StudioMesh
+        var palette: [float4x4]
+        var model: float4x4
+    }
+
     private let device: MTLDevice
     private let pipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
@@ -52,28 +68,15 @@ final class WeaponPass {
     private let depthFormat: MTLPixelFormat
     private let layered: Bool
 
-    // Uploaded mesh (deindexed into a flat vertex buffer for drawPrimitives).
-    // `flags` are the studio STUDIO_NF_* bits; they differ per submesh, which
-    // is why the uniforms are a per-submesh array rather than one struct.
-    private struct Submesh {
-        var vertexStart: Int
-        var vertexCount: Int
-        var texture: Int
-        var flags: UInt32
-    }
-    private static let studioChrome: UInt32 = 0x0002
-    private static let studioMasked: UInt32 = 0x0040
-    private var vertexBuffer: MTLBuffer?
-    private var submeshes: [Submesh] = []
-    private var textures: [MTLTexture] = []
+    // The uploaded viewmodel, replaced whenever the extractor bakes a new one.
+    private var mesh: StudioMesh?
     private var uploadedGeneration: UInt32 = 0
 
     // Bone table of the uploaded model and the index of its grip hand bone
     // ("Bip01 R Hand"; -1 when the model has none — then handBone stays
     // identity and the model origin lands on the hand).
-    private(set) var boneNames: [String] = []
-    private(set) var handBoneIndex: Int = -1
-    var hasHandBone: Bool { handBoneIndex >= 0 }
+    var boneNames: [String] { mesh?.boneNames ?? [] }
+    var hasHandBone: Bool { mesh?.hasHandBone ?? false }
 
     // Current pose: bone→model-space transforms from the extractor (GoldSrc
     // units), refreshed each frame by update(). `handBone` is the POSED grip
@@ -84,19 +87,24 @@ final class WeaponPass {
     private(set) var handBone = matrix_identity_float4x4
     private(set) var poseSequence: Int = 0
     private(set) var poseFrame: Float = 0
-    private(set) var bbmin = SIMD3<Float>(repeating: 0)
-    private(set) var bbmax = SIMD3<Float>(repeating: 0)
+    var bbmin: SIMD3<Float> { mesh?.bbmin ?? .zero }
+    var bbmax: SIMD3<Float> { mesh?.bbmax ?? .zero }
 
     // Per-eye depth, sized to the drawable. Recreated on size change.
     private var depth: MTLTexture?
     private var depthW = 0, depthH = 0, depthSlices = 0
 
-    // Uniform ring (one WeaponUniforms + one bone palette per in-flight frame).
-    private var uniformBuffers: [MTLBuffer]
-    private var boneBuffers: [MTLBuffer] = []
+    // Per in-flight frame: one WeaponUniforms array + one bone palette for
+    // each skinned model, and the ring slots.
+    private struct SkinnedBuffers {
+        var uniforms: [MTLBuffer]
+        var bones: [MTLBuffer]
+    }
+    private let weaponBuffers: SkinnedBuffers
+    private let bodyBuffers: SkinnedBuffers
     private var ringUniformBuffers: [MTLBuffer] = []
 
-    var isReady: Bool { vertexBuffer != nil && !submeshes.isEmpty }
+    var isReady: Bool { mesh != nil }
 
     init(device: MTLDevice, layerRenderer: LayerRenderer, maxBuffersInFlight: Int) {
         self.device = device
@@ -163,23 +171,33 @@ final class WeaponPass {
         fDesc.maxTextureBindCount = 1           // colour@0
         self.fragmentArgTable = try! device.makeArgumentTable(descriptor: fDesc)
 
-        self.uniformBuffers = (0..<maxBuffersInFlight).map { _ in
-            device.makeBuffer(length: Int(WEAPON_UNIFORM_STRIDE) * Int(WEAPON_MAX_SUBMESHES),
+        self.weaponBuffers = WeaponPass.makeSkinnedBuffers(device: device, count: maxBuffersInFlight,
+                                                           label: "Weapon")
+        self.bodyBuffers = WeaponPass.makeSkinnedBuffers(device: device, count: maxBuffersInFlight,
+                                                         label: "Body")
+        self.ringUniformBuffers = (0..<maxBuffersInFlight).map { _ in
+            device.makeBuffer(length: WeaponPass.arcSlotStride * WeaponPass.maxArcs,
                               options: .storageModeShared)!
         }
-        self.boneBuffers = (0..<maxBuffersInFlight).map { i in
+    }
+
+    private static func makeSkinnedBuffers(device: MTLDevice, count: Int, label: String) -> SkinnedBuffers {
+        let uniforms = (0..<count).map { i in
+            let b = device.makeBuffer(length: Int(WEAPON_UNIFORM_STRIDE) * Int(WEAPON_MAX_SUBMESHES),
+                                      options: .storageModeShared)!
+            b.label = "\(label)Uniforms\(i)"
+            return b
+        }
+        let bones = (0..<count).map { i in
             let b = device.makeBuffer(length: MemoryLayout<WeaponBonePalette>.stride,
                                       options: .storageModeShared)!
-            b.label = "WeaponBones\(i)"
+            b.label = "\(label)Bones\(i)"
             // Identity palette until the first pose lands.
             let ident = [float4x4](repeating: matrix_identity_float4x4, count: Int(WEAPON_MAX_BONES))
             ident.withUnsafeBytes { _ = memcpy(b.contents(), $0.baseAddress, $0.count) }
             return b
         }
-        self.ringUniformBuffers = (0..<maxBuffersInFlight).map { _ in
-            device.makeBuffer(length: WeaponPass.arcSlotStride * WeaponPass.maxArcs,
-                              options: .storageModeShared)!
-        }
+        return SkinnedBuffers(uniforms: uniforms, bones: bones)
     }
 
     /// Per-frame: poll the extractor — upload a freshly baked model if the
@@ -194,23 +212,14 @@ final class WeaponPass {
     /// upload lags the bake by at most a frame, and the bake seeds a matching
     /// pose, so this only skips the hand-over frame).
     private func refreshPose() {
-        guard uploadedGeneration != 0 else { return }
+        guard let mesh, uploadedGeneration != 0 else { return }
         let gen = lambda_weapon_copy_pose(&pose)
         guard gen == uploadedGeneration else { return }
-        let count = min(Int(pose.bone_count), Int(WEAPON_MAX_BONES))
-        var pal = [float4x4](repeating: matrix_identity_float4x4, count: count)
-        withUnsafePointer(to: &pose.bones) { raw in
-            raw.withMemoryRebound(to: Float.self, capacity: Int(WEAPON_MAX_BONES) * 12) { f in
-                for i in 0..<count {
-                    pal[i] = WeaponPass.matrix(fromRowMajor3x4: f + i * 12)
-                }
-            }
-        }
-        palette = pal
+        palette = StudioMesh.palette(from: &pose)
         poseSequence = Int(pose.sequence)
         poseFrame = pose.frame
-        handBone = (handBoneIndex >= 0 && handBoneIndex < count) ? palette[handBoneIndex]
-                                                                  : matrix_identity_float4x4
+        let h = mesh.handBoneIndex
+        handBone = (h >= 0 && h < palette.count) ? palette[h] : matrix_identity_float4x4
     }
 
     /// If a new model was baked, deindex + upload it.
@@ -218,78 +227,19 @@ final class WeaponPass {
         let gen = lambda_weapon_generation()
         if gen == 0 || gen == uploadedGeneration { return }
 
-        var mesh = lambda_weapon_mesh_t()
-        let locked = lambda_weapon_lock(&mesh)
+        var raw = lambda_weapon_mesh_t()
+        let locked = lambda_weapon_lock(&raw)
         defer { lambda_weapon_unlock() }
-        if locked == 0 || mesh.vertex_count == 0 || mesh.index_count == 0 { return }
+        guard locked != 0,
+              let uploaded = StudioMesh(device: device, mesh: raw, generation: gen, label: "Weapon")
+        else { return }
 
-        // Deindex straight into a flat lambda_weapon_vertex_t array — the
-        // vertex descriptor mirrors the C struct byte-for-byte.
-        let verts = mesh.vertices!
-        let idx = mesh.indices!
-
-        var flat = [lambda_weapon_vertex_t]()
-        flat.reserveCapacity(Int(mesh.index_count))
-        var subs: [Submesh] = []
-        let subsPtr = mesh.submeshes!
-        for s in 0..<Int(mesh.submesh_count) {
-            let sm = subsPtr[s]
-            let start = flat.count
-            let base = Int(sm.index_offset)
-            for i in 0..<Int(sm.index_count) {
-                flat.append(verts[Int(idx[base + i])])
-            }
-            subs.append(Submesh(vertexStart: start,
-                                vertexCount: Int(sm.index_count),
-                                texture: Int(sm.texture),
-                                flags: sm.flags))
-        }
-
-        let vbuf = device.makeBuffer(bytes: flat,
-                                     length: flat.count * MemoryLayout<lambda_weapon_vertex_t>.stride,
-                                     options: .storageModeShared)
-        vbuf?.label = "WeaponVertices"
-
-        // Bone table (names for the grip bone now; part bones later).
-        var names: [String] = []
-        if let bones = mesh.bones {
-            for b in 0..<Int(mesh.bone_count) {
-                var entry = bones[b]
-                let name = withUnsafePointer(to: &entry.name) {
-                    $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
-                }
-                names.append(name)
-            }
-        }
-
-        // Textures: expand each RGBA8 blob into a private texture.
-        var texs: [MTLTexture] = []
-        let texPtr = mesh.textures!
-        for t in 0..<Int(mesh.texture_count) {
-            let tx = texPtr[t]
-            let td = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm,
-                width: Int(tx.width), height: Int(tx.height), mipmapped: false)
-            td.usage = .shaderRead
-            guard let tex = device.makeTexture(descriptor: td), let rgba = tx.rgba else { continue }
-            tex.replace(region: MTLRegionMake2D(0, 0, Int(tx.width), Int(tx.height)),
-                        mipmapLevel: 0, withBytes: rgba,
-                        bytesPerRow: Int(tx.width) * 4)
-            texs.append(tex)
-        }
-
-        self.vertexBuffer = vbuf
-        self.submeshes = subs
-        self.textures = texs
-        self.boneNames = names
-        self.handBoneIndex = Int(mesh.hand_bone_index)
+        self.mesh = uploaded
         self.palette = []          // refreshPose() fills it for this generation
         self.handBone = matrix_identity_float4x4
-        self.bbmin = SIMD3(mesh.bbmin.0, mesh.bbmin.1, mesh.bbmin.2)
-        self.bbmax = SIMD3(mesh.bbmax.0, mesh.bbmax.1, mesh.bbmax.2)
         self.uploadedGeneration = gen
 
-        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(flat.count) submeshes=\(subs.count) textures=\(texs.count) bones=\(names.count) handbone=\(handBoneIndex)")
+        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex)")
     }
 
     /// Allocate/resize the weapon depth to match the drawable colour slice.
@@ -308,15 +258,26 @@ final class WeaponPass {
     }
 
     /// Resources that must be resident this frame (MTL4 has no auto tracking).
-    func residentResources(uniformBufferIndex: Int) -> [MTLResource] {
+    func residentResources(uniformBufferIndex: Int, body: StudioMesh? = nil) -> [MTLResource] {
         var r: [MTLResource] = []
-        if let vertexBuffer { r.append(vertexBuffer) }
+        if let mesh { r.append(contentsOf: mesh.resources) }
+        if let body { r.append(contentsOf: body.resources) }
         if let depth { r.append(depth) }
-        r.append(uniformBuffers[uniformBufferIndex])
-        r.append(boneBuffers[uniformBufferIndex])
+        r.append(weaponBuffers.uniforms[uniformBufferIndex])
+        r.append(weaponBuffers.bones[uniformBufferIndex])
+        r.append(bodyBuffers.uniforms[uniformBufferIndex])
+        r.append(bodyBuffers.bones[uniformBufferIndex])
         r.append(ringUniformBuffers[uniformBufferIndex])
-        r.append(contentsOf: textures)
         return r
+    }
+
+    /// The lighting and camera terms shared by every skinned draw this frame.
+    private struct Shading {
+        var lightDir: SIMD3<Float>
+        var lightColor: SIMD3<Float>
+        var ambient: SIMD3<Float>
+        var eye0: SIMD3<Float>, eye1: SIMD3<Float>
+        var right0: SIMD3<Float>, right1: SIMD3<Float>
     }
 
     /// Encode the weapon pass. Call after the fullscreen engine pass has been
@@ -333,32 +294,25 @@ final class WeaponPass {
                 eyePositions: [SIMD3<Float>],
                 eyeRights: [SIMD3<Float>],
                 drawWeapon: Bool = true,
+                body: BodyDraw? = nil,
                 arcs: [Arc] = []) {
         guard let depth else { return }
 
-        // One WeaponUniforms per submesh — the chrome/masked flags are
-        // per-submesh state, and rebinding the address per draw is cheaper
-        // than splitting the pipeline. Slot 0 doubles as the arcs' binding.
-        let ub = uniformBuffers[uniformBufferIndex]
-        let slotStride = Int(WEAPON_UNIFORM_STRIDE)
         let eye0 = eyePositions.first ?? .zero
-        let eye1 = eyePositions.count > 1 ? eyePositions[1] : eye0
-        let right0 = eyeRights.first ?? SIMD3<Float>(1, 0, 0)
-        let right1 = eyeRights.count > 1 ? eyeRights[1] : right0
-        let drawnSubmeshes = drawWeapon ? min(submeshes.count, Int(WEAPON_MAX_SUBMESHES)) : 0
-        for k in 0..<max(drawnSubmeshes, 1) {
-            let flags = k < drawnSubmeshes ? submeshes[k].flags : 0
-            var u = WeaponUniforms(
-                modelMatrix: model,
-                lightDir: SIMD4(lightDir, 0),
-                lightColor: SIMD4(lightColor, 0),
-                ambient: SIMD4(ambient, 0),
-                eyePos: (SIMD4(eye0, 1), SIMD4(eye1, 1)),
-                eyeRight: (SIMD4(right0, 0), SIMD4(right1, 0)),
-                renderFlags: SIMD4((flags & WeaponPass.studioMasked) != 0 ? 1 : 0,
-                                   (flags & WeaponPass.studioChrome) != 0 ? 1 : 0,
-                                   0, 0))
-            memcpy(ub.contents() + k * slotStride, &u, MemoryLayout<WeaponUniforms>.size)
+        let shading = Shading(
+            lightDir: lightDir, lightColor: lightColor, ambient: ambient,
+            eye0: eye0,
+            eye1: eyePositions.count > 1 ? eyePositions[1] : eye0,
+            right0: eyeRights.first ?? SIMD3<Float>(1, 0, 0),
+            right1: eyeRights.count > 1 ? eyeRights[1] : (eyeRights.first ?? SIMD3<Float>(1, 0, 0)))
+
+        // Slot 0 of the weapon uniforms doubles as the arcs' binding, so it is
+        // written even on a frame with no weapon.
+        let ub = weaponBuffers.uniforms[uniformBufferIndex]
+        if drawWeapon, let mesh {
+            writeUniforms(mesh: mesh, model: model, shading: shading, into: ub)
+        } else {
+            writeUniforms(mesh: nil, model: model, shading: shading, into: ub)
         }
 
         let rpd = MTL4RenderPassDescriptor()
@@ -393,31 +347,24 @@ final class WeaponPass {
                                   index: BufferIndex.viewProjection.rawValue)
         fragmentArgTable.setAddress(ub.gpuAddress, index: BufferIndex.uniforms.rawValue)
 
-        if drawWeapon, isReady, let vertexBuffer {
-            // Bone palette for this frame's pose (this in-flight slot's copy).
-            let bb = boneBuffers[uniformBufferIndex]
-            if !palette.isEmpty {
-                palette.withUnsafeBytes { _ = memcpy(bb.contents(), $0.baseAddress, $0.count) }
-            }
+        let drawingSkinned = (drawWeapon && mesh != nil) || body != nil
+        if drawingSkinned {
             enc.setRenderPipelineState(pipeline)
             enc.setDepthStencilState(depthState)
             enc.setCullMode(.none)   // GoldSrc winding varies; cull nothing for now
-            vertexArgTable.setAddress(
-                vertexBuffer.gpuAddress,
-                index: BufferIndex.meshPositions.rawValue
-            )
-            vertexArgTable.setAddress(bb.gpuAddress, index: BufferIndex.bones.rawValue)
-            for (k, sm) in submeshes.prefix(drawnSubmeshes).enumerated() {
-                guard !textures.isEmpty else { break }
-                let tex = textures[min(sm.texture, textures.count - 1)]
-                // This submesh's own uniform slot (chrome/masked flags).
-                let slot = ub.gpuAddress + UInt64(k * slotStride)
-                vertexArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
-                fragmentArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
-                fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
-                enc.drawPrimitives(primitiveType: .triangle,
-                                   vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
-            }
+        }
+
+        // Body first, weapon second: both write depth, so order only matters
+        // for the ordering of overdraw, and the body is the larger of the two.
+        if let body {
+            let bu = bodyBuffers.uniforms[uniformBufferIndex]
+            writeUniforms(mesh: body.mesh, model: body.model, shading: shading, into: bu)
+            drawSkinned(enc, mesh: body.mesh, palette: body.palette,
+                        uniforms: bu, bones: bodyBuffers.bones[uniformBufferIndex])
+        }
+        if drawWeapon, let mesh {
+            drawSkinned(enc, mesh: mesh, palette: palette,
+                        uniforms: ub, bones: weaponBuffers.bones[uniformBufferIndex])
         }
 
         // UI arcs (reload ring, weapon-menu sectors), drawn last with depth
@@ -447,13 +394,52 @@ final class WeaponPass {
         enc.endEncoding()
     }
 
-    // GoldSrc bone transforms arrive row-major 3x4 (12 floats). Build a
-    // column-major float4x4 (bottom row 0,0,0,1).
-    private static func matrix(fromRowMajor3x4 m: UnsafePointer<Float>) -> float4x4 {
-        return float4x4(columns: (
-            SIMD4(m[0], m[4], m[8],  0),
-            SIMD4(m[1], m[5], m[9],  0),
-            SIMD4(m[2], m[6], m[10], 0),
-            SIMD4(m[3], m[7], m[11], 1)))
+    /// One WeaponUniforms per submesh — the chrome/masked flags are
+    /// per-submesh state, and rebinding the address per draw is cheaper than
+    /// splitting the pipeline. With no mesh, slot 0 alone is written.
+    private func writeUniforms(mesh: StudioMesh?, model: float4x4, shading s: Shading,
+                               into buffer: MTLBuffer) {
+        let slotStride = Int(WEAPON_UNIFORM_STRIDE)
+        let count = min(mesh?.submeshes.count ?? 0, Int(WEAPON_MAX_SUBMESHES))
+        for k in 0..<max(count, 1) {
+            let flags = k < count ? mesh!.submeshes[k].flags : 0
+            var u = WeaponUniforms(
+                modelMatrix: model,
+                lightDir: SIMD4(s.lightDir, 0),
+                lightColor: SIMD4(s.lightColor, 0),
+                ambient: SIMD4(s.ambient, 0),
+                eyePos: (SIMD4(s.eye0, 1), SIMD4(s.eye1, 1)),
+                eyeRight: (SIMD4(s.right0, 0), SIMD4(s.right1, 0)),
+                renderFlags: SIMD4((flags & StudioMesh.studioMasked) != 0 ? 1 : 0,
+                                   (flags & StudioMesh.studioChrome) != 0 ? 1 : 0,
+                                   0, 0))
+            memcpy(buffer.contents() + k * slotStride, &u, MemoryLayout<WeaponUniforms>.size)
+        }
+    }
+
+    /// Draw one skinned model: upload its palette into this frame's bone
+    /// buffer, then one draw per submesh against that submesh's uniform slot
+    /// and texture. Pipeline, depth state and cull mode are already set.
+    private func drawSkinned(_ enc: MTL4RenderCommandEncoder, mesh: StudioMesh,
+                             palette: [float4x4], uniforms: MTLBuffer, bones: MTLBuffer) {
+        guard !mesh.textures.isEmpty else { return }
+        if !palette.isEmpty {
+            let count = min(palette.count, Int(WEAPON_MAX_BONES))
+            palette.withUnsafeBytes {
+                _ = memcpy(bones.contents(), $0.baseAddress, count * MemoryLayout<float4x4>.stride)
+            }
+        }
+        let slotStride = Int(WEAPON_UNIFORM_STRIDE)
+        vertexArgTable.setAddress(mesh.vertexBuffer.gpuAddress, index: BufferIndex.meshPositions.rawValue)
+        vertexArgTable.setAddress(bones.gpuAddress, index: BufferIndex.bones.rawValue)
+        for (k, sm) in mesh.submeshes.prefix(Int(WEAPON_MAX_SUBMESHES)).enumerated() {
+            let tex = mesh.textures[min(sm.texture, mesh.textures.count - 1)]
+            let slot = uniforms.gpuAddress + UInt64(k * slotStride)
+            vertexArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
+            fragmentArgTable.setAddress(slot, index: BufferIndex.uniforms.rawValue)
+            fragmentArgTable.setTexture(tex.gpuResourceID, index: TextureIndex.color.rawValue)
+            enc.drawPrimitives(primitiveType: .triangle,
+                               vertexStart: sm.vertexStart, vertexCount: sm.vertexCount)
+        }
     }
 }

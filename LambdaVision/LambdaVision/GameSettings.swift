@@ -127,6 +127,12 @@ final class GameSettings {
         didSet { AppSettingsStore.weaponExternal = weaponExternal
                  cvar("vr_weapon_external", weaponExternal ? 1 : 0) }
     }
+    /// Draw the first-person body (the player model posed from head and hand
+    /// tracking, see AvatarRig). Off leaves the wireframe hands alone.
+    var avatarBody: Bool = AppSettingsStore.avatarBody {
+        didSet { AppSettingsStore.avatarBody = avatarBody
+                 Renderer.avatarBodyEnabled = avatarBody }
+    }
 
     init() {
         applyRendererStatics()
@@ -143,6 +149,7 @@ final class GameSettings {
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
         Renderer.gestureInputEnabled = gestureInputEnabled
+        Renderer.avatarBodyEnabled = avatarBody
     }
 
     /// Called from Renderer.ensureEngineInitialized() once the engine is up.

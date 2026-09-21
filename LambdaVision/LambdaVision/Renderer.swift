@@ -159,6 +159,17 @@ actor Renderer {
     // the first frame, like weaponPass.
     private var armPass: ArmPass!
 
+    // First-person body: the rig is built once from the body slot after the
+    // engine loads gordon.mdl; the mesh is uploaded once per bake (and again
+    // when the legs toggle flips, since hidden bones are cut at upload). The
+    // body yaw trails the head yaw so the torso follows a turn, not a glance.
+    private var avatarRig: AvatarRig?
+    private var avatarRigFailed = false
+    private var avatarMesh: StudioMesh?
+    private var avatarMeshLegs = false
+    private var avatarBodyYaw: Float? = nil
+    private var avatarLastTime: Double? = nil
+
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
 
@@ -257,6 +268,12 @@ actor Renderer {
     // baked (see lambda_body_load). Read by the body pass to decide whether a
     // first-person body can be drawn at all.
     nonisolated(unsafe) static var avatarAvailable = false
+    /// Draw the first-person body (Settings > Input). Off = arms-only
+    /// fallback: the wireframe hands and the viewmodel, as before.
+    nonisolated(unsafe) static var avatarBodyEnabled = true
+    /// Draw the avatar's legs. Off by default: nothing tracks them, and a
+    /// leg standing where the player's is not reads worse than no leg.
+    nonisolated(unsafe) static var avatarLegsVisible = false
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -553,6 +570,99 @@ actor Renderer {
     ]
     private static let leftArmColor  = SIMD4<Float>(0.25, 0.95, 1.00, 1.0)  // cyan
     private static let rightArmColor = SIMD4<Float>(0.35, 1.00, 0.55, 1.0)  // green
+
+    // MARK: First-person body
+
+    /// The player body for this frame — mesh, bone palette and placement — or
+    /// nil when there is nothing to draw (feature off, no model, no head).
+    ///
+    /// Everything the rig needs is converted into GoldSrc world axes (inches,
+    /// Z-up, +X the tracking origin's forward) up front, solved there, and
+    /// the result converted back once through `studioToWorld`. The palette
+    /// never leaves GoldSrc space; only the root does.
+    private func avatarBodyDraw(deviceAnchor: DeviceAnchor?, time: Double) -> WeaponPass.BodyDraw? {
+        guard Renderer.avatarBodyEnabled, Renderer.avatarAvailable, let deviceAnchor else { return nil }
+        if avatarRig == nil && !avatarRigFailed {
+            do {
+                avatarRig = try AvatarRig()
+            } catch {
+                avatarRigFailed = true
+                AppLog.render.line("[Avatar] rig unavailable: \(error)")
+            }
+        }
+        guard let rig = avatarRig else { return nil }
+
+        // Upload the mesh once per bake, and again if the legs toggle moved,
+        // since hidden bones are cut out of the vertex buffer.
+        let gen = lambda_body_generation()
+        if gen != 0, avatarMesh?.generation != gen || avatarMeshLegs != Renderer.avatarLegsVisible {
+            var raw = lambda_weapon_mesh_t()
+            if lambda_body_lock(&raw) != 0 {
+                let legs = Renderer.avatarLegsVisible
+                avatarMesh = StudioMesh(device: device, mesh: raw, generation: gen, label: "Body",
+                                        hiddenBones: rig.hiddenBones(legs: legs))
+                avatarMeshLegs = legs
+                if let m = avatarMesh {
+                    AppLog.render.line("[Avatar] uploaded gen=\(gen) verts=\(m.vertexCount) submeshes=\(m.submeshes.count) textures=\(m.textures.count) legs=\(legs)")
+                }
+            }
+            lambda_body_unlock()
+        }
+        guard let mesh = avatarMesh else { return nil }
+
+        // Head: eyes and gaze, in GoldSrc world.
+        let h = deviceAnchor.originFromAnchorTransform
+        let fwd = studioDirection(-SIMD3(h.columns.2.x, h.columns.2.y, h.columns.2.z))
+        let up = studioDirection(SIMD3(h.columns.1.x, h.columns.1.y, h.columns.1.z))
+        let eye = studioPoint(SIMD3(h.columns.3.x, h.columns.3.y, h.columns.3.z))
+
+        // Body yaw trails head yaw (~0.35 s time constant). The render loop
+        // calls this once per drawable, so only advance on a new frame time.
+        let headYaw = atan2f(fwd.y, fwd.x)
+        var yaw = avatarBodyYaw ?? headYaw
+        if let last = avatarLastTime, time > last {
+            let dt = Float(min(time - last, 0.1))
+            var d = headYaw - yaw
+            d = atan2f(sinf(d), cosf(d))
+            yaw += d * (1 - expf(-dt / 0.35))
+        }
+        if avatarLastTime != time { avatarLastTime = time; avatarBodyYaw = yaw }
+
+        var targets = AvatarRig.Targets(headPosition: eye, bodyYaw: yaw, leftHand: nil, rightHand: nil,
+                                        headRotation: AvatarRig.headRotation(forward: fwd, up: up))
+        if let l = avatarWrist(handTracking.latestAnchors.leftHand, left: true) {
+            targets.leftHand = l.position; targets.leftHandRotation = l.rotation
+        }
+        if let r = avatarWrist(handTracking.latestAnchors.rightHand, left: false) {
+            targets.rightHand = r.position; targets.rightHandRotation = r.rotation
+        }
+        let pose = rig.pose(targets)
+        return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root)
+    }
+
+    /// A tracked wrist as the rig wants it: position in GoldSrc world plus the
+    /// wrist rotation built from where the fingers point and the back of the
+    /// hand — the same two axes the weapon grip uses, so the body's hand and
+    /// the gun agree on which way the hand faces.
+    private func avatarWrist(_ hand: HandAnchor?, left: Bool)
+        -> (position: SIMD3<Float>, rotation: simd_quatf)? {
+        guard handTracking.state == .running, let hand, hand.isTracked,
+              let skel = hand.handSkeleton else { return nil }
+        let handT = hand.originFromAnchorTransform
+        func worldPos(_ name: HandSkeleton.JointName) -> SIMD3<Float> {
+            let t = handT * skel.joint(name).anchorFromJointTransform
+            return SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        }
+        let wrist = worldPos(.wrist)
+        let fwd = simd_normalize(worldPos(.middleFingerKnuckle) - wrist)
+        // Index → little knuckle runs across the palm; negated on the left
+        // hand so the cross product gives the back of the hand on both.
+        let acrossRaw = worldPos(.littleFingerKnuckle) - worldPos(.indexFingerKnuckle)
+        let across = simd_normalize(left ? -acrossRaw : acrossRaw)
+        let back = simd_normalize(simd_cross(across, fwd))
+        return (studioPoint(wrist),
+                AvatarRig.handRotation(forward: studioDirection(fwd), back: studioDirection(back)))
+    }
 
     /// Flat [pos.xyz, color.rgba] x N array (world space, metres) for every
     /// tracked hand's skeleton — see ArmPass. Empty when hand tracking isn't
@@ -1774,7 +1884,9 @@ actor Renderer {
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
-        let supplementalPassActive = weaponActive || joystickVisible
+        let body = avatarBodyDraw(deviceAnchor: deviceAnchor,
+                                  time: drawable.frameTiming.presentationTime.timeInterval)
+        let supplementalPassActive = weaponActive || joystickVisible || body != nil
         if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
                                    height: drawable.colorTextures[0].height,
@@ -1838,7 +1950,8 @@ actor Renderer {
             drawableTarget.viewProjectionBuffer
         ])
         if supplementalPassActive {
-            residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex))
+            residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex,
+                                                                     body: body?.mesh))
         }
         if !armVertices.isEmpty {
             residencySet.addAllocations(armPass.residentResources(uniformBufferIndex: uniformBufferIndex))
@@ -1940,10 +2053,18 @@ actor Renderer {
             let headRight = SIMD3<Float>(anchorM.columns.0.x, anchorM.columns.0.y, anchorM.columns.0.z)
             let headUp = SIMD3<Float>(anchorM.columns.1.x, anchorM.columns.1.y, anchorM.columns.1.z)
             var model = matrix_identity_float4x4
-            var lightColor = SIMD3<Float>(repeating: 0.5)
-            var ambient = SIMD3<Float>(repeating: 0.5)
             var drawWeapon = false
             var arcs: [WeaponPass.Arc] = []
+
+            // World light sampled at the eye by the engine (R_LightPoint),
+            // split into an ambient floor + a soft top-down directional so
+            // the gun and the body match room brightness/tint yet keep some
+            // shape.
+            var lrgb: [Float] = [0.5, 0.5, 0.5]
+            lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
+            let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
+            let lightColor = lc * 0.7
+            let ambient = lc * 0.6
 
             if let stick = HandMovement.joystickVisualization {
                 let visualRadius: Float = 0.065
@@ -2006,13 +2127,7 @@ actor Renderer {
                 handWorld.columns.2 = SIMD4<Float>(fwd, 0)
                 handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
 
-                let s: Float = 1.0 / 39.37   // GoldSrc units → metres
-                // GoldSrc (x fwd, y left, z up) → Apple axes + metres.
-                let B = float4x4(columns: (
-                    SIMD4<Float>(0,  0, -s, 0),
-                    SIMD4<Float>(-s, 0,  0, 0),
-                    SIMD4<Float>(0,  s,  0, 0),
-                    SIMD4<Float>(0,  0,  0, 1)))
+                let B = studioToWorld   // GoldSrc (x fwd, y left, z up, inches) → Apple metres
                 // Tunable grip correction in the hand-local frame.
                 let C = matrix4x4_translation(0, 0, Renderer.gripPushM)
                       * matrix4x4_rotation(radians: Renderer.gripYawDeg   * .pi/180, axis: SIMD3(0,1,0))
@@ -2027,14 +2142,6 @@ actor Renderer {
                                                          : matrix_identity_float4x4
                 model = handWorld * C * B * handBoneInv
 
-                // World light sampled at the eye by the engine (R_LightPoint),
-                // split into an ambient floor + a soft top-down directional so
-                // the gun matches room brightness/tint yet keeps some shape.
-                var lrgb: [Float] = [0.5, 0.5, 0.5]
-                lrgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
-                let lc = SIMD3<Float>(lrgb[0], lrgb[1], lrgb[2])
-                lightColor = lc * 0.7
-                ambient = lc * 0.6
                 // UI arcs, billboarded to the head so they read from any
                 // angle: the reload-hold ring floats above the weapon; the
                 // radial weapon menu draws five sector wedges around the
@@ -2081,7 +2188,7 @@ actor Renderer {
                 }
             }
 
-            if drawWeapon || !arcs.isEmpty {
+            if drawWeapon || body != nil || !arcs.isEmpty {
                 // Per-eye camera position + right axis in world metres, for the
                 // chrome environment map (GoldSrc builds its sphere map from
                 // the viewer→surface vector and the camera's right axis).
@@ -2107,6 +2214,7 @@ actor Renderer {
                                   eyePositions: eyePositions,
                                   eyeRights: eyeRights,
                                   drawWeapon: drawWeapon,
+                                  body: body,
                                   arcs: arcs)
             }
         }
@@ -2246,6 +2354,25 @@ extension Renderer.DrawableTarget {
 }
 
 // Generic matrix math utility functions
+/// GoldSrc axes (x forward, y left, z up; inches) → Apple world (metres).
+/// The one place the two bases meet for skinned models: weapon placement
+/// and the avatar root both go through it, and `studioDirection` /
+/// `studioPoint` are its inverse for taking tracking data the other way.
+nonisolated let studioToWorld: float4x4 = {
+    let s: Float = 1.0 / 39.37
+    return float4x4(columns: (
+        SIMD4<Float>(0,  0, -s, 0),
+        SIMD4<Float>(-s, 0,  0, 0),
+        SIMD4<Float>(0,  s,  0, 0),
+        SIMD4<Float>(0,  0,  0, 1)))
+}()
+
+/// Apple world direction → GoldSrc axes (unit length preserved).
+nonisolated func studioDirection(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-v.z, -v.x, v.y) }
+
+/// Apple world point (metres) → GoldSrc axes (inches).
+nonisolated func studioPoint(_ p: SIMD3<Float>) -> SIMD3<Float> { studioDirection(p) * 39.37 }
+
 nonisolated func matrix4x4_rotation(radians: Float, axis: SIMD3<Float>) -> matrix_float4x4 {
     let unitAxis = normalize(axis)
     let ct = cosf(radians)

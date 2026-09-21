@@ -87,6 +87,7 @@ enum AppSettingsStore {
     private static let gestureInputEnabledKey = "lambdavision.settings.gestureInputEnabled"
     private static let fastWeaponSwitchKey    = "lambdavision.settings.fastWeaponSwitch"
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
+    private static let avatarBodyKey          = "lambdavision.settings.avatarBody"
 
     static var dominantHand: DominantHand {
         get {
@@ -115,5 +116,9 @@ enum AppSettingsStore {
     static var weaponExternal: Bool {
         get { bool(weaponExternalKey, true) }    // default: draw the weapon in the Metal pass
         set { defaults.set(newValue, forKey: weaponExternalKey) }
+    }
+    static var avatarBody: Bool {
+        get { bool(avatarBodyKey, true) }        // default: draw the first-person body
+        set { defaults.set(newValue, forKey: avatarBodyKey) }
     }
 }
