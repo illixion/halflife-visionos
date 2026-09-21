@@ -115,7 +115,15 @@ instead of deleting them.
   arm. The head is always cut (the camera is inside it) and the legs are cut
   by default, as whole triangles at upload — 283 of 639 dropped — leaving an
   open neck and hips. The body yaw trails the head yaw with a 0.35 s time
-  constant. Settings > Input > "First-person body" is the arms-only fallback
+  constant. First device look: tracking reads well, but the elbows folded the
+  wrong way. Two causes, both fixed: RAVERig's pole only fixed the bend
+  *plane* and kept the seed's side (right for an animated leg, wrong for an
+  arm seeded from sequence 0's raised right arm), so it gained a
+  `bendTowardPole` option; and the pole itself was mostly *back*, nearly
+  anti-parallel to any hand held forward, so the plane tilted sideways. It is
+  now mostly down with a little back and outward, and the probe asserts the
+  elbow's side for six hand positions per arm. Settings > Input >
+  "First-person body" is the arms-only fallback
   (`Renderer.avatarLegsVisible` shows the legs; no UI yet). Not yet on device:
   the eye offset, the cull mode (none, like the weapon), the wireframe hands
   overlapping the avatar's, and the viewmodel's own hands/sleeve still drawing

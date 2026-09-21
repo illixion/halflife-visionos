@@ -323,12 +323,21 @@ struct AvatarRig {
         root.columns.3 = SIMD4<Float>(targets.headPosition - yaw.act(eyeModel), 1)
         let toModel = root.inverse
 
-        // The pole is the direction the elbow is pushed toward — down and
-        // back, which is where a human elbow sits when the hand is forward.
-        // Passing the body's own backward axis rather than a world constant
-        // keeps it right when the player turns.
+        // The pole is the side the elbow bends toward, and it has to be a
+        // direction the arm is rarely asked to point along, or the bend plane
+        // is ill-defined exactly when it matters. Mostly down, since an
+        // elbow hangs; a little back, so an arm hanging straight down still
+        // has a plane and bends backward as elbows do; a little outward, so
+        // a hand held in front puts its elbow down-and-out rather than
+        // pinned under the wrist. An earlier mostly-back pole was nearly
+        // anti-parallel to any hand held forward, and a hand raised to the
+        // face got its elbow up behind the shoulder. The body's own axes
+        // rather than world constants, so it holds when the player turns.
         let back = yaw.act(SIMD3<Float>(-1, 0, 0))
-        let pole = simd_normalize(back - AvatarRig.up * 0.5)
+        let leftward = yaw.act(SIMD3<Float>(0, 1, 0))
+        func pole(side: Float) -> SIMD3<Float> {
+            simd_normalize(-AvatarRig.up + back * 0.5 + leftward * (0.3 * side))
+        }
 
         // An untracked hand hangs by the side instead of holding whatever
         // sequence 0 froze it in (the right arm raised, as it happens). The
@@ -353,8 +362,12 @@ struct AvatarRig {
             } else {
                 (target, rotation) = relaxed(arm, side: side)
             }
+            // bendTowardPole: the seed is one frozen frame of sequence 0,
+            // whose elbows sit wherever that frame left them (the right one
+            // raised). Only the pole knows which side the bend belongs on.
             let report = solver.solve(chain: arm.chain, target: target,
-                                      pole: (toModel * SIMD4<Float>(pole, 0)).xyz,
+                                      pole: (toModel * SIMD4<Float>(pole(side: side), 0)).xyz,
+                                      bendTowardPole: true,
                                       iterations: iterations,
                                       pose: &joints, model: &model)
             // The wrist takes the tracked orientation outright. FABRIK only

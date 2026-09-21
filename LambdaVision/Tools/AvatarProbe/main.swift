@@ -375,21 +375,36 @@ do {
 // MARK: - Elbows go where elbows go
 
 do {
-    guard let right = rig.rightArm else { die("no right arm") }
-    let base = rig.pose(AvatarRig.Targets(headPosition: SIMD3<Float>(0, 0, 64), bodyYaw: 0,
-                                          leftHand: nil, rightHand: nil))
-    let shoulder = PoseSolver.translation(of: base.root * base.palette[right.chain.joints[0]])
-    // Hand held out in front at chest height: the elbow should sit BELOW the
-    // straight shoulder-to-hand line, not above it or out to the side.
-    let target = shoulder + SIMD3<Float>(16, 0, -2)
-    let pose = rig.pose(AvatarRig.Targets(headPosition: SIMD3<Float>(0, 0, 64), bodyYaw: 0,
-                                          leftHand: nil, rightHand: target))
-    let j = right.chain.joints.map { PoseSolver.translation(of: pose.root * pose.palette[$0]) }
-    let mid = (j[0] + j[2]) * 0.5
-    let drop = mid.z - j[1].z
-    print(String(format: "\nelbow: shoulder %@ elbow %@ hand %@", fmt(j[0]), fmt(j[1]), fmt(j[2])))
-    print(String(format: "  elbow sits %.2f units below the shoulder-hand line", drop))
-    if drop < 0 { print("  WARNING: elbow is above the line — the pole may be inverted") }
+    let eye = SIMD3<Float>(0, 0, 64)
+    let base = rig.pose(AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil))
+    print("\nelbow placement (offset from the shoulder–hand midpoint, units):")
+    for (label, arm, side) in [("L", rig.leftArm!, Float(1)), ("R", rig.rightArm!, Float(-1))] {
+        let sh = PoseSolver.translation(of: base.root * base.palette[arm.chain.joints[0]])
+        // Hand offsets from the shoulder: forward, outward, up. Each case
+        // names where a human elbow goes, and the assertion is that shape:
+        // below the line always, and never up behind the shoulder — which is
+        // exactly what a pole that only fixed the plane produced for a hand
+        // raised to the face, seeded from sequence 0's raised right arm.
+        let cases: [(String, SIMD3<Float>, (SIMD3<Float>) -> Bool)] = [
+            ("forward at chest",   SIMD3(16, 0, -2),        { $0.z < -4 }),
+            ("raised to the face", SIMD3(8, 0, 8),          { $0.z < -2 && $0.x > 0 }),
+            ("folded at shoulder", SIMD3(5, 2 * side, 2),   { $0.z < -4 && $0.x > -1 }),
+            ("hanging",            SIMD3(2, 1 * side, -19), { $0.x < -2 }),
+            ("out to the side",    SIMD3(4, 14 * side, -6), { $0.z < -3 }),
+            ("across the chest",   SIMD3(10, -10 * side, -4), { $0.z < -4 }),
+        ]
+        for (name, off, ok) in cases {
+            var t = AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil)
+            if label == "L" { t.leftHand = sh + off } else { t.rightHand = sh + off }
+            let p = rig.pose(t)
+            let j = arm.chain.joints.map { PoseSolver.translation(of: p.root * p.palette[$0]) }
+            var e = j[1] - (j[0] + j[2]) / 2
+            e.y *= side   // report "outward" for both arms
+            print(String(format: "  %@ %-19@ fwd %+6.2f  out %+6.2f  up %+6.2f%@",
+                         label, name, e.x, e.y, e.z, ok(e) ? "" : "   <-- WRONG"))
+            if !ok(e) { die("the \(label) elbow is in the wrong place with the hand \(name)") }
+        }
+    }
 }
 
 // MARK: - A posed body, for eyes
