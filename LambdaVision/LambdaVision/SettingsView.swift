@@ -110,10 +110,20 @@ struct SettingsView: View {
                         .disabled(!settings.avatarBody)
                     Toggle("Fast weapon switch", isOn: $settings.fastWeaponSwitch)
                     Toggle("Immersive gesture input", isOn: $settings.gestureInputEnabled)
+                    Toggle("Arm-swing walking", isOn: $settings.armSwingEnabled)
+                        .disabled(!settings.gestureInputEnabled)
+                    Picker("Swing direction", selection: $settings.armSwingDirection) {
+                        ForEach(ArmSwingDirection.allCases) { Text($0.label).tag($0) }
+                    }
+                    .disabled(!settings.gestureInputEnabled || !settings.armSwingEnabled)
+                    slider("Swing sensitivity", $settings.armSwingSensitivity, 0.5...2, 0.1) {
+                        String(format: "%.1f×", $0)
+                    }
+                    .disabled(!settings.gestureInputEnabled || !settings.armSwingEnabled)
                 } header: {
                     Text("Input")
                 } footer: {
-                    Text("“Hand-tracked weapon model” draws the weapon in your hand, tracking it directly (world-lit); off falls back to the classic engine-drawn weapon. “First-person body” draws Gordon under your head, following your hands and holding the weapon; “Legs” stands him on the game’s floor, stepping as you walk, turn or move with the stick. “Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. “Immersive gesture input” lets you fire with a finger-gun — curl your dominant index finger to pull the trigger (pinch still fires too). Reload by curling your thumb down (index extended) and holding until the ring above the weapon fills. Move with the other hand: pinch thumb+index and drag like a joystick; raise or drop the pinched hand to jump or crouch. Switch weapons with the weapon wheel: pinch all fingertips together (🤌), move your hand toward a sector, release to pick that slot (works best with fast weapon switch on). Press buttons by reaching out and poking with the off-hand index finger; rest an open palm on health/HEV chargers to keep them running. On a train, poke the console to take the controls, then pinch and push/pull to work the throttle; poke again to let go.")
+                    Text("“Hand-tracked weapon model” draws the weapon in your hand, tracking it directly (world-lit); off falls back to the classic engine-drawn weapon. “First-person body” draws Gordon under your head, following your hands and holding the weapon; “Legs” stands him on the game’s floor, stepping as you walk, turn or move with the stick. “Fire aims at → Where I look” is an accessibility option: shots follow your gaze instead of the weapon barrel. “Immersive gesture input” lets you fire with a finger-gun — curl your dominant index finger to pull the trigger (it replaces look-and-pinch fire). Reload by curling your thumb down (index extended) and holding until the ring above the weapon fills. Move with the other hand: pinch thumb+index and drag like a joystick; raise or drop the pinched hand to jump or crouch. Or, with “Arm-swing walking”, close both hands into fists and pump your arms like jogging: the harder you swing, the faster you go, up to full run speed (“Swing sensitivity” sets how hard you need to swing). Flick both fists up together to jump. You can’t shoot while swinging; open your hands to stop and take aim. Switch weapons with the weapon wheel: pinch all fingertips together (🤌), move your hand toward a sector, release to pick that slot (works best with fast weapon switch on). Press buttons by reaching out and poking with the off-hand index finger; rest an open palm on health/HEV chargers to keep them running. On a train, poke the console to take the controls, then pinch and push/pull to work the throttle; poke again to let go.")
                 }
 
                 Section {

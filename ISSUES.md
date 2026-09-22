@@ -27,11 +27,14 @@ instead of deleting them.
   files must agree on "egon" — the render skip and the aim exemption. A
   proper fix would anchor only the gun portion to the hand (hide/detach
   the backpack submesh) so it behaves like every other weapon.
-- **Gaze+pinch `+use`.** Off-hand pinch = use, dominant hand = fire, to
-  avoid gesture ambiguity. Spatial events already reach the layer.
-- **Finger-curl trigger.** Index-joint flexion with hysteresis as an
-  immersive alternative to pinch fire. Risks: false fires, no haptics,
-  fatigue — keep pinch as fallback.
+- **Arm-swing walking needs tuning on device.** `RAVEArmSwinger` (RAVEInput)
+  drives the same joy axes as the pinch joystick: both fists plus a swing
+  pattern engage it, and the stroke-speed envelope maps 0.4–2.0 m/s onto
+  0–1. Every constant is a host-test starting point, not a measured one;
+  read the `swing:` and `ground speed:` diagnostics lines while jogging in
+  place. A fist on the off hand also stands the gun hand down (the entry
+  into a swing would otherwise fire), so resting that hand clenched blocks
+  fire. Watch for that.
 - **Shell casings eject off-axis** relative to the aim ray (client event
   shell math uses its own attachment angles). Cosmetic.
 - **Gaze ray freezes during a held pinch** — visionOS only updates
@@ -213,6 +216,12 @@ instead of deleting them.
 
 ## Ideas / someday
 
+- **Speedrunner mode.** An in-game run timer and a speed gauge on the HUD.
+  Blocked on replacing the stock HL HUD, which renders low-res, with a
+  native one; don't retrofit it into the stock HUD. The ground speed it
+  would show is already published (`g_vr_body_state.velocity`, shown in the
+  diagnostics as `ground speed:`).
+
 - CS-style fastswitch (slot key cycles weapons directly with multiple
   weapons per bucket — small `ammo.cpp` patch; stock HL only fast-switches
   single-weapon slots).
@@ -223,6 +232,11 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~Gaze+pinch `+use`~~ — superseded by the off-hand reach/poke `+use` in
+  `HandMovement`.
+- ~~Finger-curl trigger~~ — shipped as the finger-gun under "Immersive
+  gesture input" (`Renderer.fireCurlOn`/`Off`). It replaces gaze+pinch
+  fire while it is on rather than sitting alongside it.
 - ~~Barrel aim reads slightly to the right~~ — the aim ray was wrist→middle
   knuckle while the gun was drawn through a tuned grip correction, so the two
   disagreed by a fixed rotation. The aim now follows the drawn barrel:

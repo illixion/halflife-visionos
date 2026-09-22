@@ -34,6 +34,13 @@ enum FireAimMode: String, CaseIterable, Identifiable {
     var label: String { self == .barrel ? "Weapon barrel" : "Where I look" }
 }
 
+/// Which way arm-swing walking goes (RAVEArmSwingDirection, as a setting).
+enum ArmSwingDirection: String, CaseIterable, Identifiable {
+    case head, hands
+    var id: String { rawValue }
+    var label: String { self == .head ? "Where I look" : "Where my fists point" }
+}
+
 @MainActor
 @Observable
 final class GameSettings {
@@ -111,11 +118,28 @@ final class GameSettings {
                  Renderer.fireAlongGaze = (fireAimMode == .gaze) }
     }
     /// Immersive gesture input (pass 2). When on, curling the dominant hand's
-    /// index finger fires (finger-gun); pinch fire stays as a fallback. Read
+    /// index finger fires (finger-gun) in place of gaze+pinch fire. Read
     /// live by the render thread via Renderer.gestureInputEnabled.
     var gestureInputEnabled: Bool = AppSettingsStore.gestureInputEnabled {
         didSet { AppSettingsStore.gestureInputEnabled = gestureInputEnabled
                  Renderer.gestureInputEnabled = gestureInputEnabled }
+    }
+    /// Arm-swing walking (H3VR's arm swinger): fists closed, pump the arms.
+    /// Read live by the render thread via HandMovement's statics; only does
+    /// anything while gesture input is on.
+    var armSwingEnabled: Bool = AppSettingsStore.armSwingEnabled {
+        didSet { AppSettingsStore.armSwingEnabled = armSwingEnabled
+                 HandMovement.armSwingEnabled = armSwingEnabled }
+    }
+    var armSwingDirection: ArmSwingDirection = AppSettingsStore.armSwingDirection {
+        didSet { AppSettingsStore.armSwingDirection = armSwingDirection
+                 HandMovement.armSwingFollowsHands = (armSwingDirection == .hands) }
+    }
+    /// How little swinging it takes to walk and to reach full speed. Scales
+    /// the effort only: full speed is stock run speed at every setting.
+    var armSwingSensitivity: Double = AppSettingsStore.armSwingSensitivity {
+        didSet { AppSettingsStore.armSwingSensitivity = armSwingSensitivity
+                 HandMovement.armSwingSensitivity = Float(armSwingSensitivity) }
     }
     var fastWeaponSwitch: Bool = AppSettingsStore.fastWeaponSwitch {
         didSet { AppSettingsStore.fastWeaponSwitch = fastWeaponSwitch
@@ -155,6 +179,9 @@ final class GameSettings {
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
         Renderer.gestureInputEnabled = gestureInputEnabled
+        HandMovement.armSwingEnabled = armSwingEnabled
+        HandMovement.armSwingFollowsHands = (armSwingDirection == .hands)
+        HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
     }

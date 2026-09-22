@@ -86,6 +86,9 @@ enum AppSettingsStore {
     private static let fireAimModeKey         = "lambdavision.settings.fireAimMode"
     private static let gestureInputEnabledKey = "lambdavision.settings.gestureInputEnabled"
     private static let fastWeaponSwitchKey    = "lambdavision.settings.fastWeaponSwitch"
+    private static let armSwingEnabledKey     = "lambdavision.settings.armSwingEnabled"
+    private static let armSwingDirectionKey   = "lambdavision.settings.armSwingDirection"
+    private static let armSwingSensitivityKey = "lambdavision.settings.armSwingSensitivity"
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
     private static let avatarBodyKey          = "lambdavision.settings.avatarBody"
     private static let avatarLegsKey          = "lambdavision.settings.avatarLegs"
@@ -109,6 +112,22 @@ enum AppSettingsStore {
     static var gestureInputEnabled: Bool {
         get { bool(gestureInputEnabledKey, false) }
         set { defaults.set(newValue, forKey: gestureInputEnabledKey) }
+    }
+    static var armSwingEnabled: Bool {
+        get { bool(armSwingEnabledKey, true) }
+        set { defaults.set(newValue, forKey: armSwingEnabledKey) }
+    }
+    static var armSwingDirection: ArmSwingDirection {
+        get {
+            guard let raw = defaults.string(forKey: armSwingDirectionKey),
+                  let v = ArmSwingDirection(rawValue: raw) else { return .head }
+            return v
+        }
+        set { defaults.set(newValue.rawValue, forKey: armSwingDirectionKey) }
+    }
+    static var armSwingSensitivity: Double {
+        get { double(armSwingSensitivityKey, 1.0) }
+        set { defaults.set(newValue, forKey: armSwingSensitivityKey) }
     }
     static var fastWeaponSwitch: Bool {
         get { bool(fastWeaponSwitchKey, true) }  // engine startup sets hud_fastswitch 1

@@ -28,6 +28,16 @@
 //    lambda_set_train_gear. A gear-ladder gauge is published for the
 //    weapon pass to draw.
 //
+//  • Arm-swing walking (RAVEArmSwinger, the H3VR arm swinger): close both
+//    hands into fists and pump your arms like jogging to walk, faster the
+//    harder you swing; flick both fists up together to jump. It shares the
+//    joy axes with the pinch joystick and never changes what full deflection
+//    means, so both reach exactly stock run speed. A fist can't pinch (the
+//    pinch detector suppresses fists), which is what lets the two live side
+//    by side: a held pinch clutch always wins and resets the swinger. While
+//    swinging, the gun hand's gestures are suppressed — a fist IS an index
+//    curl — see `gunHandBusy(now:)`.
+//
 //  Runs once per frame on the render thread (like GamepadInput), gated by
 //  the "Immersive gesture input" setting via Renderer.gestureInputEnabled.
 //
@@ -83,7 +93,24 @@ nonisolated final class HandMovement {
     /// pass billboards this above the movement wrist while the clutch is held.
     nonisolated(unsafe) static var joystickVisualization: RAVEJoystickVisualization? = nil
 
+    // Arm-swing walking settings (GameSettings pushes these). Sensitivity
+    // scales how hard you have to swing, never the resulting speed.
+    nonisolated(unsafe) static var armSwingEnabled = true
+    nonisolated(unsafe) static var armSwingFollowsHands = false  // else the head
+    nonisolated(unsafe) static var armSwingSensitivity: Float = 1
+    /// How long the gun hand stays suppressed after the swing lets go, so the
+    /// fists opening doesn't read as a trigger pull on the way out.
+    nonisolated(unsafe) static var swingFireHoldoff: TimeInterval = 0.2
+    /// How long a swing jump holds +jump.
+    nonisolated(unsafe) static var swingJumpHold: TimeInterval = 0.25
+
     private var pinchDetector = RAVEPinchDetector(tuning: .clutch)
+    private var swinger = RAVEArmSwinger()
+    private var swing = RAVEArmSwingOutput()
+    /// The off hand was a fist on the last swing update. See gunHandBusy.
+    private var offHandFist = false
+    private var gunBusyUntil: TimeInterval = 0
+    private var swingJumpUntil: TimeInterval = 0
     private var joystick = RAVEHandJoystick(
         fullScaleMeters: 0.18,                 // wrist 18cm from anchor = full speed
         deadzoneMeters: HandMovement.deadzoneM
@@ -99,6 +126,97 @@ nonisolated final class HandMovement {
     private var throttleAxis = SIMD3<Float>(0, 0, -1)
     private var throttleGrabGear = 0
     private var logTick = 0          // throttle for [HM] debug logs
+
+    /// Advance the arm swinger. Call once per frame BEFORE the gun hand's
+    /// gestures, so `gunHandBusy(now:)` is current when they run; `poll`
+    /// then drives movement from the result. Anchors are the raw left/right
+    /// hands (either may be nil or untracked); the head axes are Apple
+    /// world, as in `poll`.
+    func updateArmSwing(active: Bool,
+                        left: HandAnchor?,
+                        right: HandAnchor?,
+                        headForward: SIMD3<Float>,
+                        headRight: SIMD3<Float>,
+                        headPos: SIMD3<Float>,
+                        now: TimeInterval) {
+        func sample(_ anchor: HandAnchor?) -> RAVEHandSample? {
+            guard let anchor, anchor.isTracked else { return nil }
+            return RAVEHandSample(anchor)
+        }
+        // A held pinch clutch owns locomotion outright; the swing has to
+        // engage from scratch once it lets go.
+        guard active, HandMovement.armSwingEnabled, !clutchHeld else {
+            swinger.reset()
+            swing = RAVEArmSwingOutput()
+            offHandFist = false
+            publishSwingDiag()
+            return
+        }
+        swinger.tuning = RAVEArmSwingTuning().scaled(sensitivity: HandMovement.armSwingSensitivity)
+        swinger.direction = HandMovement.armSwingFollowsHands ? .hands : .head
+        let l = sample(left), r = sample(right)
+        swing = swinger.update(left: l, right: r, headPosition: headPos,
+                               basis: RAVEPlanarBasis(forward: headForward, right: headRight),
+                               now: now)
+        let off = Renderer.dominantHandIsLeft ? r : l
+        offHandFist = off.map { $0.curledFingerCount(threshold: fistCurl) >= 3 } ?? false
+        publishSwingDiag()
+    }
+
+    /// Whether the gun hand belongs to the swing this frame: fire, reload and
+    /// the weapon wheel must stand down. True while the swing is engaged,
+    /// for a short holdoff after it lets go, and — because the swing needs
+    /// both fists before it can engage, and the gun hand's index curls on
+    /// the way into a fist — while the off hand is already a fist, so the
+    /// entry into a swing never fires. Nothing else uses an off-hand fist.
+    func gunHandBusy(now: TimeInterval) -> Bool {
+        guard HandMovement.armSwingEnabled else { return false }
+        if swing.engaged || offHandFist {
+            gunBusyUntil = now + HandMovement.swingFireHoldoff
+            return true
+        }
+        return now < gunBusyUntil
+    }
+
+    private func publishSwingDiag() {
+        Renderer.aimDiag.swingEngaged = swing.engaged
+        Renderer.aimDiag.swingSupport = swing.support.rawValue
+        Renderer.aimDiag.swingSpeed01 = swing.speed01
+        Renderer.aimDiag.swingHandSpeed = swing.handSpeed
+        Renderer.aimDiag.offHandFist = offHandFist
+    }
+
+    /// Drive movement from the arm swinger, if it has anything to say.
+    /// Returns false when it doesn't (not engaged and fully settled), so the
+    /// caller zeroes movement instead. Never on a train: the engine dismounts
+    /// on movement and jump.
+    private func driveSwing(onTrain: Bool, now: TimeInterval) -> Bool {
+        guard !onTrain, swing.engaged || swing.speed01 > 0 else { return false }
+        joystick.release()
+        HandMovement.joystickVisualization = nil
+        let x = swing.vector.x, y = swing.vector.y
+        lambda_joy_set_axis(0, Int32((x * 32767).rounded()))    // side, + = right
+        lambda_joy_set_axis(1, Int32((-y * 32767).rounded()))   // fwd (engine forward is negative)
+        axesActive = true
+
+        // A flick holds +jump briefly; the same auto crouch-jump as the
+        // joystick's up-flick adds +duck once airborne.
+        if swing.jumpBegan {
+            swingJumpUntil = now + HandMovement.swingJumpHold
+            jumpStart = now
+        }
+        let wantJump = now < swingJumpUntil
+        let autoDuck = HandMovement.autoCrouchJump && wantJump
+                     && (now - jumpStart) >= HandMovement.autoDuckDelay
+        setHold(&jumpHeld, want: wantJump, cmd: "jump")
+        setHold(&duckHeld, want: autoDuck, cmd: "duck")
+
+        Renderer.aimDiag.moveClutch = false
+        Renderer.aimDiag.joyX = x
+        Renderer.aimDiag.joyY = y
+        Renderer.aimDiag.moveVert = jumpHeld ? "jump" : (duckHeld ? "duck" : "—")
+        return true
+    }
 
     /// Poll once per frame. `movementHand` is the non-dominant hand's anchor;
     /// `headForward`/`headRight` are Apple-world head axes (Y is flattened
@@ -132,7 +250,7 @@ nonisolated final class HandMovement {
             Renderer.aimDiag.moveHandSeen = false
             Renderer.aimDiag.pinchDist = -1
             Renderer.aimDiag.fistCount = 0
-            fullReset()
+            fullReset(keepSwing: active && driveSwing(onTrain: onTrain, now: now))
             return nil
         }
 
@@ -185,10 +303,14 @@ nonisolated final class HandMovement {
         // half-remembering a pinch through the press.
         clutchHeld = pinchDetector.update(sample: useHeld ? nil : hand, now: now).held != nil
         guard clutchHeld else {
-            zeroMovement()
+            if !driveSwing(onTrain: onTrain, now: now) { zeroMovement() }
             releaseThrottle()
             return useHeld ? rayDir : nil
         }
+        // The pinch took over: the swing lets go now, not on the next update.
+        swinger.reset()
+        swing = RAVEArmSwingOutput()
+        swingJumpUntil = 0
 
         if onTrain {
             // Throttle stick: grab anywhere, push forward / pull back to
@@ -283,10 +405,12 @@ nonisolated final class HandMovement {
     /// Full reset: drop the clutch, throttle and +use too. Only for a
     /// lost/inactive hand — never mid-hold, or the hysteresis would restart
     /// every frame.
-    private func fullReset() {
+    /// `keepSwing` leaves the axes to the arm swinger, which can carry on
+    /// with the off hand out of view.
+    private func fullReset(keepSwing: Bool = false) {
         pinchDetector.reset()
         clutchHeld = false
-        zeroMovement()
+        if !keepSwing { zeroMovement() }
         releaseThrottle()
         setHold(&useHeld, want: false, cmd: "use")
         Renderer.aimDiag.useHeld = false

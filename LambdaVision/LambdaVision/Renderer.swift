@@ -247,7 +247,7 @@ actor Renderer {
     nonisolated(unsafe) static var fireAlongGaze: Bool = false
     // Immersive gesture input (pass 2, opt-in via Settings). When on, curling
     // the dominant hand's index finger pulls the trigger (finger-gun fire).
-    // Pinch fire (LambdaVisionApp) stays available as a fallback. The trigger
+    // Gaze+pinch fire (LambdaVisionApp) stands down while this is on. The trigger
     // uses the index EXTENSION ratio from sampleDominantHand with hysteresis:
     // fire below `fireCurlOn`, release above `fireCurlOff`. Tuned live.
     nonisolated(unsafe) static var gestureInputEnabled: Bool = false
@@ -325,6 +325,13 @@ actor Renderer {
         var pinchDist: Float = -1 // thumb↔index distance, m (-1 = no hand)
         var fistCount = 0         // fingers curled to metacarpal (>=3 = suppressed)
         var nRecenter = 0         // head-baseline re-anchors (resume / origin jump)
+        var swingEngaged = false  // arm-swing walking owns movement (and the gun hand)
+        var swingSupport = "none" // what holds it: both / fist / pattern / grace / none
+        var swingSpeed01: Float = 0   // smoothed swing deflection, 0..1
+        var swingHandSpeed: Float = 0 // stroke-speed envelope, m/s
+        var offHandFist = false   // off hand is a fist (gun hand stands down)
+        var gunBusy = false       // gun-hand gestures suppressed by the swing
+        var groundSpeed: Float = 0 // player's horizontal speed, units/s (stock run = 320)
     }
     nonisolated(unsafe) static var aimDiag = AimDiag()
 
@@ -354,6 +361,10 @@ actor Renderer {
                    d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
             String(format: "move dbg: hand %@  pinchDist %.3f  fist %d  recenter %d",
                    d.moveHandSeen ? "seen" : "—", d.pinchDist, d.fistCount, d.nRecenter),
+            String(format: "swing: %@ (%@)  speed %.2f  stroke %.2f m/s  offFist %@  gun %@",
+                   d.swingEngaged ? "ON" : "off", d.swingSupport, d.swingSpeed01,
+                   d.swingHandSpeed, d.offHandFist ? "Y" : "N", d.gunBusy ? "held" : "free"),
+            String(format: "ground speed: %.0f u/s", d.groundSpeed),
         ]
     }
 
@@ -1677,9 +1688,35 @@ actor Renderer {
             // from the engagement point arms a sector (12 o'clock = slot1,
             // clockwise); releasing the pinch commits it, releasing inside
             // the deadzone or losing the hand cancels.
+            // Arm-swing walking goes first: while the fists are pumping, the
+            // gun hand belongs to the swing, and the wheel, trigger and reload
+            // below must stand down (a fist is an index curl and a thumb curl
+            // at once). HandMovement.poll drives the movement itself, later.
+            var gunHandBusy = false
+            if let da = frameDeviceAnchor {
+                let hm = da.originFromAnchorTransform
+                let anchors = handTracking.latestAnchors
+                HandMovement.shared.updateArmSwing(
+                    active: Renderer.gestureInputEnabled && lambda_menu_active() == 0,
+                    left: anchors.leftHand,
+                    right: anchors.rightHand,
+                    headForward: SIMD3(-hm.columns.2.x, -hm.columns.2.y, -hm.columns.2.z),
+                    headRight: SIMD3(hm.columns.0.x, hm.columns.0.y, hm.columns.0.z),
+                    headPos: SIMD3(hm.columns.3.x, hm.columns.3.y, hm.columns.3.z),
+                    now: CACurrentMediaTime())
+                gunHandBusy = HandMovement.shared.gunHandBusy(now: CACurrentMediaTime())
+            }
+            Renderer.aimDiag.gunBusy = gunHandBusy
+            do {
+                var body = lambda_body_state_t()
+                lambda_body_state(&body)
+                Renderer.aimDiag.groundSpeed = (body.velocity.0 * body.velocity.0
+                                                + body.velocity.1 * body.velocity.1).squareRoot()
+            }
+
             let hadWeaponMenu = weaponMenuAnchor != nil
             if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
-               let hand = handSample {
+               !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.menuSpread = hand.pinchAllSpread
                 if !hadWeaponMenu {
                     if hand.pinchAllSpread < Renderer.menuPinchEnter,
@@ -1710,7 +1747,7 @@ actor Renderer {
                     }
                 }
             } else if hadWeaponMenu {
-                weaponMenuAnchor = nil     // hand lost / gesture off → cancel
+                weaponMenuAnchor = nil     // hand lost / gesture off / swinging → cancel
                 weaponMenuSelected = -1
             }
             let weaponMenuOpen = weaponMenuAnchor != nil
@@ -1720,13 +1757,13 @@ actor Renderer {
             // Finger-gun trigger (opt-in). Reconcile the held +attack state
             // with the current index curl each frame: pull below fireCurlOn,
             // release above fireCurlOff (hysteresis), and force-release when
-            // the gesture is off, the menu is up, or the hand sample is gone —
-            // so a lost hand mid-trigger can't leave fire stuck on. Edge-only
-            // console commands, so this costs a worker round-trip only on a
-            // press/release, not every frame. Pinch fire stays independent.
+            // the gesture is off, the menu is up, the arm swing owns the hand,
+            // or the hand sample is gone — so a lost hand mid-trigger can't
+            // leave fire stuck on. Edge-only console commands, so this costs a
+            // worker round-trip only on a press/release, not every frame.
             var wantFire = fireGestureDown
             if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
-               !weaponMenuOpen, let hand = handSample {
+               !weaponMenuOpen, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.indexExt = hand.indexExtension
                 if hand.indexExtension < Renderer.fireCurlOn { wantFire = true }
                 else if hand.indexExtension > Renderer.fireCurlOff { wantFire = false }
@@ -1750,7 +1787,7 @@ actor Renderer {
             // so one hold = one reload.
             var thumbHold = reloadStart != nil
             if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
-               !weaponMenuOpen, let hand = handSample {
+               !weaponMenuOpen, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.thumbExt = hand.thumbExtension
                 if hand.indexExtension < Renderer.fireCurlOn {
                     thumbHold = false   // trigger pulled — never reload mid-fire
