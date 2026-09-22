@@ -813,6 +813,12 @@ actor Renderer {
     // weapon pass draws this frame (0 = no ring).
     private var reloadStart: Double? = nil
     private var reloadLatched = false
+    // +reload is held from the moment the hold completes until the thumb
+    // re-extends (or the gesture is otherwise dropped). It must span frames:
+    // an argument-less -reload is hlsdk's "typed at the console, unstick"
+    // KeyUp, which sets the button state to 4 and wipes the impulse-down bit,
+    // so a +reload/-reload pair in one frame never reaches a usercmd.
+    private var reloadHeld = false
     private var reloadRingProgress: Float = 0
 
     // Radial weapon menu state (render thread). Non-nil anchor = menu open,
@@ -1808,8 +1814,8 @@ actor Renderer {
                 let prog = Float(min((presentTime - reloadStart!) / Renderer.reloadHoldSeconds, 1.0))
                 if prog >= 1, !reloadLatched {
                     reloadLatched = true
+                    reloadHeld = true
                     _ = "+reload".withCString { lambda_gl_worker_cmd($0) }
-                    _ = "-reload".withCString { lambda_gl_worker_cmd($0) }
                 }
                 // Hide the ring once fired: the full ring vanishing is the
                 // "it took" cue; holding longer must not re-arm.
@@ -1818,6 +1824,10 @@ actor Renderer {
                 reloadStart = nil
                 reloadLatched = false
                 reloadRingProgress = 0
+                if reloadHeld {
+                    reloadHeld = false
+                    _ = "-reload".withCString { lambda_gl_worker_cmd($0) }
+                }
             }
             Renderer.aimDiag.reloadProg = reloadRingProgress
 
