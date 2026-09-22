@@ -1,2 +1,4 @@
 # The extractor writes its debug dump into the working directory; so does --obj.
 *.obj
+*.tri
+*.png
