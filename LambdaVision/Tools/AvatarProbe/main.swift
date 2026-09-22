@@ -464,6 +464,18 @@ do {
 
 // MARK: - A posed body, for eyes
 
+/// Foot and toe vertices, (bone, bone-local), for sole checks.
+func probeFootVertices(_ rig: AvatarRig) -> [(Int, SIMD3<Float>)] {
+    var mesh = lambda_weapon_mesh_t()
+    guard lambda_body_lock(&mesh) != 0 else { return [] }
+    defer { lambda_body_unlock() }
+    let feet = Set([rig.leftLeg, rig.rightLeg].compactMap { $0 }.flatMap { rig.subtree(of: $0.foot) })
+    return (0..<Int(mesh.vertex_count)).compactMap { i in
+        let v = mesh.vertices![i]
+        return feet.contains(Int(v.bone)) ? (Int(v.bone), SIMD3(v.pos.0, v.pos.1, v.pos.2)) : nil
+    }
+}
+
 if dumpOBJ {
     guard let right = rig.rightArm, let left = rig.leftArm else { die("no arms") }
     var mesh = lambda_weapon_mesh_t()
@@ -503,6 +515,124 @@ if dumpOBJ {
     let dst = FileManager.default.currentDirectoryPath + "/avatar_posed.obj"
     try? out.write(toFile: dst, atomically: true, encoding: .utf8)
     print("\nwrote \(dst) (\(mesh.vertex_count) verts, \(kept) of \(mesh.index_count / 3) tris)")
+}
+
+// MARK: - Legs: standing on the game's floor, crouching, walking
+
+do {
+    guard let ll = rig.leftLeg, let rl = rig.rightLeg else { die("no legs") }
+    print(String(format: "\nlegs: compression %.3f / %.3f, length %.2f units, ankle %.2f above the sole, hips %.2f apart",
+                 ll.compression, rl.compression, ll.length, ll.ankleHeight, rig.hipHalfWidth * 2))
+    let dt: Float = 1.0 / 90
+    func knee(_ pose: AvatarRig.Pose, _ leg: AvatarRig.Leg) -> (bend: Float, forward: Float) {
+        let j = leg.chain.joints.map { PoseSolver.translation(of: pose.root * pose.palette[$0]) }
+        let a = simd_normalize(j[1] - j[0]), b = simd_normalize(j[2] - j[1])
+        let mid = (j[0] + j[2]) / 2
+        return (acosf(min(1, simd_dot(a, b))) * 180 / .pi, j[1].x - mid.x)
+    }
+    // Poses a body whose eyes are `eyeHeight` above a floor at z 0 for a
+    // second (standing still), and reports the last frame.
+    func stand(_ eyeHeight: Float, grounded: Bool = true, velocity: SIMD3<Float> = .zero,
+               seconds: Float = 1, gait: inout AvatarGait) -> (AvatarRig.Pose, [(AvatarRig.FootTarget, AvatarRig.FootTarget)?]) {
+        var pose: AvatarRig.Pose!
+        var feetLog: [(AvatarRig.FootTarget, AvatarRig.FootTarget)?] = []
+        var t: Float = 0
+        while t < seconds {
+            let ground = AvatarGait.Ground(floor: 0, grounded: grounded, velocity: velocity, deltaTime: dt)
+            pose = rig.pose(AvatarRig.Targets(headPosition: SIMD3(0, 0, eyeHeight), bodyYaw: 0,
+                                              leftHand: nil, rightHand: nil)) { hips, fwd in
+                let f = gait.feet(hips: hips, forward: fwd, ground: ground)
+                feetLog.append(f.map { ($0.left, $0.right) })
+                return f
+            }
+            t += dt
+        }
+        return (pose, feetLog)
+    }
+    func ankleError(_ pose: AvatarRig.Pose, _ leg: AvatarRig.Leg, _ target: AvatarRig.FootTarget) -> Float {
+        simd_distance(PoseSolver.translation(of: pose.root * pose.palette[leg.foot]),
+                      target.sole + AvatarRig.up * leg.ankleHeight)
+    }
+    func lowestSole(_ pose: AvatarRig.Pose) -> Float {
+        var lo = Float.infinity
+        for (bone, local) in probeFootVertices(rig) {
+            lo = min(lo, (pose.root * pose.palette[bone] * SIMD4<Float>(local, 1)).z)
+        }
+        return lo
+    }
+
+    let dumpLegs = CommandLine.arguments.contains("--legs")
+    let gordonTris = dumpLegs ? ProbeModel.fromBodySlot() : nil
+    let hiddenHead = rig.subtree(of: rig.head)
+    func dump(_ pose: AvatarRig.Pose, _ name: String) {
+        guard let gordonTris else { return }
+        var lines = triLines(gordonTris, palette: pose.palette, transform: pose.root, label: "body") { _, bones in
+            !bones.contains { hiddenHead.contains($0) }
+        }
+        for q in [[(-14, -14), (14, -14), (14, 14)], [(-14, -14), (14, 14), (-14, 14)]] as [[(Float, Float)]] {
+            lines.append("floor" + q.map { String(format: "|%.1f %.1f 0", $0.0, $0.1) }.joined())
+        }
+        let out = FileManager.default.currentDirectoryPath + "/legs_\(name).tri"
+        try? lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
+        print("    wrote \(out)")
+    }
+
+    for (label, eye) in [("standing", Float(64)), ("crouched", 48), ("ducked", 30)] {
+        var gait = AvatarGait(rig: rig)
+        let (pose, log) = stand(eye, gait: &gait)
+        dump(pose, label)
+        guard let feet = log.last ?? nil else { die("\(label): no feet") }
+        let el = ankleError(pose, ll, feet.0), er = ankleError(pose, rl, feet.1)
+        let kl = knee(pose, ll), kr = knee(pose, rl)
+        print(String(format: "  %@ (eye %.0f): ankle err L %.2f R %.2f, knee bend L %.0f° R %.0f°, knees forward L %+.1f R %+.1f, lowest sole z %+.2f",
+                     label, eye, el, er, kl.bend, kr.bend, kl.forward, kr.forward, lowestSole(pose)))
+        if label != "ducked" {
+            if el > 0.3 || er > 0.3 { die("\(label): a foot does not reach the floor") }
+            if abs(lowestSole(pose)) > 0.6 { die("\(label): the soles are not on the floor") }
+        }
+        if label == "standing", max(kl.bend, kr.bend) > 30 { die("standing bends the knees \(max(kl.bend, kr.bend))°") }
+        if label != "standing", kl.forward < 0 || kr.forward < 0 { die("\(label): a knee bends backward") }
+        let moved = log.compactMap { $0 }.contains { f in
+            simd_distance(f.0.sole, feet.0.sole) > 1e-3 || simd_distance(f.1.sole, feet.1.sole) > 1e-3 }
+        if moved { die("\(label): standing still, the feet moved") }
+    }
+
+    do {
+        var gait = AvatarGait(rig: rig)
+        let (pose, log) = stand(64, grounded: false, seconds: 0.2, gait: &gait)
+        let lo = lowestSole(pose)
+        print(String(format: "  airborne: legs hang, lowest sole %.2f units below the standing floor", -lo))
+        if log.contains(where: { $0 != nil }) || lo < -1 { die("airborne legs reached for the floor") }
+    }
+
+    // Thumbstick walking: the world carries the player at 150 units/s (3.8
+    // m/s) while the body stays put in the room. Planted feet must slide
+    // backward at exactly that speed — held still in the world — and the
+    // feet must keep stepping.
+    do {
+        var gait = AvatarGait(rig: rig)
+        _ = stand(64, gait: &gait)
+        let v = SIMD3<Float>(150, 0, 0)
+        let (walkPose, log) = stand(64, velocity: v, seconds: 3, gait: &gait)
+        dump(walkPose, "walking")
+        let frames = log.compactMap { $0 }
+        var steps = 0, worstSlip: Float = 0
+        for side in 0..<2 {
+            var prev: SIMD3<Float>?
+            for f in frames {
+                let p = side == 0 ? f.0.sole : f.1.sole
+                if let prev {
+                    let d = p - prev
+                    let slip = simd_length(d + v * dt)       // planted: moves by exactly -v·dt
+                    if slip < 0.5 { worstSlip = max(worstSlip, slip) } else { steps += 1 }
+                }
+                prev = p
+            }
+        }
+        print(String(format: "  thumbstick walk at 150 u/s: %d swing frames over 3 s, planted-foot slip %.4f units/frame", steps, worstSlip))
+        if steps < 20 { die("walking with the thumbstick did not step") }
+        if worstSlip > 0.05 { die("a planted foot slid against the world") }
+    }
 }
 
 // MARK: - Viewmodels (reuses the body slot, so it runs last)

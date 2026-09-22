@@ -169,6 +169,16 @@ actor Renderer {
     private var avatarMeshLegs = false
     private var avatarBodyYaw: Float? = nil
     private var avatarLastTime: Double? = nil
+    // The legs: planted feet carried between frames, and the freshness of
+    // the engine's body state (a paused game stops publishing, and a stale
+    // velocity would walk the feet away forever).
+    private var avatarGait: AvatarGait?
+    private var avatarBodySequence: UInt32 = 0
+    private var avatarBodySeenAt: Double = 0
+    // The vertical head offset sent to the engine this frame (units): the
+    // engine's eye height is measured before it is added.
+    private var avatarHeadOffsetZ: Float = 0
+    private var avatarLastGroundTime: Double? = nil
 
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
@@ -271,9 +281,9 @@ actor Renderer {
     /// Draw the first-person body (Settings > Input). Off = arms-only
     /// fallback: the wireframe hands and the viewmodel, as before.
     nonisolated(unsafe) static var avatarBodyEnabled = true
-    /// Draw the avatar's legs. Off by default: nothing tracks them, and a
-    /// leg standing where the player's is not reads worse than no leg.
-    nonisolated(unsafe) static var avatarLegsVisible = false
+    /// Draw the avatar's legs, planted on the game's floor and stepping as
+    /// the player moves (AvatarGait). Off leaves an open waist, as before.
+    nonisolated(unsafe) static var avatarLegsVisible = true
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -668,10 +678,50 @@ actor Renderer {
             if Renderer.dominantHandIsLeft, targets.leftHand != nil { targets.leftFingers = gripFingers }
             if !Renderer.dominantHandIsLeft, targets.rightHand != nil { targets.rightFingers = gripFingers }
         }
-        let pose = rig.pose(targets)
+        let pose: AvatarRig.Pose
+        if Renderer.avatarLegsVisible, let ground = avatarGround(eye: eye, time: time) {
+            if avatarGait == nil { avatarGait = AvatarGait(rig: rig) }
+            var gait = avatarGait!
+            pose = rig.pose(targets) { hips, forward in gait.feet(hips: hips, forward: forward, ground: ground) }
+            avatarGait = gait
+        } else {
+            pose = rig.pose(targets)
+        }
         return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root,
                                    leftHand: rig.handMatrix(pose, left: true),
                                    rightHand: rig.handMatrix(pose, left: false))
+    }
+
+    /// What the game says about the ground under the player, in the rig's
+    /// room space (GoldSrc axes, inches): the floor's height, whether the
+    /// player stands on it, and the velocity the game world is carrying them
+    /// at. nil before the first publish.
+    ///
+    /// The engine measures its eye height from the refdef, before the
+    /// headset's own translation is added, so the head offset goes back on
+    /// top; the floor then sits exactly where the rendered world has it.
+    /// Velocity arrives in the player-yaw frame, and the room maps onto the
+    /// game by the yaw baseline alone (the engine rotates the head offset by
+    /// player yaw after removing the baseline), so one rotation by the
+    /// baseline brings it into the room.
+    private func avatarGround(eye: SIMD3<Float>, time: Double) -> AvatarGait.Ground? {
+        var state = lambda_body_state_t()
+        lambda_body_state(&state)
+        if state.sequence != avatarBodySequence {
+            avatarBodySequence = state.sequence
+            avatarBodySeenAt = time
+        }
+        guard avatarBodySequence != 0 else { return nil }
+        let stale = time - avatarBodySeenAt > 0.25
+        let dt = Float(min(max(time - (avatarLastGroundTime ?? time), 0), 0.1))
+        avatarLastGroundTime = time
+        let yaw = (headBaselineYaw ?? 0) * .pi / 180
+        let c = cosf(yaw), sn = sinf(yaw)
+        let vf = state.velocity.0, vl = state.velocity.1
+        let velocity = stale ? .zero : SIMD3<Float>(vf * c - vl * sn, vf * sn + vl * c, 0)
+        return AvatarGait.Ground(floor: eye.z - (state.eye_height + avatarHeadOffsetZ),
+                                 grounded: state.on_ground != 0 && state.water_level < 2,
+                                 velocity: velocity, deltaTime: dt)
     }
 
     /// A tracked arm as the rig wants it, in GoldSrc world: the wrist, the
@@ -1568,6 +1618,7 @@ actor Renderer {
             let baseRad = headBaselineYaw! * .pi / 180.0
             let s = sinf(baseRad), c = cosf(baseRad)
             headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
+            avatarHeadOffsetZ = d.z
 
             // Aim ray + hand-anchored weapon. With the dominant hand
             // tracked, the weapon renders at the hand (p_ model, composed

@@ -103,9 +103,9 @@ instead of deleting them.
   the fingers and +Y out of the palm on both sides, so one frame
   (`AvatarRig.handRotation`) serves both with no per-hand tunable. An
   untracked hand hangs by the side rather than holding sequence 0's raised
-  arm. The head is always cut (the camera is inside it) and the legs are cut
-  by default, as whole triangles at upload — 283 of 639 dropped — leaving an
-  open neck and hips. The body yaw trails the head yaw with a 0.35 s time
+  arm. The head is always cut (the camera is inside it) as whole triangles
+  at upload, leaving an open neck (the legs, when off, go the same way —
+  283 of 639 triangles with both). The body yaw trails the head yaw with a 0.35 s time
   constant. First device look: tracking reads well, but the elbows folded the
   wrong way. Two causes, both fixed: RAVERig's pole only fixed the bend
   *plane* and kept the seed's side (right for an animated leg, wrong for an
@@ -118,8 +118,8 @@ instead of deleting them.
   the forearm (`.forearmArm` is the elbow end; the wireframe already drew it),
   so the rig now takes the tracked elbow as the pole direction and the
   synthetic pole is only the fallback for an untracked hand. Settings > Input >
-  "First-person body" is the arms-only fallback
-  (`Renderer.avatarLegsVisible` shows the legs; no UI yet). With the body
+  "First-person body" is the arms-only fallback, and "Legs" (on by default)
+  cuts the body at the hips when off. With the body
   drawn, the viewmodel's own hands are gone: `ViewmodelGrip` cuts every
   glove/sleeve/forearm-textured triangle that sits on an arm bone (texture,
   not bone, because stock models skin gun parts straight to `Bip01 R Hand`;
@@ -141,8 +141,27 @@ instead of deleting them.
   fragments within 9 cm of an eye are discarded, and past ~50° of pitch the
   rig steps the body back just far enough to keep every torso vertex 12 cm
   from the eye (exact per vertex; level gaze is 20 cm clear and moves
-  nothing). Not yet on device: the eye offset, and whether the grip reads
-  right in the hand.
+  nothing). The body now has legs, Boneworks-style: the client publishes the
+  floor under the player, onground, water level and velocity each refdef
+  (`g_vr_body_state`, `cl_dll/view.cpp`; the floor is measured from the
+  refdef's vieworg, before the engine adds the headset's translation, so the
+  app adds its head offset back), and `AvatarGait` runs RAVERig's new
+  `FootPlanter` — feet planted until they drift from a stance beside the hips,
+  then one step at a time, never crossing on a strafe, backpedal or turn — in
+  a frame the game's velocity carries along, so thumbstick locomotion walks
+  the legs while planted feet hold still against the world. Each leg is a
+  FABRIK chain to its sole, knee toward the foot's heading, foot flat. Gordon
+  stands 68 units to the eye and the game's camera 64, which would bend his
+  knees ~56° at full extension, so thighs and shins are compressed ~12% (and
+  squashed in the palette to match) until standing puts his eyes at 64 with a
+  ~10° knee. Crouching folds the knees forward and moves the stance ahead of
+  the pelvis; in the air or in water the legs hang. Probe: standing, crouch
+  and duck reach the floor within 0.2 units, standing still never moves a
+  foot, thumbstick walking at 150 u/s steps with zero planted-foot slip, and
+  `--legs` renders the poses. Not yet on device: the eye offset, whether the
+  grip reads right in the hand, and the legs as a whole — likely tuning is
+  the step threshold (a fifth of a leg), step time (0.3 s, down to 0.14 s),
+  and HL's 320 u/s run, which no gait makes look calm.
   - Gotcha found on the way: the pose the body slot publishes is sequence 0
     frame 0, not the studio bind pose — origin at the pelvis, one arm already
     raised, and rotated 90° from the bind pose. That is harmless, because

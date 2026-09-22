@@ -133,6 +133,12 @@ final class GameSettings {
         didSet { AppSettingsStore.avatarBody = avatarBody
                  Renderer.avatarBodyEnabled = avatarBody }
     }
+    /// Give the body legs that stand on the game's floor and step as the
+    /// player moves (AvatarGait). Off cuts the body at the hips.
+    var avatarLegs: Bool = AppSettingsStore.avatarLegs {
+        didSet { AppSettingsStore.avatarLegs = avatarLegs
+                 Renderer.avatarLegsVisible = avatarLegs }
+    }
 
     init() {
         applyRendererStatics()
@@ -150,6 +156,7 @@ final class GameSettings {
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
         Renderer.gestureInputEnabled = gestureInputEnabled
         Renderer.avatarBodyEnabled = avatarBody
+        Renderer.avatarLegsVisible = avatarLegs
     }
 
     /// Called from Renderer.ensureEngineInitialized() once the engine is up.

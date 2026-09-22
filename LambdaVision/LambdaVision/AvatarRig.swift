@@ -63,6 +63,49 @@ struct AvatarRig {
     let leftArm: Arm?
     let rightArm: Arm?
 
+    struct Leg {
+        /// Thigh, shin, foot — the chain FABRIK bends. The foot joint is the
+        /// ankle, which is what the solver puts on its target.
+        var chain: PoseSolver.Chain
+        var thigh: Int
+        var shin: Int
+        var foot: Int
+        /// The ankle's height above the sole, units: the lowest foot vertex
+        /// of the rest pose, which stands flat.
+        var ankleHeight: Float
+        /// Thigh plus shin once compressed by `compression`, units.
+        var length: Float
+        /// Factor on the thigh and shin that makes Gordon's legs fit the
+        /// game's eye height (see `gameEyeHeight`).
+        var compression: Float
+        /// Unit bone-local directions along the thigh and the shin, which the
+        /// compression squashes the mesh along.
+        var thighAxis: SIMD3<Float>
+        var shinAxis: SIMD3<Float>
+        /// The foot's model-space rotation at rest, flat on the floor and
+        /// facing the model's +X.
+        var restFootRotation: simd_quatf
+        /// The hip joint at rest, model space.
+        var restHip: SIMD3<Float>
+    }
+    let leftLeg: Leg?
+    let rightLeg: Leg?
+
+    /// Half the distance between the hip joints, units.
+    var hipHalfWidth: Float {
+        guard let l = leftLeg, let r = rightLeg else { return 3.7 }
+        return simd_distance(l.restHip, r.restHip) / 2
+    }
+
+    /// The eye height the game stands the player at: VEC_VIEW (28) above an
+    /// origin 36 above the floor, units. Gordon's own eyes stand 68 up, so a
+    /// body hung from the game's camera would have to bend its knees ~56° to
+    /// stand — at full extension a little height costs a lot of knee.
+    /// Instead his thighs and shins are shortened until standing straight
+    /// puts his eyes at 64: about 12%, which first-person, looking down along
+    /// the legs, does not read.
+    static let gameEyeHeight: Float = 64
+
     /// Torso vertices (bone, bone-local position) the eye must keep clear
     /// of: pelvis, spine, neck and clavicles — everything that rides with
     /// the root and can end up in front of a camera looking down. Arms and
@@ -119,12 +162,12 @@ struct AvatarRig {
             parents.append(bone.parent >= 0 ? Int(bone.parent) : nil)
         }
 
-        var clearance: [(bone: Int, position: SIMD3<Float>)] = []
+        var vertices: [(bone: Int, position: SIMD3<Float>)] = []
         if let verts = mesh.vertices {
-            let torso = Set(names.indices.filter { AvatarRig.isTorsoBone(names[$0]) })
-            for i in 0..<Int(mesh.vertex_count) where torso.contains(Int(verts[i].bone)) {
+            vertices.reserveCapacity(Int(mesh.vertex_count))
+            for i in 0..<Int(mesh.vertex_count) {
                 let v = verts[i]
-                clearance.append((Int(v.bone), SIMD3(v.pos.0, v.pos.1, v.pos.2)))
+                vertices.append((Int(v.bone), SIMD3(v.pos.0, v.pos.1, v.pos.2)))
             }
         }
 
@@ -138,7 +181,7 @@ struct AvatarRig {
             }
         }
 
-        try self.init(boneNames: names, parents: parents, restModel: model, clearance: clearance)
+        try self.init(boneNames: names, parents: parents, restModel: model, vertices: vertices)
     }
 
     /// The bones whose vertices the eye keeps clear of (`clearanceVertices`).
@@ -149,10 +192,14 @@ struct AvatarRig {
 
     /// The real initialiser, taking plain values so it can be exercised
     /// without the engine or a model file.
+    ///
+    /// `vertices` (bone, bone-local position) are the mesh's, for the few
+    /// things the rig measures off the surface rather than the bones: the
+    /// torso the eye keeps clear of, and where the soles are.
     init(boneNames: [String], parents: [Int?], restModel: [float4x4],
-         clearance: [(bone: Int, position: SIMD3<Float>)] = []) throws {
+         vertices: [(bone: Int, position: SIMD3<Float>)] = []) throws {
         precondition(boneNames.count == parents.count && boneNames.count == restModel.count)
-        self.clearanceVertices = clearance
+        self.clearanceVertices = vertices.filter { $0.bone < boneNames.count && AvatarRig.isTorsoBone(boneNames[$0.bone]) }
         self.boneNames = boneNames
         self.parents = parents
         self.restModel = restModel
@@ -192,6 +239,12 @@ struct AvatarRig {
         // initialisation is finished.
         self.leftArm = AvatarRig.arm("L", index: index, solver: solver, restModel: restModel)
         self.rightArm = AvatarRig.arm("R", index: index, solver: solver, restModel: restModel)
+
+        let eyeHeight = PoseSolver.translation(of: restModel[head]).z + AvatarRig.defaultEyeOffset.z
+        self.leftLeg = AvatarRig.leg("L", index: index, solver: solver, restModel: restModel,
+                                     restLocal: restLocal, vertices: vertices, restEyeZ: eyeHeight)
+        self.rightLeg = AvatarRig.leg("R", index: index, solver: solver, restModel: restModel,
+                                      restLocal: restLocal, vertices: vertices, restEyeZ: eyeHeight)
     }
 
     private static func arm(_ side: String, index: [String: Int],
@@ -209,6 +262,47 @@ struct AvatarRig {
             return (i, String(name.dropFirst(prefix.count)))
         }
         return Arm(chain: chain, hand: hand, reach: reach, fingers: fingers)
+    }
+
+    private static func leg(_ side: String, index: [String: Int], solver: PoseSolver,
+                            restModel: [float4x4], restLocal: [JointPose],
+                            vertices: [(bone: Int, position: SIMD3<Float>)],
+                            restEyeZ: Float) -> Leg? {
+        guard let thigh = index["Bip01 \(side) Leg"], let shin = index["Bip01 \(side) Leg1"],
+              let foot = index["Bip01 \(side) Foot"],
+              let chain = solver.chain([thigh, shin, foot]) else { return nil }
+        let p = [thigh, shin, foot].map { PoseSolver.translation(of: restModel[$0]) }
+        // The sole: the lowest point of anything below the ankle.
+        let below = Set(solver.order.filter { i in
+            var j: Int? = i
+            while let k = j { if k == foot { return true }; j = solver.parents[k] }
+            return false
+        })
+        let sole = vertices.filter { below.contains($0.bone) }
+            .map { (restModel[$0.bone] * SIMD4<Float>($0.position, 1)).z }.min() ?? (p[2].z - 3)
+        let ankleHeight = max(p[2].z - sole, 0)
+        // Standing straight must put the eyes at the game's eye height, so
+        // the hip-to-ankle distance gives up exactly the difference.
+        // Standing is sized to `standingExtension` of the chain rather than
+        // to the rest pose's own hip-ankle distance: near full extension a
+        // knee is extraordinarily sensitive — at 97% of its length a leg is
+        // already bent 28° — so the one number is chosen for the knee it
+        // gives, a standing person's slight flex.
+        let segments = simd_distance(p[0], p[1]) + simd_distance(p[1], p[2])
+        // Standing, the hip is the eye's height less the rest eye-to-hip
+        // drop, and the ankle stands its own height off the floor, straight
+        // below — the rest pose's slightly staggered stance does not count.
+        let standingHipAnkle = AvatarRig.gameEyeHeight - (restEyeZ - p[0].z) - ankleHeight
+        let compression = min(1, max(0.7, standingHipAnkle / (AvatarRig.standingExtension * segments)))
+        let length = segments * compression
+        func axis(_ child: Int) -> SIMD3<Float> {
+            let t = restLocal[child].translation
+            return simd_length(t) > 1e-4 ? simd_normalize(t) : SIMD3(1, 0, 0)
+        }
+        return Leg(chain: chain, thigh: thigh, shin: shin, foot: foot,
+                   ankleHeight: ankleHeight, length: length, compression: compression,
+                   thighAxis: axis(shin), shinAxis: axis(foot),
+                   restFootRotation: PoseSolver.rotation(of: restModel[foot]), restHip: p[0])
     }
 
     // MARK: - What not to draw
@@ -312,6 +406,20 @@ struct AvatarRig {
         var eyeOffset: SIMD3<Float> = AvatarRig.defaultEyeOffset
     }
 
+    /// Where a foot goes this frame, in world space.
+    struct FootTarget {
+        /// The sole, on the floor while planted.
+        var sole: SIMD3<Float>
+        /// Which way the foot points, unit, horizontal.
+        var forward: SIMD3<Float>
+    }
+
+    /// Supplies the feet once the body is placed: handed the pelvis and the
+    /// body's facing (world), it returns where each sole goes, or nil for
+    /// legs that hang (in the air, in water). See AvatarGait.
+    typealias FeetProvider = (_ hips: SIMD3<Float>, _ forward: SIMD3<Float>)
+        -> (left: FootTarget, right: FootTarget)?
+
     /// The head's world rotation from its forward and up axes (unit, GoldSrc
     /// world). Identity faces +X and is level.
     static func headRotation(forward: SIMD3<Float>, up: SIMD3<Float>) -> simd_quatf {
@@ -358,7 +466,33 @@ struct AvatarRig {
     /// to shave it.
     static let armIterations = 32
 
+    /// Iterations per leg. The legs start near straight and bend mostly in
+    /// one plane, where FABRIK converges fast.
+    static let legIterations = 16
+
+    /// How much of its length a standing leg uses: 99.6%, a knee bent ~10°.
+    static let standingExtension: Float = 0.996
+    /// The solver's reach limit for a leg. The arms keep RAVERig's 98% —
+    /// an arm held that straight reads as locked — but a leg that may not
+    /// straighten past 98% stands with its knees bent 23°.
+    static let legReachLimit: Float = 0.999
+
+    /// Poses the body with the legs at rest — what a body drawn without legs
+    /// wants.
     func pose(_ targets: Targets, iterations: Int = AvatarRig.armIterations) -> Pose {
+        solve(targets, iterations: iterations, drivesLegs: false) { _, _ in nil }
+    }
+
+    /// Poses the body and drives the legs from `feet`: they are compressed
+    /// to the game's eye height (`gameEyeHeight`) and solved to the soles it
+    /// returns, or left to hang when it returns nil.
+    func pose(_ targets: Targets, iterations: Int = AvatarRig.armIterations,
+              feet: FeetProvider) -> Pose {
+        solve(targets, iterations: iterations, drivesLegs: true, feet: feet)
+    }
+
+    private func solve(_ targets: Targets, iterations: Int, drivesLegs: Bool,
+                       feet: FeetProvider) -> Pose {
         let yaw = simd_quatf(angle: targets.bodyYaw, axis: AvatarRig.up)
         let worldToModelRotation = yaw.inverse
 
@@ -456,11 +590,80 @@ struct AvatarRig {
         let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, targets.rightElbow,
                           targets.rightFingers, side: -1)
 
+        var compressed: [Leg] = []
+        if drivesLegs {
+            compressed = [leftLeg, rightLeg].compactMap { $0 }
+            for leg in compressed {
+                joints[leg.shin].translation *= leg.compression
+                joints[leg.foot].translation *= leg.compression
+            }
+            model = solver.modelMatrices(of: joints)
+            let hips = PoseSolver.translation(of: root * model[pelvis])
+            let forward = yaw.act(SIMD3<Float>(1, 0, 0))
+            let placed = feet(hips, forward)
+            for (leg, target, side) in [(leftLeg, placed?.left, Float(1)), (rightLeg, placed?.right, Float(-1))] {
+                guard let leg else { continue }
+                solveLeg(leg, target, side: side, yaw: yaw, root: root, toModel: toModel,
+                         joints: &joints, model: &model)
+            }
+        }
+
         // The chains wrote their own matrices as they went, but joints hanging
         // off them — the fingers below each hand — are stale. One clean pass
         // is cheaper than reasoning about which ones moved.
-        return Pose(palette: solver.modelMatrices(of: joints), root: root,
+        var palette = solver.modelMatrices(of: joints)
+        // A compressed leg's bones sit closer together; squash the thigh and
+        // shin meshes along their length to match, or they would overlap at
+        // the knee and poke out below it. Rigid skinning puts each vertex on
+        // exactly one bone, so a per-bone scale is all it takes.
+        for leg in compressed {
+            palette[leg.thigh] = palette[leg.thigh] * AvatarRig.squash(leg.thighAxis, leg.compression)
+            palette[leg.shin] = palette[leg.shin] * AvatarRig.squash(leg.shinAxis, leg.compression)
+        }
+        return Pose(palette: palette, root: root,
                     left: left, right: right, stepBack: stepBack)
+    }
+
+    /// A scale by `k` along the unit `axis` and none across it.
+    static func squash(_ axis: SIMD3<Float>, _ k: Float) -> float4x4 {
+        let a = axis
+        let m = simd_float3x3(diagonal: SIMD3<Float>(repeating: 1))
+            + (k - 1) * simd_float3x3(columns: (a * a.x, a * a.y, a * a.z))
+        return float4x4(columns: (SIMD4(m.columns.0, 0), SIMD4(m.columns.1, 0),
+                                  SIMD4(m.columns.2, 0), SIMD4(0, 0, 0, 1)))
+    }
+
+    /// Puts one leg's ankle over its sole, knee toward where the foot points,
+    /// and the foot flat on the floor facing that way. A nil target hangs
+    /// the leg: nearly straight below the hip, knee a little forward, as legs
+    /// hang in a jump.
+    private func solveLeg(_ leg: Leg, _ target: FootTarget?, side: Float, yaw: simd_quatf,
+                          root: float4x4, toModel: float4x4,
+                          joints: inout [JointPose], model: inout [float4x4]) {
+        let worldToModel = yaw.inverse
+        let hip = PoseSolver.translation(of: model[leg.thigh])
+        let ankle: SIMD3<Float>
+        let footForward: SIMD3<Float>
+        if let target {
+            let a = target.sole + AvatarRig.up * leg.ankleHeight
+            ankle = (toModel * SIMD4<Float>(a, 1)).xyz
+            footForward = worldToModel.act(target.forward)
+        } else {
+            ankle = hip + SIMD3<Float>(3, 0, -leg.length * 0.94)
+            footForward = SIMD3(1, 0, 0)
+        }
+        // Knees go the way the foot points, a touch outward — the direction
+        // a leg is never asked to reach along, so the bend plane holds.
+        let pole = simd_normalize(footForward + SIMD3<Float>(0, 0.25 * side, 0))
+        _ = solver.solve(chain: leg.chain, target: ankle, pole: pole, bendTowardPole: true,
+                         iterations: AvatarRig.legIterations, reachLimit: AvatarRig.legReachLimit,
+                         pose: &joints, model: &model)
+        // The foot lies flat, turned to its heading: its rest orientation
+        // (flat, facing +X) yawed onto the heading.
+        let heading = atan2f(footForward.y, footForward.x)
+        let turn = simd_quatf(angle: heading, axis: AvatarRig.up)
+        setModelRotation(of: leg.foot, to: simd_normalize(turn * leg.restFootRotation),
+                         joints: &joints, model: &model)
     }
 
     /// How far back along `forward` the body must move so no torso vertex is
@@ -540,6 +743,90 @@ struct AvatarRig {
             SIMD4(m[2], m[6], m[10], 0),
             SIMD4(m[3], m[7], m[11], 1)))
     }
+}
+
+// MARK: - Gait
+
+/// The feet's memory: where each is planted, carried from frame to frame.
+///
+/// AvatarRig is a pure function of one frame's tracking; feet are not — a
+/// planted foot is where it was last frame. This holds RAVERig's
+/// FootPlanter and feeds it from the game.
+///
+/// The feet stand in the *game* world, not the room. When the thumbstick
+/// carries the player forward, the room — and the body in it — stays put
+/// while the world slides past, so a foot planted in the room would glide
+/// with the player. The planter is instead run in a frame that the game's
+/// own velocity carries along: `travelled` is how far the world has moved
+/// under the player, a planted foot holds still in that frame, and in the
+/// room it slides backward as it should, until the stance has left it far
+/// enough behind to take a step. Walking on the spot in the room steps the
+/// same way, because there it is the hips that move.
+struct AvatarGait {
+    private var planter: FootPlanter
+    private let legLength: Float
+    private let ankleHeight: Float
+    /// Where the game world has carried the player since the gait began,
+    /// room space (GoldSrc axes, units). Horizontal only.
+    private var travelled = SIMD3<Float>.zero
+    private var wasGrounded = false
+
+    init(rig: AvatarRig) {
+        let leg = rig.leftLeg ?? rig.rightLeg
+        legLength = leg?.length ?? 31
+        ankleHeight = leg?.ankleHeight ?? 3.8
+        planter = FootPlanter.forLeg(length: legLength, hipWidth: rig.hipHalfWidth * 2)
+    }
+
+    /// What the game says about the player's feet this frame.
+    struct Ground {
+        /// Height of the floor under the player, room space (GoldSrc Z).
+        var floor: Float
+        /// Standing on something and not swimming.
+        var grounded: Bool
+        /// The player's velocity through the game world, rotated into room
+        /// space (GoldSrc axes), units/s.
+        var velocity: SIMD3<Float>
+        var deltaTime: Float
+    }
+
+    /// The feet for one frame, as AvatarRig.pose's `feet` wants them.
+    mutating func feet(hips: SIMD3<Float>, forward: SIMD3<Float>, ground: Ground)
+        -> (left: AvatarRig.FootTarget, right: AvatarRig.FootTarget)? {
+        guard ground.grounded else {
+            // In the air the legs hang; on landing the feet plant where they
+            // come down rather than where they took off.
+            wasGrounded = false
+            return nil
+        }
+        if !wasGrounded { planter.reset(); wasGrounded = true }
+
+        travelled += SIMD3(ground.velocity.x, ground.velocity.y, 0) * ground.deltaTime
+        // Crouching folds the hips back over the heels, so the stance moves
+        // forward of the pelvis as it drops — standing straight it is right
+        // underneath.
+        let standing = legLength * AvatarRig.standingExtension + ankleHeight
+        let crouch = max(0, standing - (hips.z - ground.floor))
+        let stanceHips = hips + simd_normalize(SIMD3(forward.x, forward.y, 0)) * min(crouch * 0.35, legLength * 0.25)
+
+        let anchored = stanceHips + travelled
+        let floor = ground.floor
+        let placed = planter.update(hips: AvatarGait.yUp(anchored), forward: AvatarGait.yUp(forward),
+                                    velocity: AvatarGait.yUp(ground.velocity), deltaTime: ground.deltaTime,
+                                    floor: { _ in floor })
+        func target(_ p: FootPlanter.Placement) -> AvatarRig.FootTarget {
+            let sole = AvatarGait.zUp(p.position) - travelled
+            return AvatarRig.FootTarget(sole: sole, forward: AvatarGait.zUp(p.forward))
+        }
+        return (target(placed.left), target(placed.right))
+    }
+
+    /// GoldSrc (X forward, Y left, Z up) → the planter's Y-up frame, and
+    /// back. A cyclic permutation, so handedness survives: GoldSrc forward
+    /// becomes the planter's +Z and GoldSrc left its +X, which is the side
+    /// it puts the left foot on.
+    static func yUp(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.y, v.z, v.x) }
+    static func zUp(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.z, v.x, v.y) }
 }
 
 private extension SIMD4 where Scalar == Float {

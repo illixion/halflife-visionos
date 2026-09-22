@@ -88,6 +88,7 @@ enum AppSettingsStore {
     private static let fastWeaponSwitchKey    = "lambdavision.settings.fastWeaponSwitch"
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
     private static let avatarBodyKey          = "lambdavision.settings.avatarBody"
+    private static let avatarLegsKey          = "lambdavision.settings.avatarLegs"
 
     static var dominantHand: DominantHand {
         get {
@@ -120,5 +121,9 @@ enum AppSettingsStore {
     static var avatarBody: Bool {
         get { bool(avatarBodyKey, true) }        // default: draw the first-person body
         set { defaults.set(newValue, forKey: avatarBodyKey) }
+    }
+    static var avatarLegs: Bool {
+        get { bool(avatarLegsKey, true) }        // default: the body stands on its legs
+        set { defaults.set(newValue, forKey: avatarLegsKey) }
     }
 }
