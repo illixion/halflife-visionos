@@ -200,6 +200,9 @@ printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLS
 printf '_g_vr_weapon_sequence\n_g_vr_weapon_frame\n_g_vr_weapon_animtime\n_g_vr_weapon_framerate\n_g_vr_weapon_time\n' >> "$HLSDK_CL_EXPORTS"
 # World light sampled at the eye, read by Lambda_WeaponModel.c to shade the gun.
 printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
+# Player floor/onground/velocity (view.cpp), read by Lambda_WeaponModel.c for
+# the first-person body's legs.
+printf '_g_vr_body_state\n' >> "$HLSDK_CL_EXPORTS"
 
 # IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent collide three ways:
 # (a) engine's input.c defines them (used by SDL hosts we don't compile,

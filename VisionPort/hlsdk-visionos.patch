@@ -449,10 +449,10 @@ index e28742f..3f08c40 100644
  	if( args->bparam2 )
  	{
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..c5bb74e 100644
+index 3b3187d..6efba05 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,54 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,69 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -504,11 +504,26 @@ index 3b3187d..c5bb74e 100644
 +// normalised 0..1, published each frame for the external weapon renderer to
 +// shade the gun to match the room.
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
++// Where the player's feet are, for the visionOS first-person body's legs
++// (AvatarRig): published every normal refdef, read by the app through
++// lambda_body_state (Lambda_WeaponModel.c).
++//   [0] eye height above the floor under the player, units, measured from
++//       the refdef's vieworg — i.e. BEFORE the engine adds the headset's own
++//       translation, so the app adds its head offset back on top.
++//   [1] 1 when standing on something, 0 in the air
++//   [2] waterlevel (0 dry .. 3 submerged)
++//   [3] forward, [4] leftward velocity in the player-yaw frame, units/s —
++//       the yaw WITHOUT the head delta, which is the frame the app's head
++//       offset baseline lives in
++//   [5] vertical velocity, units/s
++//   [6] a counter bumped on every publish, so a reader can tell fresh data
++//       from a paused game
++extern "C" __attribute__((visibility("default"))) float g_vr_body_state[7] = { 64.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 +float v_frametime, v_lastDistance;
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +824,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +839,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  
@@ -523,6 +538,49 @@ index 3b3187d..c5bb74e 100644
  	lasttime = pparams->time;
  
  	v_origin = pparams->vieworg;
+@@ -1533,6 +1603,34 @@ void V_CalcSpectatorRefdef( struct ref_params_s * pparams )
+ 	VectorCopy( v_origin, pparams->vieworg );
+ }
+ 
++// Fills g_vr_body_state from a finished normal refdef. The floor is found by
++// a point trace straight down from the player origin; standing on a ledge
++// with the centre over a drop, the trace can miss what the hull stands on,
++// so a miss while on ground falls back to the standing hull's bottom.
++static void V_PublishBodyState( struct ref_params_s *pparams )
++{
++	float onground = pparams->onground != -1 ? 1.0f : 0.0f;
++	vec3_t end;
++	VectorCopy( pparams->simorg, end );
++	end[2] -= 64.0f;
++	pmtrace_t *tr = gEngfuncs.PM_TraceLine( pparams->simorg, end, PM_TRACELINE_PHYSENTSONLY, 2, -1 );
++	float floorz = pparams->simorg[2] - 36.0f;
++	if( tr && tr->fraction < 1.0f && ( !onground || pparams->simorg[2] - tr->endpos[2] <= 37.0f ))
++		floorz = tr->endpos[2];
++	else if( !onground )
++		floorz = end[2];
++
++	float yaw = pparams->cl_viewangles[YAW] * ( M_PI_F / 180.0f );
++	float c = cosf( yaw ), s = sinf( yaw );
++	g_vr_body_state[0] = pparams->vieworg[2] - floorz;
++	g_vr_body_state[1] = onground;
++	g_vr_body_state[2] = (float)pparams->waterlevel;
++	g_vr_body_state[3] =  c * pparams->simvel[0] + s * pparams->simvel[1];
++	g_vr_body_state[4] = -s * pparams->simvel[0] + c * pparams->simvel[1];
++	g_vr_body_state[5] = pparams->simvel[2];
++	g_vr_body_state[6] += 1.0f;
++}
++
+ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+ {
+ 	// intermission / finale rendering
+@@ -1547,6 +1645,7 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+ 	else if( !pparams->paused )
+ 	{
+ 		V_CalcNormalRefdef( pparams );
++		V_PublishBodyState( pparams );
+ 	}
+ /*
+ // Example of how to overlay the whole screen with red at 50 % alpha
 diff --git a/dlls/player.cpp b/dlls/player.cpp
 index a31504f..1b26ce3 100644
 --- a/dlls/player.cpp

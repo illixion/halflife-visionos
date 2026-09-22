@@ -1019,3 +1019,15 @@ void lambda_body_unlock(void) { pthread_mutex_unlock(&g_body.mtx); }
 uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out) {
     return slot_copy_pose(&g_body, out);
 }
+
+extern float g_vr_body_state[7];
+
+void lambda_body_state(lambda_body_state_t *out) {
+    out->eye_height  = g_vr_body_state[0];
+    out->on_ground   = g_vr_body_state[1] != 0.0f;
+    out->water_level = (int)g_vr_body_state[2];
+    out->velocity[0] = g_vr_body_state[3];
+    out->velocity[1] = g_vr_body_state[4];
+    out->velocity[2] = g_vr_body_state[5];
+    out->sequence    = (uint32_t)g_vr_body_state[6];
+}

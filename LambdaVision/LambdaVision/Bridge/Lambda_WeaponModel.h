@@ -175,6 +175,20 @@ uint32_t lambda_body_lock(lambda_weapon_mesh_t *out);
 void     lambda_body_unlock(void);
 uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out);
 
+// Where the player's feet are, published by the client each normal refdef
+// (cl_dll/view.cpp g_vr_body_state) for the avatar's legs. Plain floats read
+// across threads; a torn read costs one frame of one leg.
+typedef struct {
+    float eye_height;       // eye above the floor under the player, units,
+                            // before the headset's own translation is added
+    int   on_ground;
+    int   water_level;      // 0 dry .. 3 submerged
+    float velocity[3];      // forward, left (player-yaw frame), up; units/s
+    uint32_t sequence;      // bumps on every publish; stalls while paused
+} lambda_body_state_t;
+
+void lambda_body_state(lambda_body_state_t *out);
+
 #ifdef __cplusplus
 }
 #endif
