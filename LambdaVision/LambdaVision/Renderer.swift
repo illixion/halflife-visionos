@@ -291,6 +291,8 @@ actor Renderer {
     /// Draw the HEV holograms (Settings > Input); the client's stock 2D
     /// readouts follow the same switch through lambda_hud_set_native.
     nonisolated(unsafe) static var hevHUDEnabled = true
+    /// The holographic aim point (Settings > Input > Aim reticle).
+    nonisolated(unsafe) static var aimReticle: HEVHUD.Reticle = .dot
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -576,12 +578,37 @@ actor Renderer {
         return m
     }
 
+    /// The drawn gun's muzzle in the room, GoldSrc axes and units (the space
+    /// trackedHandFrame lives in) — nil unless an aimed gun is in the hand.
+    /// Taken from the idle pose, like the barrel, so recoil does not move
+    /// where the next shot starts.
+    private func muzzlePoint(_ hand: HandSample) -> SIMD3<Float>? {
+        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.grip,
+              pass.hold == .aimed, let muzzle = pass.muzzle, !pass.idlePalette.isEmpty else { return nil }
+        let local = ViewmodelGrip.muzzleInHand(muzzle, grip: grip, idlePalette: pass.idlePalette,
+                                               handIsLeft: Renderer.dominantHandIsLeft)
+        let p = trackedHandFrame(hand) * SIMD4<Float>(local, 1)
+        return SIMD3(p.x, p.y, p.z)
+    }
+
+    /// The aim ray for the reticle: from the drawn muzzle along the barrel,
+    /// with the distance the client's trace found (xash units → metres).
+    /// Nil when fire follows gaze, since the barrel then is not the aim.
+    private func reticleAim(headTransform: simd_float4x4) -> HEVHUD.Aim? {
+        guard Renderer.aimReticle != .off, !Renderer.fireAlongGaze,
+              let hand = sampleDominantHand(headTransform: headTransform),
+              let muzzle = muzzlePoint(hand), let direction = barrelDirection(hand) else { return nil }
+        var d: Float = 0
+        return HEVHUD.Aim(muzzle: appleDirection(muzzle) / 39.37, direction: direction,
+                          distance: lambda_aim_hit(&d) != 0 ? d / 39.37 : nil)
+    }
+
     /// Where the drawn gun's barrel points, in the Apple world, for this
     /// tracked hand — nil with no external weapon or no grip to read it from.
     private func barrelDirection(_ hand: HandSample) -> SIMD3<Float>? {
         guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.grip,
               !pass.idlePalette.isEmpty else { return nil }
-        let local = ViewmodelGrip.barrel(grip: grip, idlePalette: pass.idlePalette,
+        let local = ViewmodelGrip.barrel(grip: grip, hold: pass.hold, idlePalette: pass.idlePalette,
                                          handIsLeft: Renderer.dominantHandIsLeft)
         let r = AvatarRig.handRotation(forward: studioDirection(hand.worldForward),
                                        back: studioDirection(hand.worldUp))
@@ -1584,6 +1611,7 @@ actor Renderer {
         // with no roll leakage and nothing to drift.
         var headAngles: SIMD3<Float>? = nil  // (abs pitch, delta yaw, abs roll) deg
         var headOffset = SIMD3<Float>(0, 0, 0)  // baseline-forward frame, xash units
+        var muzzleOffset: SIMD3<Float>? = nil   // eye → muzzle, view-yaw frame, xash units
         if let cur = headPose {
             let fwd  = cur.rot.columns.0
             let left = cur.rot.columns.1
@@ -1691,6 +1719,17 @@ actor Renderer {
                 aimDir = Renderer.fireAlongGaze ? Renderer.currentGazeDir()
                                                 : (barrelDirection(hand) ?? hand.worldForward)
                 Renderer.aimDiag.aimSource = Renderer.fireAlongGaze ? "gaze(hand)" : "barrel"
+                // Shots leave the drawn muzzle, not the eyes: the room-space
+                // muzzle relative to the baseline head (which is where the
+                // engine's eye sits), turned into the composed view's yaw
+                // frame — baseline yaw plus the head delta is the head's own
+                // room yaw. Aiming along gaze keeps the stock eye origin.
+                if !Renderer.fireAlongGaze, let muzzle = muzzlePoint(hand) {
+                    let v = muzzle - headBaselinePos! * appleToXash
+                    let r = yawDeg * .pi / 180
+                    let c = cosf(r), s = sinf(r)
+                    muzzleOffset = SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z)
+                }
             } else {
                 lambda_clear_hand_pose()
                 aimDir = Renderer.currentGazeDir()
@@ -1910,6 +1949,11 @@ actor Renderer {
             Renderer.renderTargetW = colorMap.width
             Renderer.renderTargetH = colorMap.height
         }
+        if let m = muzzleOffset {
+            lambda_set_muzzle(m.x, m.y, m.z, 1)
+        } else {
+            lambda_set_muzzle(0, 0, 0, 0)
+        }
 
         // colorMap is written by ANGLE on its own MTLCommandQueue; glFinish
         // in the GL worker fences only that queue. OUR queue's reads of
@@ -2072,7 +2116,7 @@ actor Renderer {
         // vitals over the off-hand forearm.
         var hudScene: RAVEHoloScene? = nil
         var hudRenderer: RAVEHoloRenderer? = nil
-        if Renderer.hevHUDEnabled, let holo = hevHUD.ensureRenderer(
+        if Renderer.hevHUDEnabled || Renderer.aimReticle != .off, let holo = hevHUD.ensureRenderer(
             device: device, colorFormat: layerRenderer.configuration.colorFormat,
             depthFormat: layerRenderer.configuration.depthFormat,
             viewCount: drawable.views.count, slots: maxBuffersInFlight) {
@@ -2080,9 +2124,11 @@ actor Renderer {
             lambda_hud_state(&hud)
             let left = Renderer.dominantHandIsLeft
             let headM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
-            hudScene = hevHUD.scene(state: hud,
+            hudScene = hevHUD.scene(state: hud, readouts: Renderer.hevHUDEnabled,
                                     gunArm: weaponActive ? hudArm(left: left) : nil,
                                     offArm: hudArm(left: !left),
+                                    aim: weaponActive ? reticleAim(headTransform: headM) : nil,
+                                    reticle: Renderer.aimReticle,
                                     head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
                                     time: drawable.frameTiming.presentationTime.timeInterval)
             if hudScene != nil { hudRenderer = holo }
@@ -2331,19 +2377,21 @@ actor Renderer {
                 handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
 
                 if let grip = weaponPass.grip {
-                    // Pin the viewmodel's grip bone onto a Bip01 hand frame —
-                    // the avatar's posed hand when the body is drawn (so the
-                    // gun stays in the visible hand even where the arm cannot
-                    // quite reach the tracked one), else the tracked hand
-                    // itself. Both are the same Bip01 convention every stock
-                    // viewmodel hand uses, so no tuned correction sits in
-                    // between. The grip bone is this tick's pose, so recoil,
-                    // the pump and the magazine animate around a still hand.
+                    // Hold the viewmodel in a Bip01 hand frame — the avatar's
+                    // posed hand when the body is drawn (so the gun stays in
+                    // the visible hand even where the arm cannot quite reach
+                    // the tracked one), else the tracked hand itself. A gun
+                    // lies along the fingers, upright on the thumb side; a
+                    // held object sits as Valve's hand held it (see
+                    // ViewmodelGrip.modelMatrix). Either way the grip bone
+                    // stays still in the hand while the gun animates.
                     let left = Renderer.dominantHandIsLeft
                     let bodyHand = left ? body?.leftHand : body?.rightHand
                     let handFrame = bodyHand ?? trackedHandFrame(hand)
                     model = studioToWorld * ViewmodelGrip.modelMatrix(hand: handFrame, grip: grip,
+                                                                      hold: weaponPass.hold,
                                                                       palette: weaponPass.palette,
+                                                                      idlePalette: weaponPass.idlePalette,
                                                                       handIsLeft: left)
                 } else {
                     // No hand to hold it by (the hivehand): the old tuned

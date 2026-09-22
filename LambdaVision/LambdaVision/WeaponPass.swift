@@ -95,6 +95,11 @@ final class WeaponPass {
     /// The bake's idle pose (sequence 0, frame 0): the reference for the
     /// barrel's direction in the hand.
     private(set) var idlePalette: [float4x4] = []
+    /// Gun or held object (see ViewmodelGrip.Hold); meaningless without a grip.
+    private(set) var hold: ViewmodelGrip.Hold = .held
+    /// The muzzle in idle model space (GoldSrc units), nil when the model
+    /// has neither an attachment nor gun geometry to find one from.
+    private(set) var muzzle: SIMD3<Float>?
 
     // Bone table of the uploaded model and the index of its grip hand bone
     // ("Bip01 R Hand"; -1 when the model has none — then handBone stays
@@ -274,11 +279,15 @@ final class WeaponPass {
         self.grip = ViewmodelGrip.grip(boneNames: uploaded.boneNames, parents: uploaded.boneParents,
                                        pose: idle, extractorChoice: uploaded.handBoneIndex,
                                        geometry: geometry)
+        self.hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: idle) } ?? .held
+        self.muzzle = ViewmodelGrip.muzzle(
+            attachment: StudioMesh.attachments(of: raw).first, idlePalette: idle,
+            gunPoints: StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) })
         self.palette = []          // refreshPose() fills it for this generation
         self.handBone = matrix_identity_float4x4
         self.uploadedGeneration = gen
 
-        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none")")
+        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none") hold=\(hold) muzzle=\(muzzle.map { "\($0)" } ?? "none")")
     }
 
     /// Allocate/resize the weapon depth to match the drawable colour slice.

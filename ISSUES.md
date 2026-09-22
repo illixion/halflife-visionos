@@ -10,8 +10,8 @@ instead of deleting them.
   skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
   fire-along-gaze accessibility now in Settings): remaining items — muzzle
   flash is lost while the viewmodel is hidden (`CL_AddEntity` clears effects
-  on index-0 entities, so `EF_MUZZLEFLASH` can't ride the gun entity as-is);
-  bullets still originate at the eyes (only the direction follows the hand).
+  on index-0 entities, so `EF_MUZZLEFLASH` can't ride the gun entity as-is).
+  Shots now leave the drawn muzzle (see Resolved).
   This is the default engine-drawn path; an opt-in Metal renderer that fixes
   the rotation drift now exists — see "Weapon Metal-pass polish" under
   rendering.
@@ -242,7 +242,32 @@ instead of deleting them.
 - Sense-controller support if availability ever improves — same anchor
   code as hand tracking, different input source.
 
+- **Crossbow scope glass.** Draw the scope lens as a magnified sample of the
+  eye's own frame along the scope's line of sight (cheap; exact when the
+  scope is at the eye, which is the only time it is useful) instead of the
+  opaque red texture. A true second narrow-FOV engine view would cost a third
+  world render per frame.
+- **Viewmodels are open on the far side.** Valve built v_ models for a fixed
+  camera, so the faces away from it (the gun's right side) were never
+  modelled; in the hand they show as holes. Candidates: fill from the
+  matching p_ model, mirror the near side, or a GoldSrc model pack authored
+  for all-round viewing.
+
 ## Resolved
+
+- ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
+  orientation came from Valve's hand bone, which sits differently on every
+  rig (the classic MP5's synthesised hand frame put it 17° high and rolled).
+  Aimed guns now take the viewmodel's own view-space axes (+X is the barrel
+  on every model, measured) onto the hand, the grip bone only placing it
+  (`ViewmodelGrip.Hold`, `modelMatrix`); thrown/placed items keep Valve's
+  grip. Shots, tracers, decals and projectiles leave the drawn muzzle
+  (attachment 0, else the gun's front) instead of the eyes —
+  `g_vr_muzzle_offset` in `GetGunPosition`, `EV_VR_ApplyMuzzle` client-side,
+  both falling back to the eye when a wall sits between — which is what made
+  bolts land left of the crossbow. An aim reticle (Settings > Input) marks the
+  client's trace of that same ray (`V_PublishAimHit`). The avatar probe checks
+  every gun comes out aimed with its muzzle ahead of the hand.
 
 - ~~Gaze+pinch `+use`~~ — superseded by the off-hand reach/poke `+use` in
   `HandMovement`.

@@ -74,6 +74,16 @@ typedef struct {
     int32_t parent;             // -1 for a root bone
 } lambda_weapon_bone_t;
 
+// A studio attachment (mstudioattachment_t): a point fixed to a bone, in that
+// bone's local space. Stock viewmodels put the muzzle at attachment 0 — the
+// engine's muzzle flash and the client's tracers start there — and shell
+// ejection at 1 or 2 where a gun has one.
+#define LAMBDA_WEAPON_MAX_ATTACHMENTS 8
+typedef struct {
+    int32_t bone;
+    float   org[3];
+} lambda_weapon_attachment_t;
+
 // Immutable view of one baked model. All pointers are owned by the module and
 // remain valid only while the lock is held.
 typedef struct {
@@ -100,6 +110,9 @@ typedef struct {
     // The Swift side pins this bone's POSED frame onto the tracked hand each
     // frame. See choose_grip_bone().
     int32_t hand_bone_index;
+
+    uint32_t attachment_count;
+    lambda_weapon_attachment_t attachments[LAMBDA_WEAPON_MAX_ATTACHMENTS];
 
     // Model-space bounding box of the geometry in the bind pose (sanity/log).
     float bbmin[3];

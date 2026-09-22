@@ -194,6 +194,9 @@ printf '_g_vr_hand_pose\n_g_vr_hand_pose_active\n_g_vr_cam_override\n' >> "$HLSD
 # Client-side barrel-aim offset (view.cpp), written by the bridge so the
 # bullet decal/tracer trace (ev_hldm.cpp) matches the server damage trace.
 printf '_g_vr_aim_offset_cl\n' >> "$HLSDK_CL_EXPORTS"
+# Muzzle origin mirror and the aim trace's hit distance (view.cpp): the bridge
+# writes the first, the reticle reads the second.
+printf '_g_vr_muzzle_offset_cl\n_g_vr_aim_hit\n' >> "$HLSDK_CL_EXPORTS"
 # Viewmodel publish (view.cpp), read by Lambda_WeaponModel.c to bake the
 # skinned weapon mesh and pose its bones for the external (visionOS) renderer.
 printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLSDK_CL_EXPORTS"

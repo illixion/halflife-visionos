@@ -391,10 +391,10 @@ index 3670546..0c0feb0 100644
  	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
  	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
 diff --git a/cl_dll/ev_hldm.cpp b/cl_dll/ev_hldm.cpp
-index e28742f..3f08c40 100644
+index e28742f..d5b2c69 100644
 --- a/cl_dll/ev_hldm.cpp
 +++ b/cl_dll/ev_hldm.cpp
-@@ -47,6 +47,27 @@ void VectorAngles( const float *forward, float *angles );
+@@ -47,6 +47,50 @@ void VectorAngles( const float *forward, float *angles );
  
  extern cvar_t *cl_lw;
  
@@ -419,10 +419,33 @@ index e28742f..3f08c40 100644
 +	angles[YAW]   += g_vr_aim_offset_cl[1];
 +}
 +
++// VR muzzle origin: the server fires from the muzzle of the gun in the hand
++// (CBasePlayer::GetGunPosition, g_vr_muzzle_offset); move the client trace's
++// start the same way, with the same eye→muzzle wall check, so the tracer
++// and the decal leave the drawn barrel. g_vr_muzzle_offset_cl is its mirror
++// (cl_dll/view.cpp): muzzle relative to the eye in the level frame of the
++// view yaw, [3] > 0 while active. Called right after EV_GetGunPosition.
++extern "C" float g_vr_muzzle_offset_cl[4];  // defined in cl_dll/view.cpp
++static void EV_VR_ApplyMuzzle( event_args_t *args, float *vecSrc )
++{
++	if( !EV_IsLocal( args->entindex ) || g_vr_muzzle_offset_cl[3] <= 0.0f )
++		return;
++	const float *o = g_vr_muzzle_offset_cl;
++	float yaw = args->angles[YAW] * 0.017453293f;
++	float c = cosf( yaw ), s = sinf( yaw );
++	vec3_t muzzle;
++	muzzle[0] = vecSrc[0] + c * o[0] - s * o[1];
++	muzzle[1] = vecSrc[1] + s * o[0] + c * o[1];
++	muzzle[2] = vecSrc[2] + o[2];
++	pmtrace_t *tr = gEngfuncs.PM_TraceLine( vecSrc, muzzle, PM_TRACELINE_PHYSENTSONLY, 2, -1 );
++	if( tr && tr->fraction >= 1.0f && !tr->startsolid && !tr->allsolid )
++		VectorCopy( muzzle, vecSrc );
++}
++
  extern "C"
  {
  // HLDM
-@@ -480,6 +501,7 @@ static void EV_FireGlock_Impl( event_args_t *args )
+@@ -480,6 +524,7 @@ static void EV_FireGlock_Impl( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -430,7 +453,15 @@ index e28742f..3f08c40 100644
  
  	empty = args->bparam1;
  	AngleVectors( angles, forward, right, up );
-@@ -543,6 +565,7 @@ void EV_FireShotGunDouble( event_args_t *args )
+@@ -501,6 +546,7 @@ static void EV_FireGlock_Impl( event_args_t *args )
+ 	gEngfuncs.pEventAPI->EV_PlaySound( idx, origin, CHAN_WEAPON, "weapons/pl_gun3.wav", gEngfuncs.pfnRandomFloat( 0.92, 1.0 ), ATTN_NORM, 0, 98 + gEngfuncs.pfnRandomLong( 0, 3 ) );
+ 
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 
+ 	VectorCopy( forward, vecAiming );
+ 
+@@ -543,6 +589,7 @@ void EV_FireShotGunDouble( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -438,7 +469,15 @@ index e28742f..3f08c40 100644
  
  	AngleVectors( angles, forward, right, up );
  
-@@ -597,6 +620,7 @@ void EV_FireShotGunSingle( event_args_t *args )
+@@ -566,6 +613,7 @@ void EV_FireShotGunDouble( event_args_t *args )
+ 	gEngfuncs.pEventAPI->EV_PlaySound( idx, origin, CHAN_WEAPON, "weapons/dbarrel1.wav", gEngfuncs.pfnRandomFloat( 0.98, 1.0 ), ATTN_NORM, 0, 85 + gEngfuncs.pfnRandomLong( 0, 0x1f ) );
+ 
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 	VectorCopy( forward, vecAiming );
+ 
+ 	if( gEngfuncs.GetMaxClients() > 1 )
+@@ -597,6 +645,7 @@ void EV_FireShotGunSingle( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -446,7 +485,15 @@ index e28742f..3f08c40 100644
  
  	AngleVectors( angles, forward, right, up );
  
-@@ -654,6 +678,7 @@ void EV_FireMP5( event_args_t *args )
+@@ -618,6 +667,7 @@ void EV_FireShotGunSingle( event_args_t *args )
+ 	gEngfuncs.pEventAPI->EV_PlaySound( idx, origin, CHAN_WEAPON, "weapons/sbarrel1.wav", gEngfuncs.pfnRandomFloat( 0.95, 1.0 ), ATTN_NORM, 0, 93 + gEngfuncs.pfnRandomLong( 0, 0x1f ) );
+ 
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 	VectorCopy( forward, vecAiming );
+ 
+ 	if( gEngfuncs.GetMaxClients() > 1 )
+@@ -654,6 +704,7 @@ void EV_FireMP5( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -454,7 +501,15 @@ index e28742f..3f08c40 100644
  
  	AngleVectors( angles, forward, right, up );
  
-@@ -737,6 +762,7 @@ void EV_FirePython( event_args_t *args )
+@@ -683,6 +734,7 @@ void EV_FireMP5( event_args_t *args )
+ 	}
+ 
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 	VectorCopy( forward, vecAiming );
+ 
+ 	EV_HLDM_FireBullets( idx, forward, right, up, 1, vecSrc, vecAiming, 8192, BULLET_PLAYER_MP5, 2, &g_tracerCount[idx - 1], args->fparam1, args->fparam2 );
+@@ -737,6 +789,7 @@ void EV_FirePython( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -462,7 +517,15 @@ index e28742f..3f08c40 100644
  
  	AngleVectors( angles, forward, right, up );
  
-@@ -793,6 +819,7 @@ void EV_SpinGauss( event_args_t *args )
+@@ -763,6 +816,7 @@ void EV_FirePython( event_args_t *args )
+ 	}
+ 
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 
+ 	VectorCopy( forward, vecAiming );
+ 
+@@ -793,6 +847,7 @@ void EV_SpinGauss( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -470,7 +533,7 @@ index e28742f..3f08c40 100644
  
  	pitch = args->iparam1;
  
-@@ -845,6 +872,7 @@ void EV_FireGauss( event_args_t *args )
+@@ -845,6 +900,7 @@ void EV_FireGauss( event_args_t *args )
  	VectorCopy( args->origin, origin );
  	VectorCopy( args->angles, angles );
  	VectorCopy( args->velocity, velocity );
@@ -478,6 +541,14 @@ index e28742f..3f08c40 100644
  
  	if( args->bparam2 )
  	{
+@@ -854,6 +910,7 @@ void EV_FireGauss( event_args_t *args )
+ 
+ 	//Con_Printf( "Firing gauss with %f\n", flDamage );
+ 	EV_GetGunPosition( args, vecSrc, origin );
++	EV_VR_ApplyMuzzle( args, vecSrc );
+ 
+ 	m_iBeam = gEngfuncs.pEventAPI->EV_FindModelIndex( "sprites/smoke.spr" );
+ 	m_iBalls = m_iGlow = gEngfuncs.pEventAPI->EV_FindModelIndex( "sprites/hotglow.spr" );
 diff --git a/cl_dll/flashlight.cpp b/cl_dll/flashlight.cpp
 index 3ec6997..0f25447 100644
 --- a/cl_dll/flashlight.cpp
@@ -635,10 +706,10 @@ index 9aecaf7..43f18c8 100644
  	m_flTime = flTime;
  	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..6efba05 100644
+index 3b3187d..8ef3a16 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,69 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,78 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -665,6 +736,15 @@ index 3b3187d..6efba05 100644
 +// from the server) because the intermediate cl_dll dylib link has no server
 +// symbols; the bridge writes both copies each tick from one source.
 +extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset_cl[2] = { 0 };
++// Client mirror of the server's g_vr_muzzle_offset (dlls/player.cpp): the
++// muzzle of the gun in the hand relative to the eye, in the level frame of
++// the view yaw (units); [3] > 0 while active. The bullet events start their
++// traces there (ev_hldm.cpp) and the aim trace below does too.
++extern "C" __attribute__((visibility("default"))) float g_vr_muzzle_offset_cl[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
++// The aim ray's hit, for the platform's reticle: [0] = distance from the
++// muzzle along the aim to the first thing a shot would hit (units), [1] > 0
++// when there is one to show. Published every normal refdef.
++extern "C" __attribute__((visibility("default"))) float g_vr_aim_hit[2] = { 0.0f, -1.0f };
 +// Set by VR_AddHandWeapon (entity.cpp) each frame: 1 when the weapon's p_
 +// model was drawn at the hand (so the viewmodel is hidden below), 0 when
 +// it fell back to the stock viewmodel — e.g. the egon, whose backpack is
@@ -709,7 +789,7 @@ index 3b3187d..6efba05 100644
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +839,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +848,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  
@@ -724,7 +804,7 @@ index 3b3187d..6efba05 100644
  	lasttime = pparams->time;
  
  	v_origin = pparams->vieworg;
-@@ -1533,6 +1603,34 @@ void V_CalcSpectatorRefdef( struct ref_params_s * pparams )
+@@ -1533,6 +1612,89 @@ void V_CalcSpectatorRefdef( struct ref_params_s * pparams )
  	VectorCopy( v_origin, pparams->vieworg );
  }
  
@@ -756,22 +836,78 @@ index 3b3187d..6efba05 100644
 +	g_vr_body_state[6] += 1.0f;
 +}
 +
++extern "C" float g_vr_hud_state[14];  // cl_dll/hud_redraw.cpp
++
++// Traces the aim ray the server will fire along — from the muzzle, along the
++// composed view plus the aim offset — and publishes how far it runs, so the
++// reticle sits exactly where a shot lands. Players, monsters and brush
++// entities all stop it, as they stop a bullet.
++static void V_PublishAimHit( struct ref_params_s *pparams )
++{
++	// The egon fires along the view, not the hand (dlls/player.cpp
++	// ItemPostFrame), so there is no barrel ray to mark. Weapon id from the
++	// HUD publish (hud_redraw.cpp); 8 is WEAPON_EGON (dlls/weapons.h).
++	cl_entity_t *local = gEngfuncs.GetLocalPlayer();
++	if( g_vr_muzzle_offset_cl[3] <= 0.0f || !local || (int)g_vr_hud_state[4] == 8 )
++	{
++		g_vr_aim_hit[1] = -1.0f;
++		return;
++	}
++	const bool vr = g_vr_cam_override[0] > 0.0f;
++	const float viewYaw = pparams->cl_viewangles[YAW] + ( vr ? g_vr_cam_override[2] : 0.0f );
++	vec3_t angles, forward, eye, muzzle, end;
++	angles[PITCH] = ( vr ? g_vr_cam_override[1] : pparams->cl_viewangles[PITCH] ) + g_vr_aim_offset_cl[0];
++	angles[YAW] = viewYaw + g_vr_aim_offset_cl[1];
++	angles[ROLL] = 0.0f;
++	AngleVectors( angles, forward, NULL, NULL );
++
++	VectorAdd( pparams->simorg, pparams->viewheight, eye );
++	const float *o = g_vr_muzzle_offset_cl;
++	const float y = viewYaw * ( M_PI_F / 180.0f ), c = cosf( y ), s = sinf( y );
++	muzzle[0] = eye[0] + c * o[0] - s * o[1];
++	muzzle[1] = eye[1] + s * o[0] + c * o[1];
++	muzzle[2] = eye[2] + o[2];
++
++	// Same rule as the shot: a muzzle behind a wall fires from the eye, and
++	// then there is no honest spot on the far side of the barrel to mark.
++	pmtrace_t *wall = gEngfuncs.PM_TraceLine( eye, muzzle, PM_TRACELINE_PHYSENTSONLY, 2, -1 );
++	if( !wall || wall->fraction < 1.0f || wall->startsolid )
++	{
++		g_vr_aim_hit[1] = -1.0f;
++		return;
++	}
++
++	const float range = 8192.0f;
++	VectorMA( muzzle, range, forward, end );
++	pmtrace_t tr;
++	gEngfuncs.pEventAPI->EV_SetUpPlayerPrediction( false, true );
++	gEngfuncs.pEventAPI->EV_PushPMStates();
++	gEngfuncs.pEventAPI->EV_SetSolidPlayers( local->index - 1 );
++	gEngfuncs.pEventAPI->EV_SetTraceHull( 2 );
++	gEngfuncs.pEventAPI->EV_PlayerTrace( muzzle, end, PM_NORMAL, -1, &tr );
++	gEngfuncs.pEventAPI->EV_PopPMStates();
++
++	g_vr_aim_hit[0] = tr.fraction * range;
++	g_vr_aim_hit[1] = tr.fraction < 1.0f && !tr.startsolid ? 1.0f : -1.0f;
++}
++
  void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
  {
  	// intermission / finale rendering
-@@ -1547,6 +1645,7 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+@@ -1547,6 +1709,8 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
  	else if( !pparams->paused )
  	{
  		V_CalcNormalRefdef( pparams );
 +		V_PublishBodyState( pparams );
++		V_PublishAimHit( pparams );
  	}
  /*
  // Example of how to overlay the whole screen with red at 50 % alpha
 diff --git a/dlls/player.cpp b/dlls/player.cpp
-index a31504f..1b26ce3 100644
+index a31504f..870b303 100644
 --- a/dlls/player.cpp
 +++ b/dlls/player.cpp
-@@ -47,6 +47,35 @@ extern DLL_GLOBAL int g_iSkillLevel, gDisplayTitle;
+@@ -47,6 +47,44 @@ extern DLL_GLOBAL int g_iSkillLevel, gDisplayTitle;
  
  BOOL gInitHUD = TRUE;
  
@@ -782,6 +918,15 @@ index a31504f..1b26ce3 100644
 +// and pmove stay on the real view angles. Default visibility: the ld -r
 +// prelink localizes hidden symbols and the bridge externs this by name.
 +extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset[2] = { 0.0f, 0.0f };
++
++// VR (LambdaVision): where shots leave from. [0..2] = the gun's muzzle
++// relative to the eye (pev->origin + view_ofs), in units, in the level frame
++// of the view yaw (x forward, y left, z up); [3] > 0 while the platform has
++// a gun in the hand. Only read inside the weapon frame (see ItemPostFrame),
++// where v_angle carries the aim offset, so the yaw is saved beforehand.
++extern "C" __attribute__((visibility("default"))) float g_vr_muzzle_offset[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
++static int   g_vr_weapon_frame = 0;
++static float g_vr_weapon_frame_yaw = 0.0f;
 +
 +// VR (LambdaVision): immersive +use. g_vr_use_offset points the PlayerUse
 +// selection cone along the platform's eye→fingertip ray (pitch/yaw degrees
@@ -807,7 +952,29 @@ index a31504f..1b26ce3 100644
  extern void CopyToBodyQue( entvars_t *pev);
  extern void respawn( entvars_t *pev, BOOL fCopyCorpse );
  extern Vector VecBModelOrigin( entvars_t *pevBModel );
-@@ -1513,6 +1542,49 @@ void CBasePlayer::StartObserver( Vector vecPosition, Vector vecViewAngle )
+@@ -370,6 +408,21 @@ Vector CBasePlayer::GetGunPosition()
+ 
+ 	origin = pev->origin + pev->view_ofs;
+ 
++	// VR: fire from the muzzle of the gun in the player's hand, unless
++	// something solid sits between the eye and it — a barrel pushed
++	// through a wall must not shoot from the far side.
++	if( g_vr_weapon_frame && g_vr_muzzle_offset[3] > 0.0f )
++	{
++		const float *o = g_vr_muzzle_offset;
++		float yaw = g_vr_weapon_frame_yaw * 0.017453293f;
++		float c = cosf( yaw ), s = sinf( yaw );
++		Vector muzzle = origin + Vector( c * o[0] - s * o[1], s * o[0] + c * o[1], o[2] );
++		TraceResult tr;
++		UTIL_TraceLine( origin, muzzle, ignore_monsters, ENT( pev ), &tr );
++		if( tr.flFraction >= 1.0f && !tr.fStartSolid && !tr.fAllSolid )
++			origin = muzzle;
++	}
++
+ 	return origin;
+ }
+ 
+@@ -1513,6 +1566,49 @@ void CBasePlayer::StartObserver( Vector vecPosition, Vector vecViewAngle )
  //
  #define	PLAYER_SEARCH_RADIUS	(float)64
  
@@ -857,7 +1024,7 @@ index a31504f..1b26ce3 100644
  void CBasePlayer::PlayerUse( void )
  {
  	if( IsObserver() )
-@@ -1546,26 +1618,14 @@ void CBasePlayer::PlayerUse( void )
+@@ -1546,26 +1642,14 @@ void CBasePlayer::PlayerUse( void )
  				}
  				return;
  			}
@@ -889,7 +1056,7 @@ index a31504f..1b26ce3 100644
  		}
  	}
  
-@@ -1575,7 +1635,19 @@ void CBasePlayer::PlayerUse( void )
+@@ -1575,7 +1659,19 @@ void CBasePlayer::PlayerUse( void )
  	float flMaxDot = VIEW_FIELD_NARROW;
  	float flDot;
  
@@ -910,7 +1077,7 @@ index a31504f..1b26ce3 100644
  
  	while( ( pObject = UTIL_FindEntityInSphere( pObject, pev->origin, PLAYER_SEARCH_RADIUS ) ) != NULL )
  	{
-@@ -1629,7 +1701,16 @@ void CBasePlayer::PlayerUse( void )
+@@ -1629,7 +1725,16 @@ void CBasePlayer::PlayerUse( void )
  	else
  	{
  		if( m_afButtonPressed & IN_USE )
@@ -927,7 +1094,7 @@ index a31504f..1b26ce3 100644
  	}
  }
  
-@@ -1930,6 +2011,7 @@ void CBasePlayer::PreThink( void )
+@@ -1930,6 +2035,7 @@ void CBasePlayer::PreThink( void )
  		pev->flags &= ~FL_ONTRAIN;
  
  	// Train speed control
@@ -935,7 +1102,7 @@ index a31504f..1b26ce3 100644
  	if( m_afPhysicsFlags & PFLAG_ONTRAIN )
  	{
  		CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
-@@ -2006,8 +2088,27 @@ void CBasePlayer::PreThink( void )
+@@ -2006,8 +2112,27 @@ void CBasePlayer::PreThink( void )
  				vel = -1;
  				pTrain->Use( this, this, USE_SET, vel );
  			}
@@ -963,14 +1130,15 @@ index a31504f..1b26ce3 100644
  
  		if( iGearId != ( m_iTrain & 0x0F ) )	// Vit_amiN: speed changed
  		{
-@@ -3930,7 +4031,27 @@ void CBasePlayer::ItemPostFrame()
+@@ -3930,7 +4055,31 @@ void CBasePlayer::ItemPostFrame()
  	if( !m_pActiveItem )
  		return;
  
 -	m_pActiveItem->ItemPostFrame();
 +	// VR aim: fire along the platform-supplied aim ray (gaze or hand),
 +	// scoped to the weapon frame — UTIL_MakeVectors, GetAutoaimVector and
-+	// GetGunPosition all read v_angle, so every weapon inherits the ray.
++	// GetGunPosition all read v_angle, so every weapon inherits the ray;
++	// GetGunPosition also moves the shot's origin to the muzzle.
 +	// The egon is exempt: it renders as the camera-locked viewmodel
 +	// (its backpack clips the body when hand-anchored, see entity.cpp),
 +	// so it must fire along the view direction — where the player looks —
@@ -984,9 +1152,12 @@ index a31504f..1b26ce3 100644
 +		Vector vrSavedAngle = pev->v_angle;
 +		pev->v_angle.x += g_vr_aim_offset[0];
 +		pev->v_angle.y += g_vr_aim_offset[1];
++		g_vr_weapon_frame = 1;
++		g_vr_weapon_frame_yaw = vrSavedAngle.y;
 +
 +		m_pActiveItem->ItemPostFrame();
 +
++		g_vr_weapon_frame = 0;
 +		pev->v_angle = vrSavedAngle;
 +	}
  }

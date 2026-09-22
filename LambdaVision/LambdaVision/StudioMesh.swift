@@ -171,6 +171,40 @@ final class StudioMesh {
         return out
     }
 
+    /// Every vertex of the triangles `keep` accepts, posed by `palette` into
+    /// model space (GoldSrc units).
+    static func posedPoints(of mesh: lambda_weapon_mesh_t, palette: [float4x4],
+                            keep: (_ texture: Int, _ a: Int, _ b: Int, _ c: Int) -> Bool) -> [SIMD3<Float>] {
+        guard let verts = mesh.vertices, let idx = mesh.indices, let subs = mesh.submeshes,
+              !palette.isEmpty else { return [] }
+        var out: [SIMD3<Float>] = []
+        for s in 0..<Int(mesh.submesh_count) {
+            let sm = subs[s]
+            var i = 0
+            while i + 2 < Int(sm.index_count) {
+                let tri = (0..<3).map { verts[Int(idx[Int(sm.index_offset) + i + $0])] }
+                i += 3
+                guard keep(Int(sm.texture), Int(tri[0].bone), Int(tri[1].bone), Int(tri[2].bone)) else { continue }
+                for v in tri {
+                    let p = palette[min(Int(v.bone), palette.count - 1)] * SIMD4<Float>(v.pos.0, v.pos.1, v.pos.2, 1)
+                    out.append(SIMD3(p.x, p.y, p.z))
+                }
+            }
+        }
+        return out
+    }
+
+    /// The mesh's studio attachments as (bone, bone-local point).
+    static func attachments(of mesh: lambda_weapon_mesh_t) -> [(bone: Int, org: SIMD3<Float>)] {
+        var copy = mesh.attachments
+        return withUnsafeBytes(of: &copy) { raw in
+            let a = raw.bindMemory(to: lambda_weapon_attachment_t.self)
+            return (0..<min(Int(mesh.attachment_count), a.count)).map {
+                (Int(a[$0].bone), SIMD3(a[$0].org.0, a[$0].org.1, a[$0].org.2))
+            }
+        }
+    }
+
     static func boneNames(of mesh: lambda_weapon_mesh_t) -> [String] {
         guard let bones = mesh.bones else { return [] }
         return (0..<Int(mesh.bone_count)).map { b in

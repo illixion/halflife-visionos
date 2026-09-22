@@ -191,33 +191,106 @@ enum ViewmodelGrip {
     /// Valve animated it in: the dominant-hand setting, or the satchel.
     static let mirror = float4x4(diagonal: SIMD4<Float>(1, 1, -1, 1))
 
+    /// How a viewmodel is carried.
+    enum Hold: Equatable {
+        /// A gun: its barrel is the viewmodel's +X, so it is laid along the
+        /// hand's pointing direction, upright on the thumb side.
+        case aimed
+        /// A held object (grenade, satchel, tripmine): placed exactly as
+        /// Valve's hand held it, because it has no barrel to line up.
+        case held
+    }
+
+    /// The largest angle between the idle barrel and the grip hand's fingers
+    /// for which a viewmodel is still a gun. Every stock and HD gun reads
+    /// 2–21°; the hand grenade, satchel and tripmine read 40–75°.
+    static let aimedHoldLimitDeg: Float = 30
+
+    static func hold(grip: Grip, idlePalette: [float4x4]) -> Hold {
+        let b = barrelInGrip(grip: grip, idlePalette: idlePalette)
+        return acosf(max(-1, min(1, b.x))) * 180 / .pi <= aimedHoldLimitDeg ? .aimed : .held
+    }
+
     /// Viewmodel model space → the world, given where the holding hand is.
     ///
     /// `hand` is a Bip01-convention hand frame in the world (the avatar's
     /// posed hand bone, or one built from tracking) in GoldSrc units — the
-    /// caller composes the GoldSrc → Apple basis on the outside. The grip bone
-    /// is pinned to it exactly, so recoil, the pump, the magazine animate
-    /// around a hand that does not move.
-    static func modelMatrix(hand: float4x4, grip: Grip, palette: [float4x4],
-                            handIsLeft: Bool) -> float4x4 {
+    /// caller composes the GoldSrc → Apple basis on the outside.
+    ///
+    /// A held object pins the grip bone to the hand exactly, the way Valve
+    /// animated it. An aimed gun takes its orientation from the viewmodel's
+    /// own axes instead: viewmodels are authored in view space, so in the
+    /// idle pose +X is where the gun shoots and +Z is up, on every rig —
+    /// unlike the grip bone, whose frame differs per model (the classic MP5
+    /// has no named hand at all, and its synthesised frame sat the gun 17°
+    /// high and rolled). Those axes go onto the hand's (+X along the
+    /// fingers, +Z the thumb side, which a Bip01 hand shares), and the grip
+    /// bone only says where: its idle position lands on the hand, and its
+    /// motion since idle is taken back out, so recoil, the pump and the
+    /// magazine animate around a hand that does not move.
+    static func modelMatrix(hand: float4x4, grip: Grip, hold: Hold, palette: [float4x4],
+                            idlePalette: [float4x4], handIsLeft: Bool) -> float4x4 {
         let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
-        return hand * flip * grip.frame(in: palette).inverse
+        switch hold {
+        case .held:
+            return hand * flip * grip.frame(in: palette).inverse
+        case .aimed:
+            let idle = bone(grip.bone, in: idlePalette)
+            var toGrip = matrix_identity_float4x4
+            toGrip.columns.3 = SIMD4(-xyz(idle.columns.3), 1)
+            return hand * flip * toGrip * idle * bone(grip.bone, in: palette).inverse
+        }
     }
 
-    /// The barrel, as a direction in the holding hand's frame.
+    /// The barrel, as a direction in the holding hand's frame: along the
+    /// fingers for an aimed gun, by construction, and for a held object
+    /// wherever Valve's hand pointed its +X.
     ///
-    /// Viewmodels are authored in view space — the camera looks down +X and
-    /// the gun is posed to shoot where the camera looks — so model +X, read
-    /// in the grip frame of the idle pose, is the direction the drawn barrel
-    /// points relative to the hand. Aiming along it is what makes the shot
-    /// go where the gun visibly points, which the wrist-to-knuckle ray the
-    /// aim used to follow only approximated. Taken from idle, not from the
-    /// current frame: the shoot sequence kicks the gun against the camera
-    /// origin, and letting that into the aim would walk automatic fire up.
-    static func barrel(grip: Grip, idlePalette: [float4x4], handIsLeft: Bool) -> SIMD3<Float> {
+    /// Taken from idle, not from the current frame: the shoot sequence kicks
+    /// the gun against the camera origin, and letting that into the aim
+    /// would walk automatic fire up.
+    static func barrel(grip: Grip, hold: Hold, idlePalette: [float4x4], handIsLeft: Bool) -> SIMD3<Float> {
+        switch hold {
+        case .aimed: return SIMD3(1, 0, 0)
+        case .held:
+            let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
+            return simd_normalize(xyz(flip * SIMD4(barrelInGrip(grip: grip, idlePalette: idlePalette), 0)))
+        }
+    }
+
+    /// Model +X in the grip hand's idle frame: how far Valve's hand points
+    /// away from the gun.
+    static func barrelInGrip(grip: Grip, idlePalette: [float4x4]) -> SIMD3<Float> {
+        simd_normalize(xyz(grip.frame(in: idlePalette).inverse * SIMD4<Float>(1, 0, 0, 0)))
+    }
+
+    /// Where the muzzle is, in the viewmodel's idle model space.
+    ///
+    /// Attachment 0 when the model has one — stock viewmodels put the muzzle
+    /// flash there. Otherwise (the crossbow, the RPG) the front of the gun:
+    /// the centre of the gun geometry within an inch of its furthest-forward
+    /// point. `gunPoints` are the gun's vertices (no hands) posed in idle.
+    static func muzzle(attachment: (bone: Int, org: SIMD3<Float>)?, idlePalette: [float4x4],
+                       gunPoints: [SIMD3<Float>]) -> SIMD3<Float>? {
+        if let a = attachment, a.bone < idlePalette.count {
+            return xyz(idlePalette[a.bone] * SIMD4(a.org, 1))
+        }
+        guard let front = gunPoints.map(\.x).max() else { return nil }
+        let tip = gunPoints.filter { $0.x > front - 1 }
+        return tip.reduce(.zero, +) / Float(tip.count)
+    }
+
+    /// The muzzle in the holding hand's frame, for an aimed gun: where shots
+    /// leave from, fixed per model (the idle pose, like the barrel).
+    static func muzzleInHand(_ muzzle: SIMD3<Float>, grip: Grip, idlePalette: [float4x4],
+                             handIsLeft: Bool) -> SIMD3<Float> {
         let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
-        let inHand = flip * grip.frame(in: idlePalette).inverse * SIMD4<Float>(1, 0, 0, 0)
-        return simd_normalize(xyz(inHand))
+        let g = xyz(bone(grip.bone, in: idlePalette).columns.3)
+        return xyz(flip * SIMD4(muzzle - g, 0))
+    }
+
+    private static func bone(_ i: Int, in palette: [float4x4]) -> float4x4 {
+        i < palette.count ? palette[i] : matrix_identity_float4x4
     }
 
     // MARK: - The grip's fingers

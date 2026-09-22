@@ -34,6 +34,26 @@ enum FireAimMode: String, CaseIterable, Identifiable {
     var label: String { self == .barrel ? "Weapon barrel" : "Where I look" }
 }
 
+/// The aim reticle: where the barrel's shot would land, marked in the world.
+enum AimReticle: String, CaseIterable, Identifiable {
+    case off, dot, beam
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .dot: "Dot"
+        case .beam: "Dot and beam"
+        }
+    }
+    var style: HEVHUD.Reticle {
+        switch self {
+        case .off: .off
+        case .dot: .dot
+        case .beam: .beam
+        }
+    }
+}
+
 /// Which way arm-swing walking goes (RAVEArmSwingDirection, as a setting).
 enum ArmSwingDirection: String, CaseIterable, Identifiable {
     case head, hands
@@ -172,6 +192,13 @@ final class GameSettings {
                  applyHEVHUD() }
     }
 
+    /// The holographic aim point where the barrel's shot would land (and,
+    /// with the beam, the line to it from the muzzle).
+    var aimReticle: AimReticle = AppSettingsStore.aimReticle {
+        didSet { AppSettingsStore.aimReticle = aimReticle
+                 Renderer.aimReticle = aimReticle.style }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -192,6 +219,7 @@ final class GameSettings {
         HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
+        Renderer.aimReticle = aimReticle.style
         applyHEVHUD()
     }
 

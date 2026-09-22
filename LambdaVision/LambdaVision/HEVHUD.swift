@@ -11,7 +11,11 @@
 //    body, facing the eyes;
 //  - health, suit charge and flashlight charge float over the off-hand
 //    forearm and fade in as the back of that forearm turns toward the eyes,
-//    like checking a watch.
+//    like checking a watch;
+//  - the aim reticle sits where the barrel's shot would land, the distance
+//    traced by the client along the very ray the server fires (cl_dll/view.cpp
+//    V_PublishAimHit), sized to a fixed angle so it reads the same near or
+//    far; optionally with a faint beam from the muzzle.
 //
 //  Each panel sits on the line from its anchor toward the eyes, clear of the
 //  arm or gun it belongs to, so it is genuinely in front of them in stereo;
@@ -42,6 +46,17 @@ nonisolated final class HEVHUD: @unchecked Sendable {
         /// hand, i.e. toward the body for either hand held out front.
         var inward: SIMD3<Float>
     }
+
+    /// The aim ray as the renderer knows it, Apple world metres: from the
+    /// drawn muzzle along the barrel, and how far a shot would travel (nil
+    /// when the trace found nothing to show).
+    struct Aim {
+        var muzzle: SIMD3<Float>
+        var direction: SIMD3<Float>
+        var distance: Float?
+    }
+
+    enum Reticle { case off, dot, beam }
 
     static let amber = SIMD3<Float>(1.0, 0.56, 0.12)
     static let red = SIMD3<Float>(1.0, 0.20, 0.10)
@@ -93,14 +108,14 @@ nonisolated final class HEVHUD: @unchecked Sendable {
     }
 
     /// This frame's panels, or nil when nothing shows.
-    func scene(state s: lambda_hud_state_t, gunArm: Arm?, offArm: Arm?, head: SIMD3<Float>,
-               time: Double) -> RAVEHoloScene? {
+    func scene(state s: lambda_hud_state_t, readouts: Bool, gunArm: Arm?, offArm: Arm?,
+               aim: Aim?, reticle: Reticle, head: SIMD3<Float>, time: Double) -> RAVEHoloScene? {
         guard let font = renderer?.font else { return nil }
         let dt = Float(min(0.1, max(0, time - (lastTime ?? time))))
         lastTime = time
 
         // HIDEHUD_* from the game (hud.h): 1 weapons, 2 flashlight, 4 all, 8 health.
-        let hideAll = s.has_suit == 0 || (s.hide_flags & 4) != 0 || s.intermission != 0
+        let hideAll = !readouts || s.has_suit == 0 || (s.hide_flags & 4) != 0 || s.intermission != 0
         if let last = lastHealth, s.health < last { hurtAt = time }
         lastHealth = Int(s.health)
 
@@ -135,7 +150,53 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             ammo(&panel, state: s, font: font)
             scene.panels.append(panel)
         }
+
+        if reticle != .off, s.intermission == 0, let aim {
+            reticlePanels(aim, style: reticle, head: head, into: &scene)
+        }
         return scene.panels.isEmpty ? nil : scene
+    }
+
+    /// Angular sizes of the reticle, degrees: the ring's outer diameter, its
+    /// line, the centre dot. Fixed angles, so it is as readable on a far wall
+    /// as on a crate at arm's length.
+    static let reticleRingDeg: Float = 0.9
+    static let reticleLineDeg: Float = 0.09
+    static let reticleDotDeg: Float = 0.22
+    /// How far the beam reaches when the trace hits nothing (metres).
+    static let beamMissLength: Float = 12
+
+    private func reticlePanels(_ aim: Aim, style: Reticle, head: SIMD3<Float>, into scene: inout RAVEHoloScene) {
+        if let d = aim.distance {
+            let hit = aim.muzzle + aim.direction * d
+            let range = simd_distance(head, hit)
+            func size(_ deg: Float) -> Float { 2 * range * tanf(deg * .pi / 360) }
+            var p = RAVEHoloPanel(transform: RAVEHoloPanel.facing(position: hit, viewer: head),
+                                  opacity: 1, seed: 2.9)
+            let ring = size(Self.reticleRingDeg), line = size(Self.reticleLineDeg), dot = size(Self.reticleDotDeg)
+            p.fill(x: -ring / 2, y: -ring / 2, width: ring, height: ring, corner: ring / 2,
+                   color: SIMD4(Self.backing.x, Self.backing.y, Self.backing.z, 0.25))
+            p.frame(x: -ring / 2, y: -ring / 2, width: ring, height: ring, corner: ring / 2, line: line,
+                    color: SIMD4(Self.amber, 0.9))
+            p.fill(x: -dot / 2, y: -dot / 2, width: dot, height: dot, corner: dot / 2,
+                   color: SIMD4(Self.amber, 1))
+            scene.panels.append(p)
+        }
+        guard style == .beam else { return }
+        // A ribbon along the ray, turned about it to face the eyes.
+        let length = aim.distance ?? Self.beamMissLength
+        let x = aim.direction
+        var z = head - aim.muzzle
+        z -= x * simd_dot(z, x)
+        guard simd_length(z) > 1e-4, length > 0.05 else { return }
+        z = simd_normalize(z)
+        let y = simd_cross(z, x)
+        let m = simd_float4x4(SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(aim.muzzle, 1))
+        var beam = RAVEHoloPanel(transform: m, opacity: aim.distance == nil ? 0.5 : 1, seed: 6.1)
+        let width: Float = 0.0012
+        beam.fill(x: 0, y: -width / 2, width: length, height: width, corner: width / 2,
+                  color: SIMD4(Self.amber, 0.28))
+        scene.panels.append(beam)
     }
 
     /// How far each panel stands off its anchor toward the eyes: past the

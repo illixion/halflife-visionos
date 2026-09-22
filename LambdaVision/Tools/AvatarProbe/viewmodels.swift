@@ -16,6 +16,8 @@ struct ProbeModel {
     var textureNames: [String]
     var restPose: [float4x4]
     var handBone: Int
+    /// (bone, bone-local position) per studio attachment; 0 is the muzzle.
+    var attachments: [(bone: Int, org: SIMD3<Float>)]
     /// (texture, three vertices as (bone-local position, bone))
     var triangles: [(texture: Int, v: [(SIMD3<Float>, Int)])]
 
@@ -53,8 +55,13 @@ struct ProbeModel {
                 i += 3
             }
         }
+        let attachments: [(bone: Int, org: SIMD3<Float>)] = withUnsafeBytes(of: &mesh.attachments) { raw in
+            let a = raw.bindMemory(to: lambda_weapon_attachment_t.self)
+            return (0..<Int(mesh.attachment_count)).map { (Int(a[$0].bone), SIMD3(a[$0].org.0, a[$0].org.1, a[$0].org.2)) }
+        }
         return ProbeModel(boneNames: names, parents: parents, textureNames: textures,
-                          restPose: rest, handBone: Int(mesh.hand_bone_index), triangles: tris)
+                          restPose: rest, handBone: Int(mesh.hand_bone_index), attachments: attachments,
+                          triangles: tris)
     }
 }
 
@@ -122,12 +129,58 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
             print(String(format: "  %-20@ cut %3d/%3d tris  grip: none%@", file, cut, vm.triangles.count, synthNote))
             continue
         }
-        let barrel = ViewmodelGrip.barrel(grip: grip, idlePalette: vm.restPose, handIsLeft: false)
-        let offFingers = acosf(max(-1, min(1, barrel.x))) * 180 / .pi
-        print(String(format: "  %-20@ cut %3d/%3d tris  grip %@%@  barrel in hand (%.2f %.2f %.2f), %.0f° off the fingers%@",
+        let valveBarrel = ViewmodelGrip.barrelInGrip(grip: grip, idlePalette: vm.restPose)
+        let offFingers = acosf(max(-1, min(1, valveBarrel.x))) * 180 / .pi
+        let hold = ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose)
+        let barrel = ViewmodelGrip.barrel(grip: grip, hold: hold, idlePalette: vm.restPose, handIsLeft: false)
+        let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
+            .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
+        let muzzle = ViewmodelGrip.muzzle(attachment: vm.attachments.first, idlePalette: vm.restPose,
+                                          gunPoints: gunPoints)
+        let muzzleInHand = muzzle.map { ViewmodelGrip.muzzleInHand($0, grip: grip, idlePalette: vm.restPose,
+                                                                   handIsLeft: false) }
+        print(String(format: "  %-20@ cut %3d/%3d tris  grip %@%@  Valve's hand %.0f° off the barrel → %@%@",
                      file, cut, vm.triangles.count, vm.boneNames[grip.bone],
-                     grip.fingerPrefix == nil ? " (synthesised)" : "", barrel.x, barrel.y, barrel.z, offFingers, synthNote))
+                     grip.fingerPrefix == nil ? " (synthesised)" : "", offFingers,
+                     hold == .aimed ? "aimed" : "held", synthNote))
+        if let m = muzzleInHand {
+            print(String(format: "      muzzle in hand (%.1f %.1f %.1f) units, from %@", m.x, m.y, m.z,
+                         vm.attachments.isEmpty ? "the front of the gun" : "attachment 0"))
+        }
+        // Guns must come out aimed with the muzzle ahead of the hand. Thrown
+        // and placed items may go either way: the split only matters where
+        // Valve's hand is far off +X (the classic grenade, 45°), and there
+        // they are held.
+        let stem = file.replacingOccurrences(of: ".mdl", with: "")
+        let guns: Set = ["v_357", "v_9mmar", "v_9mmhandgun", "v_crossbow", "v_egon", "v_gauss", "v_rpg", "v_shotgun"]
+        if guns.contains(stem) {
+            if hold != .aimed { die("\(file) is a gun but was not aimed") }
+            guard let m = muzzleInHand, m.x > 8, abs(m.y) < 6 else { die("\(file): muzzle not ahead of the hand") }
+        }
 
+        if CommandLine.arguments.contains("--measure") {
+            // Gun-only vertices in idle model space.
+            var pts: [SIMD3<Float>] = []
+            for tri in vm.triangles where !isHand(tri.texture, tri.v[0].1, tri.v[1].1, tri.v[2].1) {
+                for (p, b) in tri.v { pts.append((vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3) }
+            }
+            let mean = pts.reduce(.zero, +) / Float(max(1, pts.count))
+            var cov = simd_float3x3()
+            for p in pts { let d = p - mean; cov += simd_float3x3(columns: (d * d.x, d * d.y, d * d.z)) }
+            var axis = SIMD3<Float>(1, 0, 0)
+            for _ in 0..<64 { axis = simd_normalize(cov * axis) }
+            if axis.x < 0 { axis = -axis }
+            let gp = PoseSolver.translation(of: grip.frame(in: vm.restPose))
+            var line = String(format: "      PCA axis (%.2f %.2f %.2f) %.1f° from +X; grip at (%.1f %.1f %.1f)",
+                              axis.x, axis.y, axis.z, acosf(min(1, axis.x)) * 180 / .pi, gp.x, gp.y, gp.z)
+            for (i, a) in vm.attachments.enumerated() {
+                let w = (vm.restPose[a.bone] * SIMD4(a.org, 1)).xyz3
+                let d = simd_normalize(w - gp)
+                line += String(format: "\n      att%d %@ at (%.1f %.1f %.1f); grip→it (%.2f %.2f %.2f) yaw %.1f° pitch %.1f°", i, vm.boneNames[a.bone],
+                               w.x, w.y, w.z, d.x, d.y, d.z, atan2f(d.y, d.x) * 180 / .pi, asinf(d.z) * 180 / .pi)
+            }
+            print(line)
+        }
         guard let dumpDir else { continue }
         // Gordon's right arm holding the gun-only viewmodel, fingers curled
         // by the viewmodel's own idle grip.
@@ -137,7 +190,8 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
                                                   grip: grip, handIsLeft: false)
         let pose = rig.pose(t)
         let hand = rig.handMatrix(pose, left: false)!
-        let model = ViewmodelGrip.modelMatrix(hand: hand, grip: grip, palette: vm.restPose, handIsLeft: false)
+        let model = ViewmodelGrip.modelMatrix(hand: hand, grip: grip, hold: hold, palette: vm.restPose,
+                                              idlePalette: vm.restPose, handIsLeft: false)
         var lines = triLines(gordon, palette: pose.palette, transform: pose.root, label: "body") { _, bones in
             bones.allSatisfy { armBones.contains($0) }
         }

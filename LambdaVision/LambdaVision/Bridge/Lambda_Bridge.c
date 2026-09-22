@@ -2494,6 +2494,28 @@ static _Atomic int g_pending_use_yaw_cd;
 static _Atomic int g_pending_use_active;
 static _Atomic int g_pending_train_target = 99;  // VR_TRAIN_NO_TARGET
 
+// Muzzle origin: server copy in hlsdk dlls/player.cpp, client mirror in
+// cl_dll/view.cpp (neither intermediate link sees the other side's symbols).
+extern float g_vr_muzzle_offset[4];
+extern float g_vr_muzzle_offset_cl[4];
+extern float g_vr_aim_hit[2];
+static _Atomic int g_pending_muzzle_cu[3];
+static _Atomic int g_pending_muzzle_active;
+
+void lambda_set_muzzle(float fwd, float left, float up, int active) {
+    atomic_store(&g_pending_muzzle_cu[0], (int)lroundf(fwd * 100.0f));
+    atomic_store(&g_pending_muzzle_cu[1], (int)lroundf(left * 100.0f));
+    atomic_store(&g_pending_muzzle_cu[2], (int)lroundf(up * 100.0f));
+    atomic_store(&g_pending_muzzle_active, active);
+}
+
+int lambda_aim_hit(float *distance) {
+    float d = g_vr_aim_hit[0];
+    if (g_vr_aim_hit[1] <= 0.0f || !(d > 0.0f)) return 0;
+    *distance = d;
+    return 1;
+}
+
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg) {
     atomic_store(&g_pending_aim_pitch_cd, (int)lroundf(pitch_deg * 100.0f));
     atomic_store(&g_pending_aim_yaw_cd,   (int)lroundf(yaw_deg * 100.0f));
@@ -2526,6 +2548,14 @@ static void lambda_aim_offset_apply(void) {
     g_vr_aim_offset[1] = yaw;
     g_vr_aim_offset_cl[0] = pitch;
     g_vr_aim_offset_cl[1] = yaw;
+    for (int i = 0; i < 3; i++) {
+        float v = (float)atomic_load(&g_pending_muzzle_cu[i]) / 100.0f;
+        g_vr_muzzle_offset[i] = v;
+        g_vr_muzzle_offset_cl[i] = v;
+    }
+    float muzzleActive = atomic_load(&g_pending_muzzle_active) ? 1.0f : -1.0f;
+    g_vr_muzzle_offset[3] = muzzleActive;
+    g_vr_muzzle_offset_cl[3] = muzzleActive;
     // Immersive +use ray and train throttle, same publish cadence.
     g_vr_use_offset[0] = (float)atomic_load(&g_pending_use_pitch_cd) / 100.0f;
     g_vr_use_offset[1] = (float)atomic_load(&g_pending_use_yaw_cd) / 100.0f;

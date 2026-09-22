@@ -315,6 +315,19 @@ void lambda_add_view_yaw(float yaw_deg);
 // Thread-safe; latest value wins, applied on the GL worker each tick.
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
 
+// Where shots leave from: the muzzle of the gun in the hand, relative to the
+// engine's eye (the view origin before the headset's own translation), in
+// xash units in the level frame of the composed view yaw (x forward, y left,
+// z up). hlsdk's GetGunPosition and the client bullet events start there
+// unless a wall sits between the eye and the muzzle. active=0 fires from the
+// eye, as stock. Thread-safe; applied on the GL worker each tick.
+void lambda_set_muzzle(float fwd, float left, float up, int active);
+
+// How far the aim ray from the muzzle runs before it hits something (xash
+// units), traced by the client each refdef; returns 0 with no hit to show
+// (no muzzle, nothing within range, or the muzzle is behind a wall).
+int lambda_aim_hit(float *distance);
+
 // Immersive +use: while active, hlsdk's PlayerUse points its selection cone
 // along view+offset (the eye→fingertip ray; same conventions as the aim
 // offset) and prefers usable entities over train mounting. Pass active=0

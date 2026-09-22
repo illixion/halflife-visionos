@@ -128,6 +128,15 @@ typedef struct {
     int32_t  index;     // offset to palettized image data, relative to hdr base
 } mstudiotexture_t;
 
+typedef struct {
+    char    name[32];
+    int32_t type;
+    int32_t bone;
+    float   org[3];
+    float   vectors[3][3];
+} mstudioattachment_t;
+
+_Static_assert(sizeof(mstudioattachment_t) == 88, "mstudioattachment_t layout");
 _Static_assert(sizeof(studiohdr_t) == 244,        "studiohdr_t layout");
 _Static_assert(sizeof(mstudiobone_t) == 112,      "mstudiobone_t layout");
 _Static_assert(sizeof(mstudioseqdesc_t) == 176,   "mstudioseqdesc_t layout");
@@ -235,6 +244,8 @@ typedef struct {
     uint8_t                 *texdata;   size_t   texbytes;  // packed RGBA blobs
     lambda_weapon_bone_t    *bones;     uint32_t bcount, bcap;
     int   hand_bone_index;
+    uint32_t acount;
+    lambda_weapon_attachment_t attachments[LAMBDA_WEAPON_MAX_ATTACHMENTS];
     float bbmin[3], bbmax[3];
     int   modelindex;
     uint32_t generation;
@@ -342,6 +353,7 @@ static void snapshot_reset(snapshot_t *s) {
     s->vcount = s->icount = s->scount = s->tcount = s->bcount = 0;
     s->texbytes = 0;
     s->hand_bone_index = -1;
+    s->acount = 0;
     s->bbmin[0] = s->bbmin[1] = s->bbmin[2] =  1e30f;
     s->bbmax[0] = s->bbmax[1] = s->bbmax[2] = -1e30f;
 }
@@ -780,6 +792,14 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     s->bcount = (uint32_t)hdr->numbones;
     s->hand_bone_index = choose_grip_bone(base, hdr, body);
 
+    const mstudioattachment_t *pa = (const mstudioattachment_t *)(base + hdr->attachmentindex);
+    for (int i = 0; i < hdr->numattachments && s->acount < LAMBDA_WEAPON_MAX_ATTACHMENTS; i++) {
+        if (pa[i].bone < 0 || pa[i].bone >= hdr->numbones) continue;
+        lambda_weapon_attachment_t *a = &s->attachments[s->acount++];
+        a->bone = pa[i].bone;
+        memcpy(a->org, pa[i].org, sizeof(a->org));
+    }
+
     const int16_t *pskinref = (const int16_t *)(base + hdr->skinindex);
     const mstudiotexture_t *ptex = (const mstudiotexture_t *)(base + hdr->textureindex);
     const mstudiobodyparts_t *bp = (const mstudiobodyparts_t *)(base + hdr->bodypartindex);
@@ -919,6 +939,8 @@ static uint32_t slot_lock(model_slot_t *slot, lambda_weapon_mesh_t *out) {
     out->texture_count= s->tcount;   out->textures  = s->textures;
     out->bone_count   = s->bcount;   out->bones     = s->bones;
     out->hand_bone_index = s->hand_bone_index;
+    out->attachment_count = s->acount;
+    memcpy(out->attachments, s->attachments, sizeof(out->attachments));
     memcpy(out->bbmin, s->bbmin, sizeof(out->bbmin));
     memcpy(out->bbmax, s->bbmax, sizeof(out->bbmax));
     out->modelindex = s->modelindex;
