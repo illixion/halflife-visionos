@@ -327,6 +327,7 @@ actor Renderer {
         var nRecenter = 0         // head-baseline re-anchors (resume / origin jump)
         var swingEngaged = false  // arm-swing walking owns movement (and the gun hand)
         var swingSupport = "none" // what holds it: both / fist / pattern / grace / none
+        var swingArms = "—"       // which arms are swinging: LR / L / R / —
         var swingSpeed01: Float = 0   // smoothed swing deflection, 0..1
         var swingHandSpeed: Float = 0 // stroke-speed envelope, m/s
         var offHandFist = false   // off hand is a fist (gun hand stands down)
@@ -361,8 +362,8 @@ actor Renderer {
                    d.moveClutch ? "on" : "off", d.joyX, d.joyY, d.moveVert),
             String(format: "move dbg: hand %@  pinchDist %.3f  fist %d  recenter %d",
                    d.moveHandSeen ? "seen" : "—", d.pinchDist, d.fistCount, d.nRecenter),
-            String(format: "swing: %@ (%@)  speed %.2f  stroke %.2f m/s  offFist %@  gun %@",
-                   d.swingEngaged ? "ON" : "off", d.swingSupport, d.swingSpeed01,
+            String(format: "swing: %@ %@ (%@)  speed %.2f  stroke %.2f m/s  offFist %@  gun %@",
+                   d.swingEngaged ? "ON" : "off", d.swingArms, d.swingSupport, d.swingSpeed01,
                    d.swingHandSpeed, d.offHandFist ? "Y" : "N", d.gunBusy ? "held" : "free"),
             String(format: "ground speed: %.0f u/s", d.groundSpeed),
         ]
@@ -1688,10 +1689,11 @@ actor Renderer {
             // from the engagement point arms a sector (12 o'clock = slot1,
             // clockwise); releasing the pinch commits it, releasing inside
             // the deadzone or losing the hand cancels.
-            // Arm-swing walking goes first: while the fists are pumping, the
-            // gun hand belongs to the swing, and the wheel, trigger and reload
-            // below must stand down (a fist is an index curl and a thumb curl
-            // at once). HandMovement.poll drives the movement itself, later.
+            // Arm-swing walking goes first: while the gun hand is pumping, it
+            // belongs to the swing, and the wheel, trigger and reload below
+            // must stand down (a fist is an index curl and a thumb curl at
+            // once). Pointing it leaves the swing to the off arm and frees
+            // it. HandMovement.poll drives the movement itself, later.
             var gunHandBusy = false
             if let da = frameDeviceAnchor {
                 let hm = da.originFromAnchorTransform

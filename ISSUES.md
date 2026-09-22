@@ -32,9 +32,11 @@ instead of deleting them.
   pattern engage it, and the stroke-speed envelope maps 0.4–2.0 m/s onto
   0–1. Every constant is a host-test starting point, not a measured one;
   read the `swing:` and `ground speed:` diagnostics lines while jogging in
-  place. A fist on the off hand also stands the gun hand down (the entry
-  into a swing would otherwise fire), so resting that hand clenched blocks
-  fire. Watch for that.
+  place. Before a run starts, a fist on the off hand also stands the gun
+  hand down (the entry into a swing would otherwise fire), so resting that
+  hand clenched blocks fire. Once running, pointing the gun hand frees it
+  and the off arm carries the run; watch that sweeping the aim while firing
+  never reads as a rejoin (`rejoinHold` 0.3 s).
 - **Shell casings eject off-axis** relative to the aim ray (client event
   shell math uses its own attachment angles). Cosmetic.
 - **Gaze ray freezes during a held pinch** — visionOS only updates

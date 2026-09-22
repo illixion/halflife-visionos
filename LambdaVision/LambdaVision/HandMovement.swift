@@ -34,9 +34,12 @@
 //    joy axes with the pinch joystick and never changes what full deflection
 //    means, so both reach exactly stock run speed. A fist can't pinch (the
 //    pinch detector suppresses fists), which is what lets the two live side
-//    by side: a held pinch clutch always wins and resets the swinger. While
-//    swinging, the gun hand's gestures are suppressed — a fist IS an index
-//    curl — see `gunHandBusy(now:)`.
+//    by side: a held pinch clutch always wins and resets the swinger. Both
+//    fists start a run, but once moving either arm carries it: point the
+//    gun hand (finger gun) and it leaves the swing to aim and fire while
+//    the off arm keeps running. The gun hand's gestures are suppressed only
+//    while it is itself swinging — a fist IS an index curl — see
+//    `gunHandBusy(now:)`.
 //
 //  Runs once per frame on the render thread (like GamepadInput), gated by
 //  the "Immersive gesture input" setting via Renderer.gestureInputEnabled.
@@ -164,14 +167,17 @@ nonisolated final class HandMovement {
     }
 
     /// Whether the gun hand belongs to the swing this frame: fire, reload and
-    /// the weapon wheel must stand down. True while the swing is engaged,
-    /// for a short holdoff after it lets go, and — because the swing needs
-    /// both fists before it can engage, and the gun hand's index curls on
-    /// the way into a fist — while the off hand is already a fist, so the
-    /// entry into a swing never fires. Nothing else uses an off-hand fist.
+    /// the weapon wheel must stand down. True while the gun hand is itself
+    /// swinging, and for a short holdoff after it leaves. Before a run
+    /// starts, also while the off hand is already a fist: the swing needs
+    /// both fists to engage, and the gun hand's index curls on the way into
+    /// one, so this keeps the entry into a swing from firing. Once running,
+    /// the off-hand fist no longer counts — it may be carrying the run alone
+    /// while the gun hand aims.
     func gunHandBusy(now: TimeInterval) -> Bool {
         guard HandMovement.armSwingEnabled else { return false }
-        if swing.engaged || offHandFist {
+        let gunSwinging = Renderer.dominantHandIsLeft ? swing.leftSwinging : swing.rightSwinging
+        if swing.engaged ? gunSwinging : offHandFist {
             gunBusyUntil = now + HandMovement.swingFireHoldoff
             return true
         }
@@ -181,6 +187,7 @@ nonisolated final class HandMovement {
     private func publishSwingDiag() {
         Renderer.aimDiag.swingEngaged = swing.engaged
         Renderer.aimDiag.swingSupport = swing.support.rawValue
+        Renderer.aimDiag.swingArms = (swing.leftSwinging ? "L" : "") + (swing.rightSwinging ? "R" : "")
         Renderer.aimDiag.swingSpeed01 = swing.speed01
         Renderer.aimDiag.swingHandSpeed = swing.handSpeed
         Renderer.aimDiag.offHandFist = offHandFist
