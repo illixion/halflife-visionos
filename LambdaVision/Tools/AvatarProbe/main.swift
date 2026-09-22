@@ -644,6 +644,13 @@ do {
         .deletingLastPathComponent.appending("/..")
     let dump = CommandLine.arguments.contains("--grips") ? FileManager.default.currentDirectoryPath : nil
     runViewmodelChecks(rig: rig, gordon: gordon, modelsDir: models, dumpDir: dump)
+    // The HD pack's viewmodels, when the game data has them: a different
+    // rig (UpperArm/Forearm/L_Arm_bone) and different hand textures.
+    let hd = (models as NSString).deletingLastPathComponent
+        .replacingOccurrences(of: "/valve/models/player", with: "/valve_hd/models")
+    if FileManager.default.fileExists(atPath: hd) {
+        runViewmodelChecks(rig: rig, gordon: gordon, modelsDir: hd, dumpDir: dump.map { $0 + "/hd" })
+    }
     if let dump { print("wrote grip_*.tri to \(dump) (render with render_tri.py)") }
 }
 

@@ -30,8 +30,9 @@ enum ViewmodelGrip {
     /// slide, the crowbar and the shotgun receiver straight to `Bip01 R Hand`.
     /// Textures can — every stock hand is drawn with the same small family
     /// (`rubbergloveCHROME`, `GLOVED_knuckle`, `GLOVE_handpak`,
-    /// `GLOVED_sleeve`, `xbow_sleeve`, `HAND_ForeArm1`, and the MP5's
-    /// `PLAYER_*` set), and no gun texture uses those words.
+    /// `GLOVED_sleeve`, `xbow_sleeve`, `HAND_ForeArm1`, the MP5's `PLAYER_*`
+    /// set, and the HD pack's `gordon_glove` / `gordon_sleeve`), and no gun
+    /// texture uses those words.
     static func isHandTexture(_ name: String) -> Bool {
         let n = name.lowercased()
         return n.hasPrefix("player_")
@@ -39,11 +40,19 @@ enum ViewmodelGrip {
     }
 
     /// Whether a bone belongs to an arm: clavicle, upper arm, forearm, hand
-    /// or finger, whatever the rig's prefix (`Bip01`, `Xbow biped`, …).
+    /// or finger, whatever the rig's prefix or naming (`Bip01 L Arm1`,
+    /// `Xbow biped R Hand`, and the HD pack's `Bip01 L UpperArm`,
+    /// `Bip01 L Forearm` and `L_Arm_bone`, which carries its sleeve).
+    ///
+    /// Judged by whole name tokens, split on spaces and underscores, not by
+    /// substring: the crossbow's bow limbs are `LeftArm`/`RightArm`, and are
+    /// drawn with the glove texture too.
     static func isArmBone(_ name: String) -> Bool {
-        let n = name.lowercased()
-        return n.contains(" arm") || n.hasSuffix(" hand") || n.contains(" hand ")
-            || n.contains("finger") || n.contains("clavicle")
+        let tokens = name.lowercased().split(whereSeparator: { $0 == " " || $0 == "_" })
+        return tokens.contains { t in
+            ["arm", "arm1", "arm2", "upperarm", "forearm", "hand", "clavicle"].contains(String(t))
+                || t.hasPrefix("finger")
+        }
     }
 
     /// A predicate for StudioMesh: true for a triangle that is part of the
