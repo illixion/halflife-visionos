@@ -27,6 +27,7 @@ struct WeaponInOut
     float4 position [[position]];
     float3 normal;
     float2 texCoord;
+    float3 worldPos;
     ushort eye;
 };
 
@@ -42,6 +43,7 @@ vertex WeaponInOut weaponVertexShader(WeaponVertex in [[stage_in]],
     float4x4 m = u.modelMatrix * pal.bones[min(in.bone, uint(WEAPON_MAX_BONES - 1))];
     float4 world = m * float4(in.position, 1.0);
     out.position = vp.viewProjectionMatrix[amp_id] * world;
+    out.worldPos = world.xyz;
     // Both factors are rotation (+ uniform scale in modelMatrix), so the
     // upper 3x3 rotates normals correctly (no inverse-transpose needed).
     out.normal = (m * float4(in.normal, 0.0)).xyz;
@@ -83,6 +85,12 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
 
     // Masked textures (STUDIO_NF_MASKED) use alpha as a 1-bit cutout.
     if (u.renderFlags.x > 0.5 && c.a < 0.5)
+        discard_fragment();
+
+    // Near clip (the player body): nothing closer to this eye than the
+    // radius is drawn, so the camera never shows a surface sliced open by
+    // the near plane or a collar a centimetre from the lens.
+    if (u.renderFlags.z > 0.0 && distance(in.worldPos, u.eyePos[in.eye].xyz) < u.renderFlags.z)
         discard_fragment();
 
     float3 n = normalize(in.normal);

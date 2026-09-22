@@ -63,6 +63,12 @@ struct AvatarRig {
     let leftArm: Arm?
     let rightArm: Arm?
 
+    /// Torso vertices (bone, bone-local position) the eye must keep clear
+    /// of: pelvis, spine, neck and clavicles — everything that rides with
+    /// the root and can end up in front of a camera looking down. Arms and
+    /// hands are left out on purpose; bringing a hand to the face is the
+    /// player's choice and must not shove the body around.
+    let clearanceVertices: [(bone: Int, position: SIMD3<Float>)]
 
     /// Where the head bone sits in the rest pose. The eyes, which the avatar
     /// actually hangs from, are `Targets.eyeOffset` forward and up of here.
@@ -113,6 +119,15 @@ struct AvatarRig {
             parents.append(bone.parent >= 0 ? Int(bone.parent) : nil)
         }
 
+        var clearance: [(bone: Int, position: SIMD3<Float>)] = []
+        if let verts = mesh.vertices {
+            let torso = Set(names.indices.filter { AvatarRig.isTorsoBone(names[$0]) })
+            for i in 0..<Int(mesh.vertex_count) where torso.contains(Int(verts[i].bone)) {
+                let v = verts[i]
+                clearance.append((Int(v.bone), SIMD3(v.pos.0, v.pos.1, v.pos.2)))
+            }
+        }
+
         var pose = lambda_weapon_pose_t()
         guard lambda_body_copy_pose(&pose) != 0 else { throw LoadError.noModel }
         let count = min(names.count, Int(pose.bone_count))
@@ -123,13 +138,21 @@ struct AvatarRig {
             }
         }
 
-        try self.init(boneNames: names, parents: parents, restModel: model)
+        try self.init(boneNames: names, parents: parents, restModel: model, clearance: clearance)
+    }
+
+    /// The bones whose vertices the eye keeps clear of (`clearanceVertices`).
+    static func isTorsoBone(_ name: String) -> Bool {
+        name == "Bip01 Pelvis" || name.hasPrefix("Bip01 Spine") || name == "Bip01 Neck"
+            || name == "Bip01 L Arm" || name == "Bip01 R Arm"
     }
 
     /// The real initialiser, taking plain values so it can be exercised
     /// without the engine or a model file.
-    init(boneNames: [String], parents: [Int?], restModel: [float4x4]) throws {
+    init(boneNames: [String], parents: [Int?], restModel: [float4x4],
+         clearance: [(bone: Int, position: SIMD3<Float>)] = []) throws {
         precondition(boneNames.count == parents.count && boneNames.count == restModel.count)
+        self.clearanceVertices = clearance
         self.boneNames = boneNames
         self.parents = parents
         self.restModel = restModel
@@ -234,7 +257,20 @@ struct AvatarRig {
         var root: float4x4
         var left: PoseSolver.Report?
         var right: PoseSolver.Report?
+        /// How far the body was stepped back to keep the torso clear of the
+        /// eye, units. Zero whenever the player is not looking down.
+        var stepBack: Float = 0
     }
+
+    /// How close the torso may come to the eye, units (12 cm — outside a
+    /// typical 10 cm near plane, so nothing is sliced open). A camera
+    /// pitched down pivots forward and down about the neck and would
+    /// otherwise end up level with the collar, and inside the chest of a
+    /// player built deeper than Gordon; the rig steps the body back instead,
+    /// which is what a person looking at their own feet does anyway. Level
+    /// gaze keeps well clear of it: on gordon.mdl the nearest torso vertex is
+    /// 20 cm off level and 12 cm at 51° down, so the step starts near 50°.
+    static let eyeClearance: Float = 4.7
 
     /// Where the eyes sit relative to the head bone, in the rest facing
     /// (forward, left, up; GoldSrc units). Measured on gordon.mdl: the head
@@ -343,6 +379,9 @@ struct AvatarRig {
         let eyeModel = (model[head] * SIMD4<Float>(eyeLocal, 1)).xyz
         var root = float4x4(yaw)
         root.columns.3 = SIMD4<Float>(targets.headPosition - yaw.act(eyeModel), 1)
+        let stepBack = clearance(root: root, model: model, eye: targets.headPosition,
+                                 forward: yaw.act(SIMD3<Float>(1, 0, 0)))
+        root.columns.3 -= SIMD4<Float>(yaw.act(SIMD3<Float>(stepBack, 0, 0)), 0)
         let toModel = root.inverse
 
         // The pole is the side the elbow bends toward, and it has to be a
@@ -421,7 +460,31 @@ struct AvatarRig {
         // off them — the fingers below each hand — are stale. One clean pass
         // is cheaper than reasoning about which ones moved.
         return Pose(palette: solver.modelMatrices(of: joints), root: root,
-                    left: left, right: right)
+                    left: left, right: right, stepBack: stepBack)
+    }
+
+    /// How far back along `forward` the body must move so no torso vertex is
+    /// nearer the eye than `eyeClearance`.
+    ///
+    /// Per vertex this is exact: moving the body back by δ puts the vertex at
+    /// d − δ·f from the eye, which leaves the clearance sphere at
+    /// δ = d·f + √(r² − |d⊥|²), and a vertex whose |d⊥| is already r or more
+    /// never enters it. The largest δ over the torso is the step. Only ever
+    /// backward: forward is where the player is looking, and the body should
+    /// yield out of the view, not into it.
+    private func clearance(root: float4x4, model: [float4x4], eye: SIMD3<Float>,
+                           forward f: SIMD3<Float>) -> Float {
+        let r2 = AvatarRig.eyeClearance * AvatarRig.eyeClearance
+        var step: Float = 0
+        for (bone, local) in clearanceVertices where bone < model.count {
+            let w = root * model[bone] * SIMD4<Float>(local, 1)
+            let d = SIMD3<Float>(w.x, w.y, w.z) - eye
+            let along = simd_dot(d, f)
+            let across2 = simd_length_squared(d) - along * along
+            guard across2 < r2 else { continue }
+            step = max(step, along + (r2 - across2).squareRoot())
+        }
+        return step
     }
 
     /// Poses a hand's fingers from rotations relative to the hand.

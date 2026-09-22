@@ -168,6 +168,30 @@ do {
     if abs(levelDelta.angle) > 1e-3 { die("a level head rotated the head bone by \(levelDelta.angle) rad") }
 }
 
+// MARK: - Looking down: the torso yields, never into the view
+
+do {
+    print("\nlooking down (\(rig.clearanceVertices.count) torso vertices, clearance \(AvatarRig.eyeClearance) units):")
+    let target = SIMD3<Float>(0, 0, 64)
+    var levelStep: Float = -1
+    for deg in stride(from: Float(0), through: 85, by: 17) {
+        let a = deg * .pi / 180
+        let fwd = SIMD3<Float>(cosf(a), 0, -sinf(a)), up = SIMD3<Float>(sinf(a), 0, cosf(a))
+        let pose = rig.pose(AvatarRig.Targets(headPosition: target, bodyYaw: 0, leftHand: nil, rightHand: nil,
+                                              headRotation: AvatarRig.headRotation(forward: fwd, up: up)))
+        var nearest = Float.infinity
+        for (bone, local) in rig.clearanceVertices {
+            let w = pose.root * pose.palette[bone] * SIMD4<Float>(local, 1)
+            nearest = min(nearest, simd_distance(SIMD3(w.x, w.y, w.z), target))
+        }
+        print(String(format: "  pitch %2.0f°: stepped back %.2f units (%.1f cm), nearest torso vertex %.2f units (%.1f cm)",
+                     deg, pose.stepBack, pose.stepBack * 2.54, nearest, nearest * 2.54))
+        if deg == 0 { levelStep = pose.stepBack }
+        if nearest < AvatarRig.eyeClearance - 1e-3 { die("the torso is inside the eye clearance at \(deg)°") }
+    }
+    if levelStep > 1e-4 { die("a level gaze stepped the body back") }
+}
+
 // MARK: - Wrists: the tracked frame lands on the bone, the rest frame is a no-op
 
 do {

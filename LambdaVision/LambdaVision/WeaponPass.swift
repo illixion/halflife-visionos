@@ -61,6 +61,11 @@ final class WeaponPass {
         var rightHand: float4x4?
     }
 
+    /// How close to an eye the body may be drawn, metres. Anything nearer is
+    /// discarded rather than shown sliced open by the near plane — the last
+    /// line of defence behind back-face culling and the rig's own clearance.
+    static let bodyNearClip: Float = 0.09
+
     private let device: MTLDevice
     private let pipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
@@ -386,17 +391,33 @@ final class WeaponPass {
         if drawingSkinned {
             enc.setRenderPipelineState(pipeline)
             enc.setDepthStencilState(depthState)
-            enc.setCullMode(.none)   // GoldSrc winding varies; cull nothing for now
         }
 
         // Body first, weapon second: both write depth, so order only matters
         // for the ordering of overdraw, and the body is the larger of the two.
+        //
+        // The body is back-face culled. Its camera sits in the neck, so the
+        // open collar and anything the near plane slices are seen from the
+        // inside, and those faces all face away — culled, they vanish instead
+        // of reading as the inside of a torso. GoldSrc winds outward faces
+        // clockwise (measured: 355 of 356 single-bone triangles of
+        // gordon.mdl, and every stock viewmodel alike — the reason the engine
+        // culls GL_FRONT), and Metal judges winding in NDC as GL does.
         if let body {
+            enc.setCullMode(.back)
+            enc.setFrontFacing(.clockwise)
             let bu = bodyBuffers.uniforms[uniformBufferIndex]
-            writeUniforms(mesh: body.mesh, model: body.model, shading: shading, into: bu)
+            writeUniforms(mesh: body.mesh, model: body.model, shading: shading, into: bu,
+                          nearClip: WeaponPass.bodyNearClip)
             drawSkinned(enc, mesh: body.mesh, palette: body.palette,
                         uniforms: bu, bones: bodyBuffers.bones[uniformBufferIndex])
         }
+        // The gun is not culled: GoldSrc itself never enabled face culling
+        // for studio models (a long-standing engine quirk xash reproduces),
+        // so thin single-sided parts — the crossbow string — rely on being
+        // drawn from both sides. It also means a mirrored grip needs no
+        // winding flip.
+        enc.setCullMode(.none)
         if drawWeapon, let mesh {
             drawSkinned(enc, mesh: mesh, palette: palette,
                         uniforms: ub, bones: weaponBuffers.bones[uniformBufferIndex])
@@ -433,7 +454,7 @@ final class WeaponPass {
     /// per-submesh state, and rebinding the address per draw is cheaper than
     /// splitting the pipeline. With no mesh, slot 0 alone is written.
     private func writeUniforms(mesh: StudioMesh?, model: float4x4, shading s: Shading,
-                               into buffer: MTLBuffer) {
+                               into buffer: MTLBuffer, nearClip: Float = 0) {
         let slotStride = Int(WEAPON_UNIFORM_STRIDE)
         let count = min(mesh?.submeshes.count ?? 0, Int(WEAPON_MAX_SUBMESHES))
         for k in 0..<max(count, 1) {
@@ -447,7 +468,7 @@ final class WeaponPass {
                 eyeRight: (SIMD4(s.right0, 0), SIMD4(s.right1, 0)),
                 renderFlags: SIMD4((flags & StudioMesh.studioMasked) != 0 ? 1 : 0,
                                    (flags & StudioMesh.studioChrome) != 0 ? 1 : 0,
-                                   0, 0))
+                                   nearClip, 0))
             memcpy(buffer.contents() + k * slotStride, &u, MemoryLayout<WeaponUniforms>.size)
         }
     }

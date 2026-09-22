@@ -134,8 +134,15 @@ instead of deleting them.
   synthesised Bip01 frame from its gloved finger chains (within 11–20° of the
   real frame on every Bip01 hand it was checked against). The wireframe arms
   are not drawn while the body is. The probe (`--grips`) renders Gordon's arm
-  holding every viewmodel. Not yet on device: the eye offset, and whether the
-  grip reads right in the hand.
+  holding every viewmodel. Looking down no longer shows the inside of the
+  body: it is back-face culled (GoldSrc winds outward faces clockwise —
+  measured on gordon.mdl and every viewmodel; the gun stays unculled, since
+  GoldSrc never actually culled studio models and thin parts rely on it),
+  fragments within 9 cm of an eye are discarded, and past ~50° of pitch the
+  rig steps the body back just far enough to keep every torso vertex 12 cm
+  from the eye (exact per vertex; level gaze is 20 cm clear and moves
+  nothing). Not yet on device: the eye offset, and whether the grip reads
+  right in the hand.
   - Gotcha found on the way: the pose the body slot publishes is sequence 0
     frame 0, not the studio bind pose — origin at the pelvis, one arm already
     raised, and rotated 90° from the bind pose. That is harmless, because
