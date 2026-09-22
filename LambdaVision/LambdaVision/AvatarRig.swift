@@ -251,6 +251,12 @@ struct AvatarRig {
         /// nil leaves the hand in its rest orientation on the forearm.
         var leftHandRotation: simd_quatf? = nil
         var rightHandRotation: simd_quatf? = nil
+        /// Tracked elbows. ARKit's hand skeleton carries the forearm, so the
+        /// elbow's position is known, not guessed: the bend plane goes
+        /// through it and the bend lands on its side. nil falls back to a
+        /// pole that puts the elbow where elbows usually are.
+        var leftElbow: SIMD3<Float>? = nil
+        var rightElbow: SIMD3<Float>? = nil
         var eyeOffset: SIMD3<Float> = AvatarRig.defaultEyeOffset
     }
 
@@ -352,7 +358,7 @@ struct AvatarRig {
         }
 
         func solve(_ arm: Arm?, _ worldTarget: SIMD3<Float>?, _ worldRotation: simd_quatf?,
-                   side: Float) -> PoseSolver.Report? {
+                   _ worldElbow: SIMD3<Float>?, side: Float) -> PoseSolver.Report? {
             guard let arm else { return nil }
             let target: SIMD3<Float>
             let rotation: simd_quatf?
@@ -362,11 +368,21 @@ struct AvatarRig {
             } else {
                 (target, rotation) = relaxed(arm, side: side)
             }
+            // The pole: shoulder → tracked elbow when there is one, so the
+            // bend plane holds the real elbow and the bend lands on its side
+            // (the solver drops the component along the shoulder–hand line
+            // itself). Otherwise the synthetic down-back-out direction.
+            var poleModel = (toModel * SIMD4<Float>(pole(side: side), 0)).xyz
+            if worldTarget != nil, let worldElbow {
+                let shoulder = PoseSolver.translation(of: model[arm.chain.joints[0]])
+                let toElbow = (toModel * SIMD4<Float>(worldElbow, 1)).xyz - shoulder
+                if simd_length(toElbow) > 1e-3 { poleModel = simd_normalize(toElbow) }
+            }
             // bendTowardPole: the seed is one frozen frame of sequence 0,
             // whose elbows sit wherever that frame left them (the right one
             // raised). Only the pole knows which side the bend belongs on.
             let report = solver.solve(chain: arm.chain, target: target,
-                                      pole: (toModel * SIMD4<Float>(pole(side: side), 0)).xyz,
+                                      pole: poleModel,
                                       bendTowardPole: true,
                                       iterations: iterations,
                                       pose: &joints, model: &model)
@@ -378,8 +394,8 @@ struct AvatarRig {
             }
             return report
         }
-        let left = solve(leftArm, targets.leftHand, targets.leftHandRotation, side: 1)
-        let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, side: -1)
+        let left = solve(leftArm, targets.leftHand, targets.leftHandRotation, targets.leftElbow, side: 1)
+        let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, targets.rightElbow, side: -1)
 
         // The chains wrote their own matrices as they went, but joints hanging
         // off them — the fingers below each hand — are stale. One clean pass

@@ -407,6 +407,36 @@ do {
     }
 }
 
+// MARK: - A tracked elbow overrides the guess
+
+do {
+    let eye = SIMD3<Float>(0, 0, 64)
+    let base = rig.pose(AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil))
+    for (label, arm, side) in [("L", rig.leftArm!, Float(1)), ("R", rig.rightArm!, Float(-1))] {
+        let sh = PoseSolver.translation(of: base.root * base.palette[arm.chain.joints[0]])
+        let hand = sh + SIMD3<Float>(14, 0, 0)
+        // Deliberately unnatural: the real elbow held UP and inward, the
+        // opposite of where the synthetic pole would put it. The tracked
+        // elbow must win, and its distance from the line is the rig's, not
+        // the player's — a hint about direction, not a position to copy.
+        let elbowHint = sh + SIMD3<Float>(7, -3 * side, 6)
+        var t = AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil)
+        if label == "L" { t.leftHand = hand; t.leftElbow = elbowHint } else { t.rightHand = hand; t.rightElbow = elbowHint }
+        let p = rig.pose(t)
+        let j = arm.chain.joints.map { PoseSolver.translation(of: p.root * p.palette[$0]) }
+        let e = j[1] - (j[0] + j[2]) / 2
+        let handErr = simd_distance(j[2], hand)
+        print(String(format: "%@ elbow hinted up-inward: elbow off-line fwd %+.2f out %+.2f up %+.2f, hand err %.4f", label, e.x, e.y * side, e.z, handErr))
+        if e.z < 2 || e.y * side > 0 { die("the tracked elbow did not take the bend with it") }
+        if handErr > 0.05 { die("the elbow hint moved the hand") }
+        // Segment lengths still the rig's own.
+        let rest = arm.chain.joints.map { PoseSolver.translation(of: rig.restModel[$0]) }
+        for k in 0..<2 where abs(simd_distance(j[k], j[k + 1]) - simd_distance(rest[k], rest[k + 1])) > 1e-2 {
+            die("the elbow hint stretched the arm")
+        }
+    }
+}
+
 // MARK: - A posed body, for eyes
 
 if dumpOBJ {

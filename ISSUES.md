@@ -122,7 +122,11 @@ instead of deleting them.
   `bendTowardPole` option; and the pole itself was mostly *back*, nearly
   anti-parallel to any hand held forward, so the plane tilted sideways. It is
   now mostly down with a little back and outward, and the probe asserts the
-  elbow's side for six hand positions per arm. Settings > Input >
+  elbow's side for six hand positions per arm. Second look: still not the
+  player's elbow — because it was still a guess. ARKit's hand skeleton carries
+  the forearm (`.forearmArm` is the elbow end; the wireframe already drew it),
+  so the rig now takes the tracked elbow as the pole direction and the
+  synthetic pole is only the fallback for an untracked hand. Settings > Input >
   "First-person body" is the arms-only fallback
   (`Renderer.avatarLegsVisible` shows the legs; no UI yet). Not yet on device:
   the eye offset, the cull mode (none, like the weapon), the wireframe hands

@@ -631,21 +631,22 @@ actor Renderer {
         var targets = AvatarRig.Targets(headPosition: eye, bodyYaw: yaw, leftHand: nil, rightHand: nil,
                                         headRotation: AvatarRig.headRotation(forward: fwd, up: up))
         if let l = avatarWrist(handTracking.latestAnchors.leftHand, left: true) {
-            targets.leftHand = l.position; targets.leftHandRotation = l.rotation
+            targets.leftHand = l.position; targets.leftHandRotation = l.rotation; targets.leftElbow = l.elbow
         }
         if let r = avatarWrist(handTracking.latestAnchors.rightHand, left: false) {
-            targets.rightHand = r.position; targets.rightHandRotation = r.rotation
+            targets.rightHand = r.position; targets.rightHandRotation = r.rotation; targets.rightElbow = r.elbow
         }
         let pose = rig.pose(targets)
         return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root)
     }
 
-    /// A tracked wrist as the rig wants it: position in GoldSrc world plus the
+    /// A tracked arm as the rig wants it, in GoldSrc world: the wrist, the
     /// wrist rotation built from where the fingers point and the back of the
     /// hand — the same two axes the weapon grip uses, so the body's hand and
-    /// the gun agree on which way the hand faces.
+    /// the gun agree on which way the hand faces — and the elbow, which
+    /// ARKit's hand skeleton carries as the far end of the forearm.
     private func avatarWrist(_ hand: HandAnchor?, left: Bool)
-        -> (position: SIMD3<Float>, rotation: simd_quatf)? {
+        -> (position: SIMD3<Float>, rotation: simd_quatf, elbow: SIMD3<Float>)? {
         guard handTracking.state == .running, let hand, hand.isTracked,
               let skel = hand.handSkeleton else { return nil }
         let handT = hand.originFromAnchorTransform
@@ -661,7 +662,8 @@ actor Renderer {
         let across = simd_normalize(left ? -acrossRaw : acrossRaw)
         let back = simd_normalize(simd_cross(across, fwd))
         return (studioPoint(wrist),
-                AvatarRig.handRotation(forward: studioDirection(fwd), back: studioDirection(back)))
+                AvatarRig.handRotation(forward: studioDirection(fwd), back: studioDirection(back)),
+                studioPoint(worldPos(.forearmArm)))
     }
 
     /// Flat [pos.xyz, color.rgba] x N array (world space, metres) for every
