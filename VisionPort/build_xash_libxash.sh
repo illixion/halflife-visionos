@@ -203,6 +203,9 @@ printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
 # Player floor/onground/velocity (view.cpp), read by Lambda_WeaponModel.c for
 # the first-person body's legs.
 printf '_g_vr_body_state\n' >> "$HLSDK_CL_EXPORTS"
+# Native HUD (hud_redraw.cpp): the stock-readout switch the bridge writes and
+# the health/ammo state the Metal HUD reads.
+printf '_g_vr_hud_native\n_g_vr_hud_state\n' >> "$HLSDK_CL_EXPORTS"
 
 # IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent collide three ways:
 # (a) engine's input.c defines them (used by SDL hosts we don't compile,

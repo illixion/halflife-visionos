@@ -11,6 +11,7 @@ import MetalFX
 import MetalKit
 import QuartzCore
 import RAVEDiagnostics
+import RAVEHolo
 import RAVEInput
 import simd
 
@@ -158,6 +159,9 @@ actor Renderer {
     // .upperLimbVisibility(.hidden) in LambdaVisionApp. Lazily created on
     // the first frame, like weaponPass.
     private var armPass: ArmPass!
+    // The HEV suit's holographic readouts (HEVHUD), drawn inside the weapon
+    // pass. Its renderer appears once the glyph atlas finishes building.
+    private let hevHUD = HEVHUD()
 
     // First-person body: the rig is built once from the body slot after the
     // engine loads gordon.mdl; the mesh is uploaded once per bake (and again
@@ -284,6 +288,9 @@ actor Renderer {
     /// Draw the avatar's legs, planted on the game's floor and stepping as
     /// the player moves (AvatarGait). Off leaves an open waist, as before.
     nonisolated(unsafe) static var avatarLegsVisible = true
+    /// Draw the HEV holograms (Settings > Input); the client's stock 2D
+    /// readouts follow the same switch through lambda_hud_set_native.
+    nonisolated(unsafe) static var hevHUDEnabled = true
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -760,6 +767,30 @@ actor Renderer {
         return (studioPoint(wrist),
                 AvatarRig.handRotation(forward: studioDirection(fwd), back: studioDirection(back)),
                 studioPoint(worldPos(.forearmArm)))
+    }
+
+    /// One tracked arm for the HEV holograms, Apple world. Separate from
+    /// sampleDominantHand, which counts aim diagnostics on every call.
+    private func hudArm(left: Bool) -> HEVHUD.Arm? {
+        guard handTracking.state == .running,
+              let hand = left ? handTracking.latestAnchors.leftHand : handTracking.latestAnchors.rightHand,
+              hand.isTracked, let skel = hand.handSkeleton else { return nil }
+        let handT = hand.originFromAnchorTransform
+        func worldPos(_ name: HandSkeleton.JointName) -> SIMD3<Float> {
+            let t = handT * skel.joint(name).anchorFromJointTransform
+            return SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        }
+        let wrist = worldPos(.wrist)
+        let fwd = simd_normalize(worldPos(.middleFingerKnuckle) - wrist)
+        // Index → little knuckle, negated on the left hand, so the cross
+        // product is the back of the hand on both (as avatarWrist).
+        let acrossRaw = worldPos(.littleFingerKnuckle) - worldPos(.indexFingerKnuckle)
+        let across = simd_normalize(left ? -acrossRaw : acrossRaw)
+        let back = simd_normalize(simd_cross(across, fwd))
+        // Toward the thumb side of the hand, which faces the body midline
+        // for either hand held out front.
+        return HEVHUD.Arm(wrist: wrist, elbow: worldPos(.forearmArm), forward: fwd, back: back,
+                          inward: left ? across : -across)
     }
 
     /// Flat [pos.xyz, color.rgba] x N array (world space, metres) for every
@@ -2036,7 +2067,27 @@ actor Renderer {
         // hand. Without a grip there is nothing to pin the gun by, so the
         // viewmodel keeps its hands.
         weaponPass.hideHands = body != nil && weaponPass.grip != nil
-        let supplementalPassActive = weaponActive || joystickVisible || body != nil
+
+        // HEV holograms: ammo by the gun hand (only while a weapon is out),
+        // vitals over the off-hand forearm.
+        var hudScene: RAVEHoloScene? = nil
+        var hudRenderer: RAVEHoloRenderer? = nil
+        if Renderer.hevHUDEnabled, let holo = hevHUD.ensureRenderer(
+            device: device, colorFormat: layerRenderer.configuration.colorFormat,
+            depthFormat: layerRenderer.configuration.depthFormat,
+            viewCount: drawable.views.count, slots: maxBuffersInFlight) {
+            var hud = lambda_hud_state_t()
+            lambda_hud_state(&hud)
+            let left = Renderer.dominantHandIsLeft
+            let headM = deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+            hudScene = hevHUD.scene(state: hud,
+                                    gunArm: weaponActive ? hudArm(left: left) : nil,
+                                    offArm: hudArm(left: !left),
+                                    head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
+                                    time: drawable.frameTiming.presentationTime.timeInterval)
+            if hudScene != nil { hudRenderer = holo }
+        }
+        let supplementalPassActive = weaponActive || joystickVisible || body != nil || hudScene != nil
         if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
                                    height: drawable.colorTextures[0].height,
@@ -2104,6 +2155,7 @@ actor Renderer {
             residencySet.addAllocations(weaponPass.residentResources(uniformBufferIndex: uniformBufferIndex,
                                                                      body: body?.mesh))
         }
+        if let hudRenderer { residencySet.addAllocations(hudRenderer.allocations) }
         if !armVertices.isEmpty {
             residencySet.addAllocations(armPass.residentResources(uniformBufferIndex: uniformBufferIndex))
         }
@@ -2350,7 +2402,7 @@ actor Renderer {
                 }
             }
 
-            if drawWeapon || body != nil || !arcs.isEmpty {
+            if drawWeapon || body != nil || !arcs.isEmpty || hudScene != nil {
                 // Per-eye camera position + right axis in world metres, for the
                 // chrome environment map (GoldSrc builds its sphere map from
                 // the viewer→surface vector and the camera's right axis).
@@ -2377,7 +2429,16 @@ actor Renderer {
                                   eyeRights: eyeRights,
                                   drawWeapon: drawWeapon,
                                   body: body,
-                                  arcs: arcs)
+                                  arcs: arcs,
+                                  hud: hudScene.flatMap { [uniformBufferIndex] scene in hudRenderer.map { holo in
+                                      { enc in
+                                          holo.encode(scene, encoder: enc,
+                                                      viewProjections: drawableTarget.viewProjections(drawable: drawable),
+                                                      slot: uniformBufferIndex,
+                                                      time: Float(drawable.frameTiming.presentationTime.timeInterval
+                                                                  .truncatingRemainder(dividingBy: 1000)))
+                                      }
+                                  } })
             }
         }
 
@@ -2495,6 +2556,15 @@ extension Renderer.DrawableTarget {
         viewProjectionArray = UnsafeMutableRawPointer(viewProjectionBuffer.contents() + viewProjectionBufferOffset).bindMemory(to: ViewProjectionArray.self, capacity: 1)
 
         lastUsedFrameIndex = frameIndex
+    }
+
+    /// The same world → clip matrices updateViewProjectionArray writes, as
+    /// values (the HEV holograms bind their own copy).
+    nonisolated func viewProjections(drawable: LayerRenderer.Drawable) -> [float4x4] {
+        let anchor = drawable.deviceAnchor?.originFromAnchorTransform ?? matrix_identity_float4x4
+        return drawable.views.indices.map { i in
+            drawable.computeProjection(viewIndex: i) * (anchor * drawable.views[i].transform).inverse
+        }
     }
 
     nonisolated func updateViewProjectionArray(drawable: LayerRenderer.Drawable) {

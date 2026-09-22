@@ -92,6 +92,7 @@ enum AppSettingsStore {
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
     private static let avatarBodyKey          = "lambdavision.settings.avatarBody"
     private static let avatarLegsKey          = "lambdavision.settings.avatarLegs"
+    private static let hevHUDKey              = "lambdavision.settings.hevHUD"
 
     static var dominantHand: DominantHand {
         get {
@@ -144,5 +145,9 @@ enum AppSettingsStore {
     static var avatarLegs: Bool {
         get { bool(avatarLegsKey, true) }        // default: the body stands on its legs
         set { defaults.set(newValue, forKey: avatarLegsKey) }
+    }
+    static var hevHUD: Bool {
+        get { bool(hevHUDKey, true) }            // default: the holographic HEV HUD
+        set { defaults.set(newValue, forKey: hevHUDKey) }
     }
 }

@@ -1031,3 +1031,26 @@ void lambda_body_state(lambda_body_state_t *out) {
     out->velocity[2] = g_vr_body_state[5];
     out->sequence    = (uint32_t)g_vr_body_state[6];
 }
+
+extern float g_vr_hud_state[14];
+extern int   g_vr_hud_native;
+
+void lambda_hud_state(lambda_hud_state_t *out) {
+    const float *s = g_vr_hud_state;
+    out->has_suit          = s[0] != 0.0f;
+    out->health            = (int)s[1];
+    out->battery           = (int)s[2];
+    out->hide_flags        = (int)s[3];
+    out->weapon_id         = (int)s[4];
+    out->clip              = (int)s[5];
+    out->ammo1             = (int)s[6];
+    out->ammo1_max         = (int)s[7];
+    out->ammo2             = (int)s[8];
+    out->ammo2_max         = (int)s[9];
+    out->flashlight_on     = s[10] != 0.0f;
+    out->flashlight_charge = s[11];
+    out->intermission      = s[12] != 0.0f;
+    out->max_clip          = (int)s[13];
+}
+
+void lambda_hud_set_native(int on) { g_vr_hud_native = on ? 1 : 0; }

@@ -1,3 +1,33 @@
+diff --git a/cl_dll/ammo.cpp b/cl_dll/ammo.cpp
+index 72272b2..82bafc7 100644
+--- a/cl_dll/ammo.cpp
++++ b/cl_dll/ammo.cpp
+@@ -865,6 +865,10 @@ int CHudAmmo::Draw( float flTime )
+ 	// Draw ammo pickup history
+ 	gHR.DrawAmmoHistory( flTime );
+ 
++	// VR: the native HUD shows ammo beside the weapon.
++	if( g_vr_hud_native )
++		return 1;
++
+ 	if( !( m_iFlags & HUD_ACTIVE ) )
+ 		return 0;
+ 
+diff --git a/cl_dll/battery.cpp b/cl_dll/battery.cpp
+index 7cfc3d7..995c9fe 100644
+--- a/cl_dll/battery.cpp
++++ b/cl_dll/battery.cpp
+@@ -74,6 +74,10 @@ int CHudBattery::Draw( float flTime )
+ 	if( gHUD.m_iHideHUDDisplay & HIDEHUD_HEALTH )
+ 		return 1;
+ 
++	// VR: the native HUD shows suit charge on the forearm.
++	if( g_vr_hud_native )
++		return 1;
++
+ 	int r, g, b, x, y, a;
+ 	wrect_t rc;
+ 
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
 index 3670546..0c0feb0 100644
 --- a/cl_dll/entity.cpp
@@ -448,6 +478,162 @@ index e28742f..3f08c40 100644
  
  	if( args->bparam2 )
  	{
+diff --git a/cl_dll/flashlight.cpp b/cl_dll/flashlight.cpp
+index 3ec6997..0f25447 100644
+--- a/cl_dll/flashlight.cpp
++++ b/cl_dll/flashlight.cpp
+@@ -105,6 +105,10 @@ int CHudFlashlight::Draw( float flTime )
+ 	if( !show )
+ 		return 1;
+ 
++	// VR: the native HUD shows the flashlight charge on the forearm.
++	if( g_vr_hud_native )
++		return 1;
++
+ 	int r, g, b, x, y, a;
+ 	wrect_t rc;
+ 
+diff --git a/cl_dll/health.cpp b/cl_dll/health.cpp
+index 5ca4b97..c9c6c08 100644
+--- a/cl_dll/health.cpp
++++ b/cl_dll/health.cpp
+@@ -212,8 +212,9 @@ int CHudHealth::Draw( float flTime )
+ 	GetPainColor( r, g, b );
+ 	ScaleColors( r, g, b, a );
+ 
+-	// Only draw health if we have the suit.
+-	if( gHUD.m_iWeaponBits & ( 1 << ( WEAPON_SUIT ) ) )
++	// Only draw health if we have the suit. VR: the native HUD shows it
++	// on the forearm instead; pain and damage indicators still draw.
++	if( !g_vr_hud_native && ( gHUD.m_iWeaponBits & ( 1 << ( WEAPON_SUIT ) ) ) )
+ 	{
+ 		HealthWidth = gHUD.GetSpriteRect( gHUD.m_HUD_number_0 ).right - gHUD.GetSpriteRect( gHUD.m_HUD_number_0 ).left;
+ 		int CrossWidth = gHUD.GetSpriteRect( m_HUD_cross ).right - gHUD.GetSpriteRect( m_HUD_cross ).left;
+diff --git a/cl_dll/hl/hl_weapons.cpp b/cl_dll/hl/hl_weapons.cpp
+index 4f119f0..27fb6d0 100644
+--- a/cl_dll/hl/hl_weapons.cpp
++++ b/cl_dll/hl/hl_weapons.cpp
+@@ -129,6 +129,21 @@ void HUD_PrepEntity( CBaseEntity *pEntity, CBasePlayer *pWeaponOwner )
+ 	}
+ }
+ 
++// VR native HUD: the weapon's own declared clip size (GetItemInfo), so the
++// HUD needs no table of stock weapons and follows whatever weapon code is
++// built in. -1 when the weapon has no clip or no client-side prediction
++// object (the client's ItemInfoArray is never filled, so iMaxClip() is 0).
++int VR_WeaponMaxClip( int id )
++{
++	if( id < 0 || id >= MAX_WEAPONS || !g_pWpns[id] )
++		return -1;
++	ItemInfo info;
++	memset( &info, 0, sizeof( info ) );
++	if( !g_pWpns[id]->GetItemInfo( &info ) )
++		return -1;
++	return info.iMaxClip > 0 ? info.iMaxClip : -1;
++}
++
+ /*
+ =====================
+ CBaseEntity::Killed
+diff --git a/cl_dll/hud.h b/cl_dll/hud.h
+index 419c899..4854b12 100644
+--- a/cl_dll/hud.h
++++ b/cl_dll/hud.h
+@@ -104,6 +104,7 @@ struct HUDLIST
+ class CHudAmmo : public CHudBase
+ {
+ public:
++	friend void VR_PublishHudState();	// VR: native HUD reads private state
+ 	int Init( void );
+ 	int VidInit( void );
+ 	int Draw( float flTime );
+@@ -380,6 +381,7 @@ private:
+ class CHudBattery : public CHudBase
+ {
+ public:
++	friend void VR_PublishHudState();	// VR: native HUD reads private state
+ 	int Init( void );
+ 	int VidInit( void );
+ 	int Draw( float flTime );
+@@ -401,6 +403,7 @@ private:
+ class CHudFlashlight: public CHudBase
+ {
+ public:
++	friend void VR_PublishHudState();	// VR: native HUD reads private state
+ 	int Init( void );
+ 	int VidInit( void );
+ 	int Draw( float flTime );
+@@ -532,6 +535,9 @@ private:
+ //
+ //-----------------------------------------------------
+ //
++void VR_PublishHudState();	// VR: hud_redraw.cpp
++extern "C" int g_vr_hud_native;	// VR: stock health/battery/ammo/flashlight readouts off
++
+ class CHud
+ {
+ private:
+diff --git a/cl_dll/hud_redraw.cpp b/cl_dll/hud_redraw.cpp
+index 9aecaf7..43f18c8 100644
+--- a/cl_dll/hud_redraw.cpp
++++ b/cl_dll/hud_redraw.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "hud.h"
+ #include "cl_util.h"
++#include "ammohistory.h"
+ //#include "triangleapi.h"
+ 
+ #if USE_VGUI
+@@ -97,8 +98,48 @@ void CHud::Think( void )
+ // Redraw
+ // step through the local data,  placing the appropriate graphics & text as appropriate
+ // returns 1 if they've changed, 0 otherwise
++// VR native HUD (LambdaVision draws it in Metal, not in this 2D layer).
++// g_vr_hud_native (set by the bridge) turns the stock health, battery, ammo
++// and flashlight readouts off; pain/damage indicators, the pickup history and
++// text messages still draw here. g_vr_hud_state is what the native HUD shows,
++// refreshed every redraw — plain floats so the bridge reads it without the
++// SDK's headers:
++//   [0] has suit   [1] health   [2] battery   [3] m_iHideHUDDisplay
++//   [4] weapon id (-1 none)     [5] clip (-1 = no clip)
++//   [6] primary reserve (-1 = no primary ammo)  [7] primary max
++//   [8] secondary count (-1 = no secondary)     [9] secondary max
++//   [10] flashlight on   [11] flashlight charge 0…1   [12] intermission
++//   [13] max clip (-1 = none/unknown; from the weapon's own GetItemInfo)
++// Non-zero initializers keep both in __DATA,__data rather than common
++// storage (see the gpGlobals common-symbol merge in the static link).
++extern "C" __attribute__((visibility("default"))) int g_vr_hud_native = 1;
++extern "C" __attribute__((visibility("default"))) float g_vr_hud_state[14] = { 0, 0, 0, 0, -1, -1, -1, 0, -1, 0, 0, 0, 0, -1 };
++int VR_WeaponMaxClip( int id );	// hl/hl_weapons.cpp
++
++void VR_PublishHudState()
++{
++	float *s = g_vr_hud_state;
++	s[0] = ( gHUD.m_iWeaponBits & ( 1 << ( WEAPON_SUIT ) ) ) ? 1.0f : 0.0f;
++	s[1] = (float)gHUD.m_Health.m_iHealth;
++	s[2] = (float)gHUD.m_Battery.m_iBat;
++	s[3] = (float)gHUD.m_iHideHUDDisplay;
++	const WEAPON *w = gHUD.m_Ammo.m_pWeapon;
++	s[4] = w ? (float)w->iId : -1.0f;
++	s[5] = w ? (float)w->iClip : -1.0f;
++	s[6] = ( w && w->iAmmoType > 0 ) ? (float)gWR.CountAmmo( w->iAmmoType ) : -1.0f;
++	s[7] = w ? (float)w->iMax1 : 0.0f;
++	s[8] = ( w && w->iAmmo2Type > 0 ) ? (float)gWR.CountAmmo( w->iAmmo2Type ) : -1.0f;
++	s[9] = w ? (float)w->iMax2 : 0.0f;
++	s[10] = gHUD.m_Flash.m_fOn ? 1.0f : 0.0f;
++	s[11] = gHUD.m_Flash.m_flBat;
++	s[12] = (float)gHUD.m_iIntermission;
++	s[13] = w ? (float)VR_WeaponMaxClip( w->iId ) : -1.0f;
++}
++
+ int CHud::Redraw( float flTime, int intermission )
+ {
++	VR_PublishHudState();
++
+ 	m_fOldTime = m_flTime;	// save time of previous redraw
+ 	m_flTime = flTime;
+ 	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
 index 3b3187d..6efba05 100644
 --- a/cl_dll/view.cpp

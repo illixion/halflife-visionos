@@ -189,6 +189,31 @@ typedef struct {
 
 void lambda_body_state(lambda_body_state_t *out);
 
+// What the native (Metal) HUD shows, published by the client every HUD redraw
+// (cl_dll/hud_redraw.cpp g_vr_hud_state). -1 marks "not applicable": no
+// weapon, no clip, no primary / secondary ammo, unknown max clip.
+typedef struct {
+    int   has_suit;
+    int   health;
+    int   battery;          // suit charge, 0..100
+    int   hide_flags;       // HIDEHUD_* bits the game set (1 weapons, 2 flashlight, 4 all, 8 health)
+    int   weapon_id;
+    int   clip;
+    int   max_clip;         // the weapon's own GetItemInfo; -1 when unknown
+    int   ammo1;            // primary reserve
+    int   ammo1_max;
+    int   ammo2;            // secondary (MP5 grenades)
+    int   ammo2_max;
+    int   flashlight_on;
+    float flashlight_charge; // 0..1
+    int   intermission;
+} lambda_hud_state_t;
+
+void lambda_hud_state(lambda_hud_state_t *out);
+// 1 = the native HUD is shown, so the stock health, suit, ammo and
+// flashlight readouts in the 2D layer stand down.
+void lambda_hud_set_native(int on);
+
 #ifdef __cplusplus
 }
 #endif

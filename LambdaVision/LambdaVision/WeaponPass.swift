@@ -334,7 +334,8 @@ final class WeaponPass {
                 eyeRights: [SIMD3<Float>],
                 drawWeapon: Bool = true,
                 body: BodyDraw? = nil,
-                arcs: [Arc] = []) {
+                arcs: [Arc] = [],
+                hud: ((MTL4RenderCommandEncoder) -> Void)? = nil) {
         guard let depth else { return }
 
         let eye0 = eyePositions.first ?? .zero
@@ -447,6 +448,10 @@ final class WeaponPass {
                                    vertexStart: 0, vertexCount: 2 * (48 + 1))
             }
         }
+        // HEV holograms last: over the gun and the body (see HEVHUD), and
+        // last because they bind their own argument table (the arcs above
+        // reuse this pass's).
+        hud?(enc)
         enc.endEncoding()
     }
 

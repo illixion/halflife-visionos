@@ -46,6 +46,16 @@ instead of deleting them.
 
 ## Open — rendering
 
+- **HEV HUD next steps.** The holographic HUD (`HEVHUD.swift` on RAVEHolo;
+  client state from `cl_dll/hud_redraw.cpp` `g_vr_hud_state`) replaces the
+  stock health, suit, ammo and flashlight readouts: ammo beside the gun hand,
+  vitals over the off-hand forearm (fades in as the back of the forearm faces
+  the eyes). Panels stand off their anchor toward the eyes and draw over
+  everything. Still stock: pain/damage arrows, pickup history, the weapon
+  wheel (no icons yet — next: per-slot icons from the `640hud*.spr` sprites
+  listed in `weapon_*.txt`), messages, console, menu. Offsets and the fade
+  angle are first guesses (`HEVHUD.forearmClearance` / `gunClearance`).
+
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
@@ -218,11 +228,11 @@ instead of deleting them.
 
 ## Ideas / someday
 
-- **Speedrunner mode.** An in-game run timer and a speed gauge on the HUD.
-  Blocked on replacing the stock HL HUD, which renders low-res, with a
-  native one; don't retrofit it into the stock HUD. The ground speed it
-  would show is already published (`g_vr_body_state.velocity`, shown in the
-  diagnostics as `ground speed:`).
+- **Speedrunner mode.** An in-game run timer and a speed gauge. Unblocked:
+  build it as another RAVEHolo panel in `HEVHUD.swift` (the native HEV HUD
+  replaced the stock readouts), not in the stock 2D HUD. The ground speed is
+  already published (`g_vr_body_state.velocity`, shown in the diagnostics as
+  `ground speed:`).
 
 - CS-style fastswitch (slot key cycles weapons directly with multiple
   weapons per bucket — small `ammo.cpp` patch; stock HL only fast-switches

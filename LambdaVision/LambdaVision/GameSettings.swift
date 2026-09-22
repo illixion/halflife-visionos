@@ -164,6 +164,14 @@ final class GameSettings {
                  Renderer.avatarLegsVisible = avatarLegs }
     }
 
+    /// The HEV suit's holographic readouts (HEVHUD): ammo beside the weapon,
+    /// health and suit charge over the off-hand forearm. Off brings the stock
+    /// 2D readouts back.
+    var hevHUD: Bool = AppSettingsStore.hevHUD {
+        didSet { AppSettingsStore.hevHUD = hevHUD
+                 applyHEVHUD() }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -184,6 +192,14 @@ final class GameSettings {
         HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
+        applyHEVHUD()
+    }
+
+    /// A plain flag in the client and a render static, so it is safe before
+    /// the engine is up.
+    private func applyHEVHUD() {
+        Renderer.hevHUDEnabled = hevHUD
+        lambda_hud_set_native(hevHUD ? 1 : 0)
     }
 
     /// Called from Renderer.ensureEngineInitialized() once the engine is up.
