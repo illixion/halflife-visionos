@@ -6,15 +6,6 @@ instead of deleting them.
 
 ## Open — interaction
 
-- **Barrel aim reads slightly to the right.** With `fireAimMode = barrel`,
-  shots (and now the decals) land a bit right of the visible muzzle. The aim
-  ray is `wrist→middle-knuckle` (`sampleDominantHand`), not the drawn gun
-  barrel (the WeaponPass grip correction `C = gripYaw 180°, gripRoll 90°`), so
-  the two disagree by a fixed rotation. Deferred on purpose: adding VR
-  hands/arms will re-seat the grip and shift this again, so realign the aim
-  axis to the drawn barrel then (derive it from the same `handWorld·C·B·
-  inverse(handBone)` transform). Live aim readout is in the launcher's
-  Diagnostics disclosure.
 - **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
   skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
   fire-along-gaze accessibility now in Settings): remaining items — muzzle
@@ -128,11 +119,23 @@ instead of deleting them.
   so the rig now takes the tracked elbow as the pole direction and the
   synthetic pole is only the fallback for an untracked hand. Settings > Input >
   "First-person body" is the arms-only fallback
-  (`Renderer.avatarLegsVisible` shows the legs; no UI yet). Not yet on device:
-  the eye offset, the cull mode (none, like the weapon), the wireframe hands
-  overlapping the avatar's, and the viewmodel's own hands/sleeve still drawing
-  beside the body's — suppressing those so the gun alone grips the avatar's
-  hand is the next step.
+  (`Renderer.avatarLegsVisible` shows the legs; no UI yet). With the body
+  drawn, the viewmodel's own hands are gone: `ViewmodelGrip` cuts every
+  glove/sleeve/forearm-textured triangle that sits on an arm bone (texture,
+  not bone, because stock models skin gun parts straight to `Bip01 R Hand`;
+  arm bone as well as texture, because the crossbow's limbs and the satchel
+  radio's aerial reuse the glove texture), the gun's grip bone is pinned onto
+  the avatar's posed hand bone with no tuned correction — every stock
+  viewmodel hand and Gordon's share one Bip01 convention (fingers +X, palm +Y,
+  thumb +Z on the right), measured — and the avatar's fingers borrow the
+  viewmodel's own curl around the gun (the middle finger drives Gordon's
+  mitten). A gun going into the other hand from the one Valve animated is
+  mirrored across the hand's XY plane. The MP5's unnamed `Bone01…` rig gets a
+  synthesised Bip01 frame from its gloved finger chains (within 11–20° of the
+  real frame on every Bip01 hand it was checked against). The wireframe arms
+  are not drawn while the body is. The probe (`--grips`) renders Gordon's arm
+  holding every viewmodel. Not yet on device: the eye offset, and whether the
+  grip reads right in the hand.
   - Gotcha found on the way: the pose the body slot publishes is sequence 0
     frame 0, not the studio bind pose — origin at the pelvis, one arm already
     raised, and rotated 90° from the bind pose. That is harmless, because
@@ -143,6 +146,13 @@ instead of deleting them.
   recompiles, not remakes — their player models are 595 and 755 vertices with
   *single-bone* rigid skinning, exactly like GoldSrc, so a whole Source asset
   pipeline buys a 1.7x vertex bump and nothing else.
+- **Viewmodel parts parked out of frame float beside the gun.** Valve parks
+  what an animation does not need yet just outside the flat viewmodel's
+  field of view — the Glock's spare magazine (`Box02`, a root bone), the
+  shotgun's shell — and a hand-anchored gun has no frame edge to hide them
+  behind. Seen in the probe's grip renders; likely visible on device near the
+  gun. A fix wants a rule for "what the flat viewmodel would not have shown",
+  e.g. culling against the original view frustum in viewmodel space.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.
@@ -186,6 +196,16 @@ instead of deleting them.
   code as hand tracking, different input source.
 
 ## Resolved
+
+- ~~Barrel aim reads slightly to the right~~ — the aim ray was wrist→middle
+  knuckle while the gun was drawn through a tuned grip correction, so the two
+  disagreed by a fixed rotation. The aim now follows the drawn barrel:
+  viewmodels are authored in view space, so model +X read in the grip frame
+  of the idle pose is where the gun points relative to the hand
+  (`ViewmodelGrip.barrel`, 2–11° off the finger axis for most stock guns,
+  measured). Idle rather than the current frame, so the shoot sequence's kick
+  does not walk automatic fire upward. Viewmodels with no grip (the
+  hivehand) keep the wrist→knuckle ray.
 
 - ~~Bullet-hole decals + tracers lied about where barrel-mode shots landed~~
   — the server damage trace fired along the barrel (`pev->v_angle +

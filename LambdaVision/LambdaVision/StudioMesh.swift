@@ -33,6 +33,9 @@ final class StudioMesh {
     let vertexCount: Int
     let submeshes: [Submesh]
     let textures: [MTLTexture]
+    /// Studio texture names, index-aligned with the extractor's texture
+    /// table (not with `textures`, which skips any that failed to upload).
+    let textureNames: [String]
     let boneNames: [String]
     let boneParents: [Int?]
     /// The extractor's choice of grip bone, or -1.
@@ -54,8 +57,14 @@ final class StudioMesh {
     /// from the cut to wherever the hidden bone was put; the price is an
     /// open edge at the neck and the hips, which is how every first-person
     /// body ends anyway.
+    ///
+    /// `omit` is the general form, for cuts no bone set can express: it sees
+    /// each triangle's texture index and three vertex bones and returns true
+    /// to leave it out. The viewmodel uses it to drop Valve's hands, whose
+    /// triangles share `Bip01 R Hand` with the gun (see ViewmodelGrip).
     init?(device: MTLDevice, mesh: lambda_weapon_mesh_t, generation: UInt32,
-          label: String, hiddenBones: Set<Int> = []) {
+          label: String, hiddenBones: Set<Int> = [],
+          omit: ((_ texture: Int, _ a: Int, _ b: Int, _ c: Int) -> Bool)? = nil) {
         guard mesh.vertex_count > 0, mesh.index_count > 0,
               let verts = mesh.vertices, let idx = mesh.indices,
               let subsPtr = mesh.submeshes else { return nil }
@@ -76,6 +85,7 @@ final class StudioMesh {
                 if !hiddenBones.isEmpty,
                    hiddenBones.contains(Int(a.bone)) || hiddenBones.contains(Int(b.bone))
                     || hiddenBones.contains(Int(c.bone)) { continue }
+                if let omit, omit(Int(sm.texture), Int(a.bone), Int(b.bone), Int(c.bone)) { continue }
                 flat.append(a); flat.append(b); flat.append(c)
             }
             if flat.count > start {
@@ -104,6 +114,7 @@ final class StudioMesh {
 
         // Textures: expand each RGBA8 blob into its own texture.
         var texs: [MTLTexture] = []
+        let texNames = StudioMesh.textureNames(of: mesh)
         if let texPtr = mesh.textures {
             for t in 0..<Int(mesh.texture_count) {
                 let tx = texPtr[t]
@@ -124,12 +135,50 @@ final class StudioMesh {
         self.vertexCount = flat.count
         self.submeshes = subs
         self.textures = texs
+        self.textureNames = texNames
         self.boneNames = names
         self.boneParents = parents
         self.handBoneIndex = Int(mesh.hand_bone_index)
         self.bbmin = SIMD3(mesh.bbmin.0, mesh.bbmin.1, mesh.bbmin.2)
         self.bbmax = SIMD3(mesh.bbmax.0, mesh.bbmax.1, mesh.bbmax.2)
         self.generation = generation
+    }
+
+    /// The texture and bone names of a locked snapshot — what a cut is
+    /// decided from, before anything is uploaded.
+    static func textureNames(of mesh: lambda_weapon_mesh_t) -> [String] {
+        guard let texPtr = mesh.textures else { return [] }
+        return (0..<Int(mesh.texture_count)).map { t in
+            var entry = texPtr[t]
+            return withUnsafePointer(to: &entry.name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: 64) { String(cString: $0) }
+            }
+        }
+    }
+
+    /// (texture, bone) for every vertex of every triangle, for
+    /// `ViewmodelGrip.boneGeometry`.
+    static func vertexTextureBones(of mesh: lambda_weapon_mesh_t) -> [(texture: Int, bone: Int)] {
+        guard let verts = mesh.vertices, let idx = mesh.indices, let subs = mesh.submeshes else { return [] }
+        var out: [(texture: Int, bone: Int)] = []
+        out.reserveCapacity(Int(mesh.index_count))
+        for s in 0..<Int(mesh.submesh_count) {
+            let sm = subs[s]
+            for i in 0..<Int(sm.index_count) {
+                out.append((Int(sm.texture), Int(verts[Int(idx[Int(sm.index_offset) + i])].bone)))
+            }
+        }
+        return out
+    }
+
+    static func boneNames(of mesh: lambda_weapon_mesh_t) -> [String] {
+        guard let bones = mesh.bones else { return [] }
+        return (0..<Int(mesh.bone_count)).map { b in
+            var entry = bones[b]
+            return withUnsafePointer(to: &entry.name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
+            }
+        }
     }
 
     /// Everything the pass must make resident to draw this mesh.

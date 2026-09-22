@@ -44,6 +44,10 @@ struct AvatarRig {
         /// Straight-line length of the chain in its rest pose. Anything the
         /// solver is asked to reach beyond this is the caller's bug.
         var reach: Float
+        /// The finger bones below the hand, parents first, each with the name
+        /// a finger pose is keyed by ("Finger0", "Finger11", …). GoldSrc
+        /// player models carry a thumb and one mitten for the other four.
+        var fingers: [(bone: Int, key: String)]
     }
 
     let boneNames: [String]
@@ -58,6 +62,7 @@ struct AvatarRig {
     let pelvis: Int
     let leftArm: Arm?
     let rightArm: Arm?
+
 
     /// Where the head bone sits in the rest pose. The eyes, which the avatar
     /// actually hangs from, are `Targets.eyeOffset` forward and up of here.
@@ -174,7 +179,13 @@ struct AvatarRig {
               let chain = solver.chain([upper, fore, hand]) else { return nil }
         let p = [upper, fore, hand].map { PoseSolver.translation(of: restModel[$0]) }
         let reach = simd_distance(p[0], p[1]) + simd_distance(p[1], p[2])
-        return Arm(chain: chain, hand: hand, reach: reach)
+        let prefix = "Bip01 \(side) "
+        let fingers = solver.order.compactMap { i -> (bone: Int, key: String)? in
+            guard let name = index.first(where: { $0.value == i })?.key,
+                  name.hasPrefix(prefix + "Finger") else { return nil }
+            return (i, String(name.dropFirst(prefix.count)))
+        }
+        return Arm(chain: chain, hand: hand, reach: reach, fingers: fingers)
     }
 
     // MARK: - What not to draw
@@ -257,6 +268,11 @@ struct AvatarRig {
         /// pole that puts the elbow where elbows usually are.
         var leftElbow: SIMD3<Float>? = nil
         var rightElbow: SIMD3<Float>? = nil
+        /// Finger rotations relative to the hand, keyed "Finger0",
+        /// "Finger21", … — the grip a viewmodel animates around its gun (see
+        /// `ViewmodelGrip.fingerPose`). nil leaves the fingers at rest.
+        var leftFingers: [String: simd_quatf]? = nil
+        var rightFingers: [String: simd_quatf]? = nil
         var eyeOffset: SIMD3<Float> = AvatarRig.defaultEyeOffset
     }
 
@@ -358,7 +374,8 @@ struct AvatarRig {
         }
 
         func solve(_ arm: Arm?, _ worldTarget: SIMD3<Float>?, _ worldRotation: simd_quatf?,
-                   _ worldElbow: SIMD3<Float>?, side: Float) -> PoseSolver.Report? {
+                   _ worldElbow: SIMD3<Float>?, _ fingers: [String: simd_quatf]?,
+                   side: Float) -> PoseSolver.Report? {
             guard let arm else { return nil }
             let target: SIMD3<Float>
             let rotation: simd_quatf?
@@ -392,16 +409,45 @@ struct AvatarRig {
             if let rotation {
                 setModelRotation(of: arm.hand, to: rotation, joints: &joints, model: &model)
             }
+            if let fingers { curl(arm, fingers, joints: &joints, model: &model) }
             return report
         }
-        let left = solve(leftArm, targets.leftHand, targets.leftHandRotation, targets.leftElbow, side: 1)
-        let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, targets.rightElbow, side: -1)
+        let left = solve(leftArm, targets.leftHand, targets.leftHandRotation, targets.leftElbow,
+                         targets.leftFingers, side: 1)
+        let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, targets.rightElbow,
+                          targets.rightFingers, side: -1)
 
         // The chains wrote their own matrices as they went, but joints hanging
         // off them — the fingers below each hand — are stale. One clean pass
         // is cheaper than reasoning about which ones moved.
         return Pose(palette: solver.modelMatrices(of: joints), root: root,
                     left: left, right: right)
+    }
+
+    /// Poses a hand's fingers from rotations relative to the hand.
+    ///
+    /// Only rotations transfer: each finger keeps this rig's own bone
+    /// lengths, so a pose taken off a viewmodel's longer fingers still closes
+    /// this hand's own fist rather than stretching it. A four-finger pose on
+    /// a mitten — which every GoldSrc player model's hand is — drives the
+    /// mitten with the middle finger, the one that best stands for the other
+    /// three wrapped around a grip (the index is on the trigger).
+    private func curl(_ arm: Arm, _ pose: [String: simd_quatf],
+                      joints: inout [JointPose], model: inout [float4x4]) {
+        let mitten = !arm.fingers.contains { $0.key.hasPrefix("Finger2") }
+        let hand = PoseSolver.rotation(of: model[arm.hand])
+        for (bone, key) in arm.fingers {
+            let source = mitten && key.hasPrefix("Finger1") ? "Finger2" + key.dropFirst("Finger1".count) : key
+            guard let q = pose[source] ?? pose[key] else { continue }
+            setModelRotation(of: bone, to: simd_normalize(hand * q), joints: &joints, model: &model)
+        }
+    }
+
+    /// The world transform of a posed hand bone (GoldSrc units): the frame a
+    /// held gun is pinned to.
+    func handMatrix(_ pose: Pose, left: Bool) -> float4x4? {
+        guard let arm = left ? leftArm : rightArm, arm.hand < pose.palette.count else { return nil }
+        return pose.root * pose.palette[arm.hand]
     }
 
     /// Gives `bone` the model-space rotation `rotation` by rewriting its

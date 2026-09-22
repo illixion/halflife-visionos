@@ -59,6 +59,11 @@ typedef struct {
     uint32_t height;
     uint32_t flags;             // STUDIO_NF_* copied from the studio texture
     const uint8_t *rgba;
+    // The studio texture's file name ("rubbergloveCHROME.bmp"). The only
+    // reliable way to tell a viewmodel's HEV hands from its gun: stock v_
+    // models skin gun parts straight to `Bip01 R Hand`, so bones cannot
+    // separate the two, but every hand is drawn with a glove/sleeve texture.
+    char name[64];
 } lambda_weapon_texture_t;
 
 // Bone table entry (mstudiobone_t name + parent), so the Swift side can find
@@ -145,6 +150,12 @@ void     lambda_weapon_unlock(void);
 // Copy the latest published pose into *out (takes and releases the lock
 // internally). Returns its generation, 0 if no pose has been published yet.
 uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out);
+
+// Copy the current bake's sequence 0 / frame 0 pose — a viewmodel's idle —
+// into *out. Unlike lambda_weapon_copy_pose this does not follow playback, so
+// it is the stable reference for how the gun sits in the hand. Returns its
+// generation, 0 before the first bake.
+uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out);
 
 // --- player body -----------------------------------------------------------
 //

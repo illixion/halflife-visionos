@@ -250,6 +250,10 @@ typedef struct {
     uint32_t        generation;
     pthread_mutex_t mtx;
     lambda_weapon_pose_t pose;      // latest pose, written under mtx
+    // Sequence 0 frame 0 of the current bake — for a viewmodel, its idle.
+    // Kept apart from `pose`, which the next tick overwrites with whatever
+    // is playing (often the draw animation, right after a weapon switch).
+    lambda_weapon_pose_t rest_pose;
 
     // Re-bake key: only walk the header again when the model actually changes.
     void *last_hdr;
@@ -409,6 +413,10 @@ static void bake_textures(snapshot_t *s, const uint8_t *base, const studiohdr_t 
         // next texture reads from the right place (even if this one fell back).
         if (have) cursor += pxcnt + 256 * 3;
         out->rgba = dst;
+        memset(out->name, 0, sizeof(out->name));
+        if ((int)i < hdr->numtextures) {
+            memcpy(out->name, tex[i].name, sizeof(out->name) - 1);
+        }
     }
 }
 
@@ -832,6 +840,7 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     slot->pose.sequence = 0;
     slot->pose.frame = 0.0f;
     memcpy(slot->pose.bones, pose0, sizeof(matrix3x4) * (size_t)hdr->numbones);
+    slot->rest_pose = slot->pose;
     pthread_mutex_unlock(&slot->mtx);
 
     fprintf(stderr,
@@ -941,6 +950,14 @@ void lambda_weapon_unlock(void) { pthread_mutex_unlock(&g_weapon.mtx); }
 
 uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out) {
     return slot_copy_pose(&g_weapon, out);
+}
+
+uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out) {
+    model_slot_t *slot = &g_weapon;
+    slot_lock_mutex(slot);
+    *out = slot->rest_pose;
+    pthread_mutex_unlock(&slot->mtx);
+    return out->generation;
 }
 
 // --- player body -----------------------------------------------------------

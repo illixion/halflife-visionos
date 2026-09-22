@@ -7,7 +7,8 @@
 //
 // Build and run with ./build.sh (see there for flags: --bones dumps the rest
 // skeleton, --obj writes the posed, cut body as avatar_posed.obj in the
-// current directory). Exits non-zero on the first failed check.
+// current directory, --grips writes Gordon's hand holding each viewmodel as
+// grip_*.tri). Exits non-zero on the first failed check.
 
 import Foundation
 import RAVERig
@@ -478,6 +479,18 @@ if dumpOBJ {
     let dst = FileManager.default.currentDirectoryPath + "/avatar_posed.obj"
     try? out.write(toFile: dst, atomically: true, encoding: .utf8)
     print("\nwrote \(dst) (\(mesh.vertex_count) verts, \(kept) of \(mesh.index_count / 3) tris)")
+}
+
+// MARK: - Viewmodels (reuses the body slot, so it runs last)
+
+do {
+    let gordon = ProbeModel.fromBodySlot()
+    // gordon.mdl lives at models/player/gordon/, the viewmodels at models/.
+    let models = ((path as NSString).deletingLastPathComponent as NSString)
+        .deletingLastPathComponent.appending("/..")
+    let dump = CommandLine.arguments.contains("--grips") ? FileManager.default.currentDirectoryPath : nil
+    runViewmodelChecks(rig: rig, gordon: gordon, modelsDir: models, dumpDir: dump)
+    if let dump { print("wrote grip_*.tri to \(dump) (render with render_tri.py)") }
 }
 
 print("\nOK")

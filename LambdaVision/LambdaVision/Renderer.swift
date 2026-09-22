@@ -535,6 +535,30 @@ actor Renderer {
                           middleCurlM: middleCurl)
     }
 
+    /// The dominant hand as a Bip01 hand frame in GoldSrc world (inches,
+    /// Z-up): X along the fingers, +Y out of the palm, at the wrist. The same
+    /// frame the avatar's hand bone is given, so a gun pinned to either sits
+    /// the same way in the hand.
+    private func trackedHandFrame(_ hand: HandSample) -> float4x4 {
+        let r = AvatarRig.handRotation(forward: studioDirection(hand.worldForward),
+                                       back: studioDirection(hand.worldUp))
+        var m = float4x4(r)
+        m.columns.3 = SIMD4<Float>(studioPoint(hand.worldGrip), 1)
+        return m
+    }
+
+    /// Where the drawn gun's barrel points, in the Apple world, for this
+    /// tracked hand — nil with no external weapon or no grip to read it from.
+    private func barrelDirection(_ hand: HandSample) -> SIMD3<Float>? {
+        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.grip,
+              !pass.idlePalette.isEmpty else { return nil }
+        let local = ViewmodelGrip.barrel(grip: grip, idlePalette: pass.idlePalette,
+                                         handIsLeft: Renderer.dominantHandIsLeft)
+        let r = AvatarRig.handRotation(forward: studioDirection(hand.worldForward),
+                                       back: studioDirection(hand.worldUp))
+        return appleDirection(r.act(local))
+    }
+
     // Bone list for the wireframe arm skeleton: parent→child joint pairs,
     // drawn as line segments. Forearm (elbow→wrist) plus a full per-finger
     // chain from the wrist outward. Deliberately not gated on per-joint
@@ -580,7 +604,8 @@ actor Renderer {
     /// Z-up, +X the tracking origin's forward) up front, solved there, and
     /// the result converted back once through `studioToWorld`. The palette
     /// never leaves GoldSrc space; only the root does.
-    private func avatarBodyDraw(deviceAnchor: DeviceAnchor?, time: Double) -> WeaponPass.BodyDraw? {
+    private func avatarBodyDraw(deviceAnchor: DeviceAnchor?, time: Double,
+                                gripFingers: [String: simd_quatf]? = nil) -> WeaponPass.BodyDraw? {
         guard Renderer.avatarBodyEnabled, Renderer.avatarAvailable, let deviceAnchor else { return nil }
         if avatarRig == nil && !avatarRigFailed {
             do {
@@ -636,8 +661,17 @@ actor Renderer {
         if let r = avatarWrist(handTracking.latestAnchors.rightHand, left: false) {
             targets.rightHand = r.position; targets.rightHandRotation = r.rotation; targets.rightElbow = r.elbow
         }
+        // The hand holding the gun closes around it the way the viewmodel's
+        // own hand did — only a tracked one, since an untracked hand hangs
+        // and holds nothing.
+        if let gripFingers {
+            if Renderer.dominantHandIsLeft, targets.leftHand != nil { targets.leftFingers = gripFingers }
+            if !Renderer.dominantHandIsLeft, targets.rightHand != nil { targets.rightFingers = gripFingers }
+        }
         let pose = rig.pose(targets)
-        return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root)
+        return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root,
+                                   leftHand: rig.handMatrix(pose, left: true),
+                                   rightHand: rig.handMatrix(pose, left: false))
     }
 
     /// A tracked arm as the rig wants it, in GoldSrc world: the wrist, the
@@ -1549,11 +1583,13 @@ actor Renderer {
                 lambda_set_hand_pose(p.x, p.y, p.z,
                                      hand.localFwd.x, hand.localFwd.y, hand.localFwd.z,
                                      hand.localUp.x, hand.localUp.y, hand.localUp.z)
-                // Fire follows the weapon barrel (hand forward) by default;
-                // the accessibility option aims shots along gaze instead, for
+                // Fire follows the weapon barrel by default — the drawn one,
+                // read off the viewmodel's idle grip (barrelDirection), or the
+                // wrist→knuckle ray for a viewmodel with no hand to hold it
+                // by. The accessibility option aims along gaze instead, for
                 // players who can't comfortably point with the hand.
                 aimDir = Renderer.fireAlongGaze ? Renderer.currentGazeDir()
-                                                : hand.worldForward
+                                                : (barrelDirection(hand) ?? hand.worldForward)
                 Renderer.aimDiag.aimSource = Renderer.fireAlongGaze ? "gaze(hand)" : "barrel"
             } else {
                 lambda_clear_hand_pose()
@@ -1886,8 +1922,20 @@ actor Renderer {
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
+        var gripFingers: [String: simd_quatf]? = nil
+        if weaponActive, let grip = weaponPass.grip, !weaponPass.palette.isEmpty {
+            gripFingers = ViewmodelGrip.fingerPose(boneNames: weaponPass.boneNames,
+                                                   palette: weaponPass.palette, grip: grip,
+                                                   handIsLeft: Renderer.dominantHandIsLeft)
+        }
         let body = avatarBodyDraw(deviceAnchor: deviceAnchor,
-                                  time: drawable.frameTiming.presentationTime.timeInterval)
+                                  time: drawable.frameTiming.presentationTime.timeInterval,
+                                  gripFingers: gripFingers)
+        // The body's hands replace the viewmodel's: its gloves, floating off
+        // hand and sleeve are cut, and the gun alone goes into the avatar's
+        // hand. Without a grip there is nothing to pin the gun by, so the
+        // viewmodel keeps its hands.
+        weaponPass.hideHands = body != nil && weaponPass.grip != nil
         let supplementalPassActive = weaponActive || joystickVisible || body != nil
         if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
@@ -1903,7 +1951,8 @@ actor Renderer {
             armPass = ArmPass(device: device, layerRenderer: layerRenderer,
                               maxBuffersInFlight: maxBuffersInFlight)
         }
-        let armVertices = armSkeletonVertices()
+        // The avatar's arms are the replacement when the body is drawn.
+        let armVertices = body == nil ? armSkeletonVertices() : []
         if !armVertices.isEmpty {
             armPass.ensureDepth(width: drawable.colorTextures[0].width,
                                 height: drawable.colorTextures[0].height,
@@ -2129,20 +2178,31 @@ actor Renderer {
                 handWorld.columns.2 = SIMD4<Float>(fwd, 0)
                 handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
 
-                let B = studioToWorld   // GoldSrc (x fwd, y left, z up, inches) → Apple metres
-                // Tunable grip correction in the hand-local frame.
-                let C = matrix4x4_translation(0, 0, Renderer.gripPushM)
-                      * matrix4x4_rotation(radians: Renderer.gripYawDeg   * .pi/180, axis: SIMD3(0,1,0))
-                      * matrix4x4_rotation(radians: Renderer.gripPitchDeg * .pi/180, axis: SIMD3(1,0,0))
-                      * matrix4x4_rotation(radians: Renderer.gripRollDeg  * .pi/180, axis: SIMD3(0,0,1))
-                // Place the viewmodel's POSED Bip01 R Hand frame onto the
-                // physical hand: model = handWorld · C · B · inverse(handBone).
-                // handBone comes from this tick's sequence pose, so the grip
-                // stays pinned while the gun (recoil), the off-hand and the
-                // magazine animate around it exactly as Valve authored them.
-                let handBoneInv = weaponPass.hasHandBone ? weaponPass.handBone.inverse
-                                                         : matrix_identity_float4x4
-                model = handWorld * C * B * handBoneInv
+                if let grip = weaponPass.grip {
+                    // Pin the viewmodel's grip bone onto a Bip01 hand frame —
+                    // the avatar's posed hand when the body is drawn (so the
+                    // gun stays in the visible hand even where the arm cannot
+                    // quite reach the tracked one), else the tracked hand
+                    // itself. Both are the same Bip01 convention every stock
+                    // viewmodel hand uses, so no tuned correction sits in
+                    // between. The grip bone is this tick's pose, so recoil,
+                    // the pump and the magazine animate around a still hand.
+                    let left = Renderer.dominantHandIsLeft
+                    let bodyHand = left ? body?.leftHand : body?.rightHand
+                    let handFrame = bodyHand ?? trackedHandFrame(hand)
+                    model = studioToWorld * ViewmodelGrip.modelMatrix(hand: handFrame, grip: grip,
+                                                                      palette: weaponPass.palette,
+                                                                      handIsLeft: left)
+                } else {
+                    // No hand to hold it by (the hivehand): the old tuned
+                    // placement of the viewmodel origin at the hand.
+                    let B = studioToWorld   // GoldSrc (x fwd, y left, z up, inches) → Apple metres
+                    let C = matrix4x4_translation(0, 0, Renderer.gripPushM)
+                          * matrix4x4_rotation(radians: Renderer.gripYawDeg   * .pi/180, axis: SIMD3(0,1,0))
+                          * matrix4x4_rotation(radians: Renderer.gripPitchDeg * .pi/180, axis: SIMD3(1,0,0))
+                          * matrix4x4_rotation(radians: Renderer.gripRollDeg  * .pi/180, axis: SIMD3(0,0,1))
+                    model = handWorld * C * B
+                }
 
                 // UI arcs, billboarded to the head so they read from any
                 // angle: the reload-hold ring floats above the weapon; the
@@ -2371,6 +2431,9 @@ nonisolated let studioToWorld: float4x4 = {
 
 /// Apple world direction → GoldSrc axes (unit length preserved).
 nonisolated func studioDirection(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-v.z, -v.x, v.y) }
+
+/// GoldSrc axes → Apple world direction; the inverse of `studioDirection`.
+nonisolated func appleDirection(_ s: SIMD3<Float>) -> SIMD3<Float> { SIMD3(-s.y, s.z, -s.x) }
 
 /// Apple world point (metres) → GoldSrc axes (inches).
 nonisolated func studioPoint(_ p: SIMD3<Float>) -> SIMD3<Float> { studioDirection(p) * 39.37 }

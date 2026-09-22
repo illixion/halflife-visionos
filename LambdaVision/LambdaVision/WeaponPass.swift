@@ -50,11 +50,15 @@ final class WeaponPass {
 
     /// A second skinned model drawn alongside the weapon: the player body.
     /// `palette` is bone→model in GoldSrc units, `model` is model→world in
-    /// Apple metres, the same contract as the weapon's.
+    /// Apple metres, the same contract as the weapon's. `leftHand` /
+    /// `rightHand` are the posed hand bones in the world (model→world ·
+    /// palette), the frames a held gun is pinned to.
     struct BodyDraw {
         var mesh: StudioMesh
         var palette: [float4x4]
         var model: float4x4
+        var leftHand: float4x4?
+        var rightHand: float4x4?
     }
 
     private let device: MTLDevice
@@ -69,8 +73,23 @@ final class WeaponPass {
     private let layered: Bool
 
     // The uploaded viewmodel, replaced whenever the extractor bakes a new one.
+    // `gunMesh` is the same bake with Valve's hands cut out (ViewmodelGrip),
+    // drawn instead whenever the first-person body supplies the hands.
     private var mesh: StudioMesh?
+    private var gunMesh: StudioMesh?
     private var uploadedGeneration: UInt32 = 0
+
+    /// Draw the gun without the viewmodel's own hands and sleeves. Set by the
+    /// caller each frame: on while the avatar's hands are the ones holding it.
+    var hideHands = false
+    private var drawnMesh: StudioMesh? { hideHands ? (gunMesh ?? mesh) : mesh }
+
+    /// Where the gun is held, read off the idle pose at upload; nil for a
+    /// viewmodel with no hand to hold it by (the hivehand).
+    private(set) var grip: ViewmodelGrip.Grip?
+    /// The bake's idle pose (sequence 0, frame 0): the reference for the
+    /// barrel's direction in the hand.
+    private(set) var idlePalette: [float4x4] = []
 
     // Bone table of the uploaded model and the index of its grip hand bone
     // ("Bip01 R Hand"; -1 when the model has none — then handBone stays
@@ -82,7 +101,7 @@ final class WeaponPass {
     // units), refreshed each frame by update(). `handBone` is the POSED grip
     // bone's frame, so pinning it to the tracked hand keeps the gun and the
     // off-hand animating exactly as authored around a fixed grip.
-    private var palette: [float4x4] = []
+    private(set) var palette: [float4x4] = []
     private var pose = lambda_weapon_pose_t()
     private(set) var handBone = matrix_identity_float4x4
     private(set) var poseSequence: Int = 0
@@ -233,13 +252,28 @@ final class WeaponPass {
         guard locked != 0,
               let uploaded = StudioMesh(device: device, mesh: raw, generation: gen, label: "Weapon")
         else { return }
+        let isHand = ViewmodelGrip.handTriangleFilter(textureNames: uploaded.textureNames,
+                                                      boneNames: uploaded.boneNames)
+        let gunOnly = StudioMesh(device: device, mesh: raw, generation: gen, label: "WeaponGun",
+                                 omit: isHand)
+
+        var rest = lambda_weapon_pose_t()
+        let idle = lambda_weapon_copy_rest_pose(&rest) == gen ? StudioMesh.palette(from: &rest) : []
 
         self.mesh = uploaded
+        self.gunMesh = gunOnly
+        self.idlePalette = idle
+        let geometry = ViewmodelGrip.boneGeometry(boneCount: uploaded.boneNames.count,
+                                                  textureNames: uploaded.textureNames,
+                                                  vertices: StudioMesh.vertexTextureBones(of: raw))
+        self.grip = ViewmodelGrip.grip(boneNames: uploaded.boneNames, parents: uploaded.boneParents,
+                                       pose: idle, extractorChoice: uploaded.handBoneIndex,
+                                       geometry: geometry)
         self.palette = []          // refreshPose() fills it for this generation
         self.handBone = matrix_identity_float4x4
         self.uploadedGeneration = gen
 
-        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex)")
+        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none")")
     }
 
     /// Allocate/resize the weapon depth to match the drawable colour slice.
@@ -260,7 +294,7 @@ final class WeaponPass {
     /// Resources that must be resident this frame (MTL4 has no auto tracking).
     func residentResources(uniformBufferIndex: Int, body: StudioMesh? = nil) -> [MTLResource] {
         var r: [MTLResource] = []
-        if let mesh { r.append(contentsOf: mesh.resources) }
+        if let mesh = drawnMesh { r.append(contentsOf: mesh.resources) }
         if let body { r.append(contentsOf: body.resources) }
         if let depth { r.append(depth) }
         r.append(weaponBuffers.uniforms[uniformBufferIndex])
@@ -309,6 +343,7 @@ final class WeaponPass {
         // Slot 0 of the weapon uniforms doubles as the arcs' binding, so it is
         // written even on a frame with no weapon.
         let ub = weaponBuffers.uniforms[uniformBufferIndex]
+        let mesh = drawnMesh
         if drawWeapon, let mesh {
             writeUniforms(mesh: mesh, model: model, shading: shading, into: ub)
         } else {
