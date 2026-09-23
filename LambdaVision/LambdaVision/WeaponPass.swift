@@ -72,6 +72,11 @@ final class WeaponPass {
     private let depthState: MTLDepthStencilState
     private let ringPipeline: MTLRenderPipelineState
     private let ringDepthState: MTLDepthStencilState
+    // Screen fade over the gun and body (fadeVertexShader): blended, and
+    // multiplied for a modulating fade; drawn only where this pass wrote depth.
+    private let fadePipeline: MTLRenderPipelineState
+    private let fadeModulatePipeline: MTLRenderPipelineState
+    private let fadeDepthState: MTLDepthStencilState
     private let vertexArgTable: MTL4ArgumentTable
     private let fragmentArgTable: MTL4ArgumentTable
     private let colorFormat: MTLPixelFormat
@@ -235,6 +240,32 @@ final class WeaponPass {
         rpdsc.depthAttachmentPixelFormat = depthFormat
         rpdsc.maxVertexAmplificationCount = layerRenderer.properties.viewCount
         self.ringPipeline = try! device.makeRenderPipelineState(descriptor: rpdsc)
+        let fpd = MTLRenderPipelineDescriptor()
+        fpd.label = "WeaponFadePipeline"
+        fpd.vertexFunction = library?.makeFunction(name: "fadeVertexShader")
+        fpd.fragmentFunction = library?.makeFunction(name: "ringFragmentShader")
+        fpd.rasterSampleCount = 1
+        fpd.colorAttachments[0].pixelFormat = colorFormat
+        fpd.colorAttachments[0].isBlendingEnabled = true
+        fpd.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        fpd.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        fpd.colorAttachments[0].sourceAlphaBlendFactor = .zero
+        fpd.colorAttachments[0].destinationAlphaBlendFactor = .one
+        fpd.depthAttachmentPixelFormat = depthFormat
+        fpd.maxVertexAmplificationCount = layerRenderer.properties.viewCount
+        self.fadePipeline = try! device.makeRenderPipelineState(descriptor: fpd)
+        fpd.label = "WeaponFadeModulatePipeline"
+        fpd.colorAttachments[0].sourceRGBBlendFactor = .zero
+        fpd.colorAttachments[0].destinationRGBBlendFactor = .sourceColor
+        self.fadeModulatePipeline = try! device.makeRenderPipelineState(descriptor: fpd)
+        let fdsd = MTLDepthStencilDescriptor()
+        // The triangle sits at depth 0, the value the pass clears to; it
+        // passes wherever the stored depth differs — where the gun or body
+        // drew — and nowhere else.
+        fdsd.depthCompareFunction = .notEqual
+        fdsd.isDepthWriteEnabled = false
+        self.fadeDepthState = device.makeDepthStencilState(descriptor: fdsd)!
+
         let rdsd = MTLDepthStencilDescriptor()
         rdsd.depthCompareFunction = .always
         rdsd.isDepthWriteEnabled = false
@@ -253,7 +284,8 @@ final class WeaponPass {
         self.bodyBuffers = WeaponPass.makeSkinnedBuffers(device: device, count: maxBuffersInFlight,
                                                          label: "Body")
         self.ringUniformBuffers = (0..<maxBuffersInFlight).map { _ in
-            device.makeBuffer(length: WeaponPass.arcSlotStride * WeaponPass.maxArcs,
+            // One slot per arc, and one more for the screen fade.
+            device.makeBuffer(length: WeaponPass.arcSlotStride * (WeaponPass.maxArcs + 1),
                               options: .storageModeShared)!
         }
     }
@@ -453,6 +485,7 @@ final class WeaponPass {
                 drawWeapon: Bool = true,
                 body: BodyDraw? = nil,
                 arcs: [Arc] = [],
+                fade: (color: SIMD4<Float>, modulate: Bool)? = nil,
                 hud: ((MTL4RenderCommandEncoder) -> Void)? = nil) {
         guard let depth else { return }
 
@@ -540,6 +573,22 @@ final class WeaponPass {
         if drawWeapon, let mesh {
             drawSkinned(enc, mesh: mesh, palette: heldPalette,
                         uniforms: ub, bones: weaponBuffers.bones[uniformBufferIndex])
+        }
+
+        // The game's screen fade over the gun and body, which the engine
+        // already applied to its own image (see fadeVertexShader). Before
+        // the arcs and holograms, which stay on top as the HUD does.
+        if let fade, (drawWeapon && mesh != nil) || body != nil {
+            let rub = ringUniformBuffers[uniformBufferIndex]
+            let offset = WeaponPass.maxArcs * WeaponPass.arcSlotStride
+            var ru = RingUniforms()
+            ru.color = fade.color
+            memcpy(rub.contents() + offset, &ru, MemoryLayout<RingUniforms>.size)
+            vertexArgTable.setAddress(rub.gpuAddress + UInt64(offset), index: BufferIndex.uniforms.rawValue)
+            enc.setRenderPipelineState(fade.modulate ? fadeModulatePipeline : fadePipeline)
+            enc.setDepthStencilState(fadeDepthState)
+            enc.setCullMode(.none)
+            enc.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
         }
 
         // UI arcs (reload ring, weapon-menu sectors), drawn last with depth

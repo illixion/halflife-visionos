@@ -209,6 +209,78 @@ index d4628f3..295b93d 100644
  		GL_RenderFrame( &rvp );
  		S_UpdateFrame( &rvp );
  		viewnum++;
+diff --git a/engine/client/dll_int/cl_game.c b/engine/client/dll_int/cl_game.c
+index 109e9c8..3864666 100644
+--- a/engine/client/dll_int/cl_game.c
++++ b/engine/client/dll_int/cl_game.c
+@@ -531,6 +531,17 @@ fill screen with specfied color
+ can be modulated
+ =============
+ */
++// VR: the fade this frame — r, g, b, alpha (0..1) and 1 for FFADE_MODULATE —
++// for the visionOS platform, whose weapon pass draws the gun and body after
++// the engine has finished and fades them to match. Read by the bridge
++// (lambda_screen_fade) on the render thread; a torn read costs one frame of
++// one channel.
++float cl_vr_screen_fade[5] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
++// The platform's placement of the 2D layer (ref/gl gl_draw.c). The fade must
++// cover the whole eye image, not that panel: drawn into it, a fade to black
++// was a black rectangle floating in front of the player.
++extern int cl_stereo_2d_viewport_active;
++
+ static void CL_DrawScreenFade( void )
+ {
+ 	screenfade_t	*sf = &clgame.fade;
+@@ -538,9 +549,26 @@ static void CL_DrawScreenFade( void )
+ 
+ 	alpha = V_FadeAlpha( sf );
+ 
++	cl_vr_screen_fade[0] = sf->fader * ( 1.0f / 255.0f );
++	cl_vr_screen_fade[1] = sf->fadeg * ( 1.0f / 255.0f );
++	cl_vr_screen_fade[2] = sf->fadeb * ( 1.0f / 255.0f );
++	cl_vr_screen_fade[3] = alpha * ( 1.0f / 255.0f );
++	cl_vr_screen_fade[4] = FBitSet( sf->fadeFlags, FFADE_MODULATE ) ? 1.0f : 0.0f;
++
+ 	if( !alpha )
+ 		return;
+ 
++	// Over the whole eye image, then back to the panel for the HUD drawn
++	// after it (titles, credits), which stays on top of the fade as on a
++	// flat screen.
++	int panel = cl_stereo_2d_viewport_active;
++	if( panel )
++	{
++		cl_stereo_2d_viewport_active = 0;
++		ref.dllFuncs.R_Set2DMode( false );
++		ref.dllFuncs.R_Set2DMode( true );
++	}
++
+ 	if( !FBitSet( sf->fadeFlags, FFADE_MODULATE ))
+ 	{
+ 		ref.dllFuncs.GL_SetRenderMode( kRenderTransTexture );
+@@ -567,6 +595,13 @@ static void CL_DrawScreenFade( void )
+ 	ref.dllFuncs.R_DrawStretchPic( 0, 0, refState.width, refState.height, 0, 0, 1, 1,
+ 		R_GetBuiltinTexture( REF_WHITE_TEXTURE ));
+ 	ref.dllFuncs.Color4ub( 255, 255, 255, 255 );
++
++	if( panel )
++	{
++		cl_stereo_2d_viewport_active = 1;
++		ref.dllFuncs.R_Set2DMode( false );
++		ref.dllFuncs.R_Set2DMode( true );
++	}
+ }
+ 
+ /*
+@@ -903,6 +938,8 @@ static void CL_DrawLoadingOrPaused( int tex )
+ 
+ void CL_DrawHUD( int state )
+ {
++	cl_vr_screen_fade[3] = 0.0f; // no fade unless this state draws one
++
+ 	if( state == CL_ACTIVE && !cl.video_prepped )
+ 		state = CL_LOADING;
+ 
 diff --git a/engine/client/dll_int/ref_common.c b/engine/client/dll_int/ref_common.c
 index 9776665..eb89e31 100644
 --- a/engine/client/dll_int/ref_common.c
@@ -720,155 +792,30 @@ index 0000000..f3f5ef5
 +#endif // XASH_SOUND == SOUND_COREAUDIO
 +#endif // XASH_DEDICATED
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-new file mode 100644
-index 0000000..9da0b3f
---- /dev/null
+index 97536bb..9da0b3f 100644
+--- a/engine/platform/visionos/vid_visionos.c
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -0,0 +1,144 @@
-+/*
-+vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
-+
-+CompositorServices owns the per-eye drawables; the host app's bridge feeds
-+input/audio. The renderer (eventually ref_vk_lite) talks to MoltenVK directly.
-+This file exists only to satisfy the engine's platform contract for the few
-+entry points platform.h doesn't already inline-stub for non-SDL builds.
-+*/
-+
-+#include "platform/platform.h"
-+#include "client.h"
-+#include "ref_common.h"
-+#include <dlfcn.h>
-+
-+#if XASH_VIDEO == VIDEO_VISIONOS
-+
-+// ANGLE's EGL is statically linked into the app exec. Declared here to
-+// avoid pulling EGL/egl.h (and its system-header dependencies) into the
-+// engine's include path.
-+extern void *eglGetProcAddress( const char *procname );
-+
-+// ---- Video / VID -----------------------------------------------------------
-+
+@@ -21,12 +21,18 @@ extern void *eglGetProcAddress( const char *procname );
+ 
+ // ---- Video / VID -----------------------------------------------------------
+ 
 +// Render-target size chosen by the host app (Lambda_Bridge.c) from the
 +// CompositorServices drawable properties. Defined in the app bridge; both
 +// live in the single statically-linked binary.
 +extern int lambda_vid_render_width;
 +extern int lambda_vid_render_height;
 +
-+qboolean R_Init_Video( ref_graphic_apis_t type )
-+{
-+	(void)type;
-+	host.renderinfo_changed = false;
+ qboolean R_Init_Video( ref_graphic_apis_t type )
+ {
+ 	(void)type;
+ 	host.renderinfo_changed = false;
+-	refState.width  = 2048;
+-	refState.height = 2048;
 +	refState.width  = lambda_vid_render_width  > 0 ? lambda_vid_render_width  : 2048;
 +	refState.height = lambda_vid_render_height > 0 ? lambda_vid_render_height : 2048;
-+	if( ref.dllFuncs.GL_InitExtensions )
-+		ref.dllFuncs.GL_InitExtensions();
-+	return true;
-+}
-+
-+void R_Free_Video( void )
-+{
-+}
-+
-+qboolean VID_SetMode( void )
-+{
-+	return true;
-+}
-+
-+void VID_Info_f( void )
-+{
-+	Con_Printf( "visionOS: CompositorServices owns the present (no window)\n" );
-+}
-+
-+void VID_RestoreScreenResolution( window_mode_t window_mode )
-+{
-+	(void)window_mode;
-+}
-+
-+void VID_SaveWindowSize( int width, int height, qboolean maximized )
-+{
-+	(void)width; (void)height; (void)maximized;
-+}
-+
-+rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
-+{
-+	(void)window_mode;
-+	refState.width  = width;
-+	refState.height = height;
-+	return rserr_ok;
-+}
-+
-+void *GL_GetProcAddress( const char *name )
-+{
-+	if( !name ) return NULL;
-+	void *fn = eglGetProcAddress( name );
-+	if( !fn ) fn = dlsym( RTLD_DEFAULT, name );
-+	return fn;
-+}
-+
-+int GL_SetAttribute( int attr, int val )
-+{
-+	(void)attr; (void)val;
-+	return 0;
-+}
-+
-+int GL_GetAttribute( int attr, int *val )
-+{
-+	(void)attr;
-+	if( val ) *val = 0;
-+	return 0;
-+}
-+
-+void GL_SwapBuffers( void )
-+{
-+}
-+
-+void GL_UpdateSwapInterval( void )
-+{
-+}
-+
-+int R_MaxVideoModes( void )
-+{
-+	return 0;
-+}
-+
-+struct vidmode_s *R_GetVideoMode( int num )
-+{
-+	(void)num;
-+	return NULL;
-+}
-+
-+ref_window_type_t R_GetWindowHandle( void **handle, ref_window_type_t type )
-+{
-+	(void)type;
-+	if( handle ) *handle = NULL;
-+	return REF_WINDOW_TYPE_NULL;
-+}
-+
-+qboolean SW_CreateBuffer( int width, int height, uint *stride, uint *bpp, uint *r, uint *g, uint *b )
-+{
-+	(void)width; (void)height; (void)stride; (void)bpp; (void)r; (void)g; (void)b;
-+	return false;
-+}
-+
-+void *SW_LockBuffer( void )
-+{
-+	return NULL;
-+}
-+
-+void SW_UnlockBuffer( void )
-+{
-+}
-+
-+platform_orientation_t Platform_GetDisplayOrientation( void )
-+{
-+	return ORIENTATION_LANDSCAPE;
-+}
-+
-+void Platform_Minimize_f( void )
-+{
-+}
-+
-+#endif // XASH_VIDEO == VIDEO_VISIONOS
+ 	if( ref.dllFuncs.GL_InitExtensions )
+ 		ref.dllFuncs.GL_InitExtensions();
+ 	return true;
 diff --git a/engine/wscript b/engine/wscript
 index 5b5e3a6..c882802 100644
 --- a/engine/wscript

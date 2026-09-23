@@ -595,6 +595,17 @@ actor Renderer {
         return SIMD3(p.x, p.y, p.z)
     }
 
+    /// The game's screen fade for the weapon pass: a blended fade's colour
+    /// and alpha, or for a modulating one the colour the engine multiplies
+    /// by (its fade colour mixed toward white by alpha).
+    private func screenFade() -> (color: SIMD4<Float>, modulate: Bool)? {
+        var f = [Float](repeating: 0, count: 5)
+        guard lambda_screen_fade(&f) != 0 else { return nil }
+        let rgb = SIMD3(f[0], f[1], f[2]), a = f[3]
+        return f[4] != 0 ? (SIMD4(rgb * a + SIMD3(repeating: 1 - a), 1), true)
+                         : (SIMD4(rgb, a), false)
+    }
+
     /// The aim ray for the reticle: from the drawn muzzle along the barrel,
     /// with the distance the client's trace found (xash units → metres).
     /// Nil when fire follows gaze, since the barrel then is not the aim.
@@ -2480,6 +2491,7 @@ actor Renderer {
                                   drawWeapon: drawWeapon,
                                   body: body,
                                   arcs: arcs,
+                                  fade: screenFade(),
                                   hud: hudScene.flatMap { [uniformBufferIndex] scene in hudRenderer.map { holo in
                                       { enc in
                                           holo.encode(scene, encoder: enc,

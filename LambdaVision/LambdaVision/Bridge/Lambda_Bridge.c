@@ -2516,6 +2516,12 @@ int lambda_aim_hit(float *distance) {
     return 1;
 }
 
+int lambda_screen_fade(float out[5]) {
+    extern float cl_vr_screen_fade[5];
+    for (int i = 0; i < 5; i++) out[i] = cl_vr_screen_fade[i];
+    return out[3] > 0.0f;
+}
+
 void lambda_set_aim_offset(float pitch_deg, float yaw_deg) {
     atomic_store(&g_pending_aim_pitch_cd, (int)lroundf(pitch_deg * 100.0f));
     atomic_store(&g_pending_aim_yaw_cd,   (int)lroundf(yaw_deg * 100.0f));

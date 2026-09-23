@@ -328,6 +328,13 @@ void lambda_set_muzzle(float fwd, float left, float up, int active);
 // (no muzzle, nothing within range, or the muzzle is behind a wall).
 int lambda_aim_hit(float *distance);
 
+// The game's screen fade this frame (env_fade, the death fade, "unforeseen
+// consequences"): r, g, b, alpha in 0..1 and 1 for a modulating fade. The
+// engine publishes it instead of drawing it into its 2D canvas, which the
+// headset shows as a floating panel; the weapon pass lays it over the whole
+// view. Returns nonzero while there is a fade to draw.
+int lambda_screen_fade(float out[5]);
+
 // Immersive +use: while active, hlsdk's PlayerUse points its selection cone
 // along view+offset (the eye→fingertip ray; same conventions as the aim
 // offset) and prefers usable entities over train mounting. Pass active=0

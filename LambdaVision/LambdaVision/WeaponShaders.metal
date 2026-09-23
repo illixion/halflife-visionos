@@ -135,3 +135,22 @@ fragment float4 ringFragmentShader(RingInOut in [[stage_in]])
 {
     return in.color;
 }
+
+// ---- Screen fade over the gun and body ------------------------------------
+// The engine fades its own image (world) before the weapon pass runs, so the
+// gun and body drawn here would stay bright through a fade to black. A
+// full-view triangle, depth-tested against this pass's own depth so it lands
+// only where the gun or body drew, lays the same fade over them. Colour from
+// RingUniforms.color: the fade's rgb and alpha for a blended fade, or the
+// modulating colour (alpha 1) for FFADE_MODULATE, which a second pipeline
+// multiplies in.
+
+vertex RingInOut fadeVertexShader(uint vid [[vertex_id]],
+                                  constant RingUniforms & r [[ buffer(BufferIndexUniforms) ]])
+{
+    float2 p = float2((vid << 1) & 2, vid & 2) * 2.0 - 1.0;   // covers the view
+    RingInOut out;
+    out.position = float4(p, 0.0, 1.0);   // the depth clear value (see fadeDepthState)
+    out.color = r.color;
+    return out;
+}
