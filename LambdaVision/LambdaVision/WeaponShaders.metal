@@ -96,7 +96,7 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
     float3 n = normalize(in.normal);
     float ndl = max(dot(n, normalize(u.lightDir.xyz)), 0.0);
     float3 lit = c.rgb * (u.ambient.rgb + u.lightColor.rgb * ndl);
-    return float4(lit, 1.0);
+    return float4(displayLinearize(lit, u.renderFlags.w), 1.0);
 }
 
 // ---- UI arcs (reload ring, radial-menu sectors) ---------------------------

@@ -71,7 +71,8 @@ typedef struct
     simd_float4     eyePos[2];
     simd_float4     eyeRight[2];
     // x = masked alpha test (STUDIO_NF_MASKED), y = chrome (STUDIO_NF_CHROME),
-    // z = near clip: discard fragments closer than this to the eye, metres (0 = off).
+    // z = near clip: discard fragments closer than this to the eye, metres (0 = off),
+    // w = displayLinearize exponent (0 = off).
     simd_float4     renderFlags;
 } WeaponUniforms;
 
@@ -93,7 +94,8 @@ typedef struct
     float           alpha;          // opacity over whatever is behind
     float           minDistance;    // world units: nearer than this counts as this near (no divide blow-ups)
     float           overscan;       // the backdrop reaches this far past the captured frame (fraction of it), edge texels smeared and darkened
-    float           pad[3];
+    float           decodeGamma;    // displayLinearize exponent (0 = write the engine's values as they are)
+    float           pad[2];
 } SnapshotUniforms;
 
 // Constant-buffer slot spacing for the per-submesh WeaponUniforms array, and
@@ -127,6 +129,31 @@ typedef struct
     float       startTurns;  // arc start, turns clockwise from 12 o'clock
     float       sweepTurns;  // arc sweep, turns
 } RingUniforms;
+
+// Composite pass (Shaders.metal fragmentShader / fragmentShaderFXAA),
+// fragment buffer BufferIndexUniforms.
+typedef struct
+{
+    float decodeGamma;  // displayLinearize exponent (0 = off)
+    float hdrTest;      // headroom test pattern: 0 off, 1 dots on black, 2 full-view patches
+    float aspect;       // eye viewport width / height, so the test dots are round
+    float pad;
+} DisplayParams;
+
+#ifdef __METAL_VERSION__
+// The drawable is linear light (rgba16Float, extended range), but the
+// engine's colours are gamma-encoded for a CRT the way every 8-bit game's
+// are: its 0.5 means "looks half as bright", about 22% of the light. Written
+// straight into the drawable they read as linear and everything under white
+// is lifted, darks most. Every pass that puts a game colour on the drawable
+// decodes it with this first; UI colours (HUD, arcs) are authored for the
+// drawable as is and skip it. Clamped to SDR white: highlight expansion
+// above 1.0 is the tone map's job, not the decode's.
+static inline float3 displayLinearize(float3 c, float gamma)
+{
+    return gamma > 0.0 ? metal::pow(metal::saturate(c), gamma) : c;
+}
+#endif
 
 // Lambda engine bridge — only visible to Swift/ObjC, not to Metal shaders.
 #ifndef __METAL_VERSION__

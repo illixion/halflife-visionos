@@ -35,6 +35,7 @@ enum AppSettingsStore {
     private static let fxaaEnabledKey     = "lambdavision.settings.fxaaEnabled"
     private static let gammaKey           = "lambdavision.settings.gamma"
     private static let brightnessKey      = "lambdavision.settings.brightness"
+    private static let linearColorKey     = "lambdavision.settings.linearColor"
     private static let snapTurnDegreesKey = "lambdavision.settings.snapTurnDegrees"
 
     static var renderScale: Double {
@@ -54,6 +55,12 @@ enum AppSettingsStore {
     static var fxaaEnabled: Bool {
         get { bool(fxaaEnabledKey, true) }
         set { defaults.set(newValue, forKey: fxaaEnabledKey) }
+    }
+    /// Decode the engine's gamma-encoded image to linear light for the
+    /// drawable (Renderer.displayDecodeGamma).
+    static var linearColor: Bool {
+        get { bool(linearColorKey, true) }
+        set { defaults.set(newValue, forKey: linearColorKey) }
     }
     static var gamma: Double {
         get { double(gammaKey, 2.4) }   // tuned on the headset (engine default 2.5)

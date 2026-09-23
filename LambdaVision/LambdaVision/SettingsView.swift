@@ -57,6 +57,7 @@ struct SettingsView: View {
                     // cheaper configuration brings it back. Edge smoothing is
                     // the toggle below, folded into the composite pass.
                     Toggle("Edge smoothing (FXAA)", isOn: $settings.fxaaEnabled)
+                    Toggle("Linear colour", isOn: $settings.linearColor)
                     slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
                         String(format: "%.1f", $0)
                     }
@@ -69,10 +70,18 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft.")
+                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft. Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it.")
                 }
 
                 Section("Diagnostics") {
+                    Picker("HDR headroom test", selection: $settings.hdrTest) {
+                        ForEach(HDRTestPattern.allCases) { Text($0.label).tag($0) }
+                    }
+                    TimelineView(.periodic(from: .now, by: 2)) { _ in
+                        Text("Thermal state: \(ProcessInfo.processInfo.thermalState.label). Replaces the view with test values over black, each above a 1.0 reference, left to right 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4. Note the rightmost that is still brighter than the one before it, in both layouts, and the thermal state when you did.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                     Button {
                         openWindow(id: "console")
                     } label: {

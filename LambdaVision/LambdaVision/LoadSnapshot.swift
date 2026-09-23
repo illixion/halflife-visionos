@@ -320,6 +320,7 @@ final class LoadSnapshot {
         u.alpha = alpha
         u.minDistance = 0.1
         u.overscan = Self.overscan
+        u.decodeGamma = Renderer.displayDecodeGamma
 
         let buffer = uniforms[slot % uniforms.count]
         buffer.contents().storeBytes(of: u, as: SnapshotUniforms.self)

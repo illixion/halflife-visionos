@@ -118,6 +118,20 @@ final class GameSettings {
         didSet { AppSettingsStore.fxaaEnabled = fxaaEnabled
                  Renderer.compositeFXAA = fxaaEnabled }
     }
+    /// The drawable is linear light; the engine's image is gamma-encoded.
+    /// On, every game colour is decoded before it lands there (true darks);
+    /// off writes the engine's values as they are, which lifts everything
+    /// under white. Live.
+    var linearColor: Bool = AppSettingsStore.linearColor {
+        didSet { AppSettingsStore.linearColor = linearColor
+                 Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0 }
+    }
+    /// HDR headroom test pattern over the whole view. Not stored: a
+    /// diagnostic, and a black screen on the next launch would look broken.
+    var hdrTest: HDRTestPattern = .off {
+        didSet { Renderer.hdrTestMode = hdrTest.rawValue
+                 AppLog.render.line("[HDR] test pattern \(hdrTest.label), thermal state \(ProcessInfo.processInfo.thermalState.label)") }
+    }
     var gamma: Double = AppSettingsStore.gamma {
         didSet { AppSettingsStore.gamma = gamma; cvar("gamma", gamma) }
     }
@@ -236,6 +250,7 @@ final class GameSettings {
         Renderer.engineScale       = Float(renderScale)
         Renderer.useMetalFXChain   = metalFXEnabled
         Renderer.compositeFXAA     = fxaaEnabled
+        Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
@@ -292,5 +307,30 @@ final class GameSettings {
     }
     private func send(_ command: String) {
         _ = command.withCString { lambda_gl_worker_cmd($0) }
+    }
+}
+
+/// Settings → Diagnostics: the HDR headroom test (Shaders.metal hdrTestPattern).
+enum HDRTestPattern: Int, CaseIterable, Identifiable {
+    case off = 0, dots = 1, patches = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .dots: "Small dots"
+        case .patches: "Large patches"
+        }
+    }
+}
+
+extension ProcessInfo.ThermalState {
+    var label: String {
+        switch self {
+        case .nominal: "nominal"
+        case .fair: "fair"
+        case .serious: "serious"
+        case .critical: "critical"
+        @unknown default: "unknown"
+        }
     }
 }

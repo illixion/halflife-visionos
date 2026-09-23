@@ -118,6 +118,9 @@ actor Renderer {
     let commandAllocators: [MTL4CommandAllocator]
     let vertexArgumentTable: MTL4ArgumentTable
     let fragmentArgumentTable: MTL4ArgumentTable
+    /// Per-frame DisplayParams for the composite, one slot per frame in flight.
+    let displayParamsBuffer: MTLBuffer
+    static let displayParamsStride = 256
     #if !targetEnvironment(simulator)
     let residencySets: [MTLResidencySet]
     let commandQueueResidencySet: MTLResidencySet
@@ -256,6 +259,13 @@ actor Renderer {
     // chain above). Read on the render thread every frame, so the Settings
     // toggle applies live — it only picks between two pipeline states.
     nonisolated(unsafe) static var compositeFXAA: Bool = true
+    /// Exponent that decodes the engine's gamma-encoded colours into the
+    /// linear drawable (displayLinearize, ShaderTypes.h): a plain power, as
+    /// the game was lit and textured for a CRT. 0 = write them as they are.
+    static let linearDecodeGamma: Float = 2.2
+    nonisolated(unsafe) static var displayDecodeGamma: Float = linearDecodeGamma
+    /// HDR headroom test pattern in the composite (HDRTestPattern raw value).
+    nonisolated(unsafe) static var hdrTestMode: Int = 0
     // Dominant hand for the weapon anchor + aim, and the accessibility switch
     // that fires along gaze instead of the weapon barrel. Both live.
     nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
@@ -614,12 +624,22 @@ actor Renderer {
     /// The game's screen fade for the weapon pass: a blended fade's colour
     /// and alpha, or for a modulating one the colour the engine multiplies
     /// by (its fade colour mixed toward white by alpha).
+    /// displayLinearize (ShaderTypes.h) for a colour set from the CPU.
+    static func linearize(_ c: SIMD3<Float>) -> SIMD3<Float> {
+        let g = displayDecodeGamma
+        guard g > 0 else { return c }
+        let s = simd_clamp(c, .zero, .one)
+        return SIMD3(powf(s.x, g), powf(s.y, g), powf(s.z, g))
+    }
+
     private func screenFade() -> (color: SIMD4<Float>, modulate: Bool)? {
         var f = [Float](repeating: 0, count: 5)
         guard lambda_screen_fade(&f) != 0 else { return nil }
         let rgb = SIMD3(f[0], f[1], f[2]), a = f[3]
-        return f[4] != 0 ? (SIMD4(rgb * a + SIMD3(repeating: 1 - a), 1), true)
-                         : (SIMD4(rgb, a), false)
+        // Engine colours, gamma-encoded like its image; a modulating fade
+        // multiplies, and a power of a product is the product of powers.
+        return f[4] != 0 ? (SIMD4(Self.linearize(rgb * a + SIMD3(repeating: 1 - a)), 1), true)
+                         : (SIMD4(Self.linearize(rgb), a), false)
     }
 
     /// The aim ray for the reticle: from the drawn muzzle along the barrel,
@@ -930,7 +950,7 @@ actor Renderer {
         let argTableDesc = MTL4ArgumentTableDescriptor()
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
-        argTableDesc.maxBufferBindCount = 0
+        argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
         argTableDesc.maxTextureBindCount = 1
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
@@ -957,6 +977,9 @@ actor Renderer {
                                                            options: [MTLResourceOptions.storageModeShared])!
 
         self.dynamicUniformBuffer.label = "UniformBuffer"
+        self.displayParamsBuffer = device.makeBuffer(length: Self.displayParamsStride * maxBuffersInFlight,
+                                                     options: .storageModeShared)!
+        self.displayParamsBuffer.label = "DisplayParams"
 
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffer.contents()).bindMemory(to: Uniforms.self, capacity: 1)
 
@@ -1010,7 +1033,7 @@ actor Renderer {
         let residencySet = try! self.device.makeResidencySet(descriptor: residencySetDesc)
         residencySet.addAllocations(mesh.vertexBuffers.map { $0.buffer })
         residencySet.addAllocations(mesh.submeshes.map { $0.indexBuffer.buffer })
-        residencySet.addAllocations([dynamicUniformBuffer])
+        residencySet.addAllocations([dynamicUniformBuffer, displayParamsBuffer])
         residencySet.commit()
         commandQueueResidencySet = residencySet
         commandQueue.addResidencySet(residencySet)
@@ -2476,6 +2499,15 @@ actor Renderer {
             renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
             let displayTexture: MTLTexture = displayMap ?? colorMap
             self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
+            let paramsOffset = Self.displayParamsStride * uniformBufferIndex
+            let vp = viewports.first
+            var params = DisplayParams(decodeGamma: Renderer.displayDecodeGamma,
+                                       hdrTest: Float(Renderer.hdrTestMode),
+                                       aspect: vp.map { Float($0.width / max($0.height, 1)) } ?? 1,
+                                       pad: 0)
+            memcpy(displayParamsBuffer.contents() + paramsOffset, &params, MemoryLayout<DisplayParams>.size)
+            self.fragmentArgumentTable.setAddress(displayParamsBuffer.gpuAddress + UInt64(paramsOffset),
+                                                  index: BufferIndex.uniforms.rawValue)
 
             renderEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
         }

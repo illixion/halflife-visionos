@@ -640,7 +640,7 @@ final class WeaponPass {
                 eyeRight: (SIMD4(s.right0, 0), SIMD4(s.right1, 0)),
                 renderFlags: SIMD4((flags & StudioMesh.studioMasked) != 0 ? 1 : 0,
                                    (flags & StudioMesh.studioChrome) != 0 ? 1 : 0,
-                                   nearClip, 0))
+                                   nearClip, Renderer.displayDecodeGamma))
             memcpy(buffer.contents() + k * slotStride, &u, MemoryLayout<WeaponUniforms>.size)
         }
     }

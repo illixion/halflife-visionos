@@ -174,7 +174,50 @@ static inline float3 ditherOutput(float3 c, float2 pixel)
     return max(c + n * kOutputLSB, 0.0);
 }
 
+// HDR headroom test (Settings → Diagnostics). No SDK API reports how far
+// above SDR white (1.0) the display goes; Oneiros measured about one stop
+// (0.5 < 1 < 2, and 2 = 4 = 8) with large grey bands, which an OLED may
+// dim as a whole by area (its brightness limiter). So two layouts over
+// black, each a row of test values over a row of 1.0 references:
+//   1  small dots — a point light's area, the case highlights will be
+//   2  patches filling the view — the worst case for the limiter
+// Values left to right: 0.5 1 1.25 1.5 1.75 2 2.5 3 4. Written raw, past
+// the decode and the dither, so the drawable receives exactly these.
+constant float kHDRTestValues[9] = { 0.5, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0 };
+
+static inline float3 hdrTestPattern(float2 uv, float mode, float aspect)
+{
+    const int n = 9;
+    if (mode > 1.5) {
+        const int i = clamp(int(uv.x * n), 0, n - 1);
+        // a thin black gap between patches keeps them tellable apart
+        const float f = fract(uv.x * n);
+        if (f < 0.04 || f > 0.96 || abs(uv.y - 0.5) < 0.01)
+            return 0.0;
+        return uv.y > 0.5 ? kHDRTestValues[i] : 1.0;
+    }
+    const float spacing = 0.06;                     // centre to centre, view widths
+    const float radius = 0.012;                     // view heights: ~1.2° on the AVP
+    const float x0 = 0.5 - spacing * (n - 1) * 0.5;
+    const int i = clamp(int(round((uv.x - x0) / spacing)), 0, n - 1);
+    const float2 d = float2((uv.x - (x0 + spacing * i)) * aspect, 0.0);
+    const float dTop = length(d + float2(0.0, uv.y - 0.54));
+    const float dRef = length(d + float2(0.0, uv.y - 0.46));
+    if (dTop < radius) return kHDRTestValues[i];
+    if (dRef < radius) return 1.0;
+    return 0.0;
+}
+
+static inline float4 displayOutput(float3 rgb, float alpha, float2 uv, float2 pixel,
+                                   constant DisplayParams &p)
+{
+    if (p.hdrTest > 0.5)
+        return float4(hdrTestPattern(uv, p.hdrTest, p.aspect), 1.0);
+    return float4(ditherOutput(displayLinearize(rgb, p.decodeGamma), pixel), alpha);
+}
+
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
+                               constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
@@ -191,7 +234,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     float2 uv = in.texCoord;
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
 
-    return float4(ditherOutput(float3(colorSample.rgb), in.position.xy), float(colorSample.a));
+    return displayOutput(float3(colorSample.rgb), float(colorSample.a), uv, in.position.xy, params);
 }
 
 // Composite pass with FXAA folded in (Renderer.compositeFXAA, default on).
@@ -199,6 +242,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
 // kernel at the SAMPLED texture's texel size; alpha still comes straight
 // from the centre tap so the drawable's alpha behaviour is unchanged.
 fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
+                                   constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                    texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
@@ -211,5 +255,5 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
-    return float4(ditherOutput(float3(rgb), in.position.xy), float(colorSample.a));
+    return displayOutput(float3(rgb), float(colorSample.a), uv, in.position.xy, params);
 }

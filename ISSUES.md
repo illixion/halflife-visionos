@@ -93,15 +93,29 @@ instead of deleting them.
   only (head-aimed there, no bridge); on device, check the pool follows
   the barrel, the eye fallback behind walls, and brush-entity surfaces.
 
-- **Dark-gradient banding fix: device check pending.** The engine now
-  renders into a 16-bit normalized colour map (8-bit fallback if ANGLE
-  rejects it, logged as `colorMap … not renderable`), and the composite
-  dithers half a stored code before the drawable rounds (format-aware:
-  `drawable colorFormat=… → composite dither` in the log). On device:
-  confirm the log lines, dim vents (c1a2/c2a1) show grain not splotches,
-  GPU cost vs. before, and whether the drawable is `_srgb` — if it is, the
-  engine's gamma-encoded output is being encoded twice (lifted blacks);
-  fixing that changes overall brightness, so it is a separate decision.
+- **Dark-gradient banding fix: confirmed on device.** The colour map is
+  16-bit normalized and the drawable is `rgba16Float` (linear, no dither
+  needed); dim vents are smooth.
+
+- **Linear colour: device check pending.** The drawable is linear light
+  and the engine's image is gamma-encoded, so writing it straight in lifted
+  everything under white (the reason gamma was tuned to 2.4). Settings
+  "Linear colour" (default on, `Renderer.displayDecodeGamma` = 2.2) decodes
+  every game colour before the drawable: composite, weapon/body pass,
+  load snapshot, the fade over the gun. HUD holograms and UI arcs are
+  authored for the drawable and stay as they are. On device: compare on/off
+  in a dark vent and a lit room, retune gamma with it on (likely toward the
+  engine's 2.5), and re-judge the HUD's dark-room dimming against it.
+
+- **HDR headroom re-test: pending.** Settings → Diagnostics "HDR headroom
+  test": test values 0.5 1 1.25 1.5 1.75 2 2.5 3 4 over black, each above a
+  1.0 reference, as small dots (point lights) or view-filling patches (the
+  worst case for the panel's brightness limiter). Oneiros's 2026-09-05
+  result (~1 stop, 2 = 4 = 8) used large bands and did not record thermal
+  state; this logs `[HDR] test pattern …, thermal state …` and the
+  settings row shows it live. Record the ceiling per layout and thermal
+  state; it sets the tone map's peak for the HDR step (half-float engine
+  target + Oneiros-style `tonemapDisplay`).
 
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.

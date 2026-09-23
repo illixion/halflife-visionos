@@ -143,5 +143,5 @@ fragment float4 snapshotFragment(SnapshotOut in [[stage_in]],
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const half3 rgb = color.sample(s, in.uv, in.eye).rgb;
     const float fade = in.outside > 0.0 ? saturate(1.0 - in.outside / max(u.overscan, 1e-3)) * 0.5 : 1.0;
-    return float4(float3(rgb) * fade, u.alpha);
+    return float4(displayLinearize(float3(rgb), u.decodeGamma) * fade, u.alpha);
 }
