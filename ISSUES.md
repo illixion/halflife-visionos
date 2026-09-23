@@ -6,6 +6,33 @@ instead of deleting them.
 
 ## Open — interaction
 
+- **Finish keyboard + mouse and controller play ("flat HL1 in 3D").** Goal:
+  someone with a keyboard and mouse, or a gamepad, can play exactly like
+  desktop Half-Life, just stereo, immersive, and with the 3D viewmodel;
+  hand tracking steps aside entirely. Gaps as of 2026-09-23:
+  - *Mouse does nothing.* There is no `GCMouse` handling (only
+    `GamepadInput.swift` and the keyboard). Needed: mouse buttons → the
+    stock `mouse1`/`mouse2` binds (already bound on first run), wheel →
+    `invprev`/`invnext`, and relative motion → smooth yaw (and pitch, if
+    it can be done comfortably) layered on the head pose the way snap turn
+    is. Mind `-noenginemouse` (Renderer.swift engine args): it's there so
+    the engine's own mouse path can't overwrite the synthetic menu cursor,
+    so feed motion ourselves rather than removing it.
+  - *Hand tracking keeps posing the weapon and body.* With a keyboard or
+    gamepad in use, the viewmodel should go back to automatic poses (stock
+    viewmodel animation at the usual view offset), and the arm/body IK
+    shouldn't follow the tracked hands. Gestures already pause while the
+    keyboard is in use (`KeyboardInput.inUse`); extend that to a single
+    "input mode" (hands / keyboard+mouse / gamepad) that switches the
+    weapon pass, aim source (view, not hand ray; see the aim offset in
+    hlsdk `ItemPostFrame`) and body IK together, picked automatically from
+    the last device used.
+  - *Controller turn.* The right stick should turn smoothly (C/V for
+    keyboard snap/smooth turn were discussed earlier); check the current
+    `GamepadInput` mapping against stock HL gamepad feel, and never change
+    movement speeds (every mode reaches stock full speed).
+  - First-run UI should show these bindings once it exists.
+
 - **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
   skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
   fire-along-gaze accessibility now in Settings): remaining items — muzzle
