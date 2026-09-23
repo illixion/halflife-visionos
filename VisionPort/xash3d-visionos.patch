@@ -305,6 +305,30 @@ index 9776665..eb89e31 100644
  #endif
  	};
  
+diff --git a/engine/client/parse/cl_parse.c b/engine/client/parse/cl_parse.c
+index 89a3d5a..b62c159 100644
+--- a/engine/client/parse/cl_parse.c
++++ b/engine/client/parse/cl_parse.c
+@@ -1260,6 +1260,19 @@ set the view angle to this absolute value
+ static void CL_ParseSetAngle( sizebuf_t *msg )
+ {
+ 	MSG_ReadVec3Angles( msg, cl.viewangles );
++
++	// VR: the server's angle is the view the player should end up
++	// with — it was built from usercmds that already carry the head yaw
++	// (CL_CreateCmd). The platform adds that head yaw back on top of
++	// cl.viewangles every frame, so take it out here; otherwise a level
++	// change, save restore or teleport turns the view by however far the
++	// head is turned from its baseline.
++	{
++		extern int   cl_stereo_view_angles_override_active;
++		extern float cl_stereo_view_angles_override[3]; // abs pitch, delta yaw, abs roll
++		if( cl_stereo_view_angles_override_active )
++			cl.viewangles[YAW] -= cl_stereo_view_angles_override[1];
++	}
+ }
+ 
+ /*
 diff --git a/engine/common/filesystem_engine.c b/engine/common/filesystem_engine.c
 index 3bda62d..07bcb8e 100644
 --- a/engine/common/filesystem_engine.c
