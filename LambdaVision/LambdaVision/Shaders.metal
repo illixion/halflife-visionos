@@ -141,8 +141,15 @@ fragment float4 fxaaFragmentShader(ColorInOut in [[stage_in]],
 // drawable's STORED encoding (an _srgb drawable quantizes after the
 // hardware encode), and scaled to its code size; a float drawable needs
 // none. Set per pipeline from the layer's colour format (Renderer).
-constant bool  kOutputSRGB [[function_constant(20)]];
-constant float kOutputLSB  [[function_constant(21)]]; // one stored code; 0 = no dither
+// Optional: fragmentShader is also the template pipeline's fragment
+// function (buildRenderPipeline), specialized there with no values, which
+// must compile to no dither. Any function using these must still be made
+// with makeFunction(name:constantValues:) — plain makeFunction(name:) fails
+// pipeline validation (crashed at launch).
+constant bool  kOutputSRGBValue [[function_constant(20)]];
+constant float kOutputLSBValue  [[function_constant(21)]]; // one stored code; 0 = no dither
+constant bool  kOutputSRGB = is_function_constant_defined(kOutputSRGBValue) && kOutputSRGBValue;
+constant float kOutputLSB  = is_function_constant_defined(kOutputLSBValue) ? kOutputLSBValue : 0.0;
 
 static inline float3 srgbEncode(float3 c)
 {

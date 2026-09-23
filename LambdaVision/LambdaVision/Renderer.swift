@@ -1094,7 +1094,12 @@ actor Renderer {
         let library = device.makeDefaultLibrary()
 
         let vertexFunction = library?.makeFunction(name: "vertexShader")
-        let fragmentFunction = library?.makeFunction(name: "fragmentShader")
+        // fragmentShader declares the composite's (optional) dither
+        // constants, so Metal only accepts it specialized — empty values
+        // compile it without dither. The unspecialized function aborted
+        // pipeline validation at launch.
+        let fragmentFunction = try library?.makeFunction(name: "fragmentShader",
+                                                         constantValues: MTLFunctionConstantValues())
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.label = "RenderPipeline"
