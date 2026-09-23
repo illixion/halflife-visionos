@@ -1,15 +1,3 @@
-diff --git a/3rdparty/library_suffix b/3rdparty/library_suffix
---- a/3rdparty/library_suffix
-+++ b/3rdparty/library_suffix
-@@ -1 +1 @@
--Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa
-+Subproject commit 2cb2a0e12018c8e0a3f1bb727835e6335363e9aa-dirty
-diff --git a/3rdparty/mainui b/3rdparty/mainui
---- a/3rdparty/mainui
-+++ b/3rdparty/mainui
-@@ -1 +1 @@
--Subproject commit a4ec67f28037583617c05222e54e04777f677041
-+Subproject commit a4ec67f28037583617c05222e54e04777f677041-dirty
 diff --git a/common/backends.h b/common/backends.h
 index e0cc14b..751e398 100644
 --- a/common/backends.h
@@ -503,10 +491,18 @@ index ef1edca..1ad8787 100644
  void Host_ExitInMain( void ) NORETURN;
  
 diff --git a/engine/common/filesystem_engine.c b/engine/common/filesystem_engine.c
-index 3bda62d..07bcb8e 100644
+index 3bda62d..88dcfac 100644
 --- a/engine/common/filesystem_engine.c
 +++ b/engine/common/filesystem_engine.c
-@@ -216,6 +216,25 @@ static void FS_UnloadProgs( void )
+@@ -38,6 +38,7 @@ static CVAR_DEFINE_AUTO( fs_mount_l10n, "0", FCVAR_PRIVILEGED, "mount localizati
+ static CVAR_DEFINE_AUTO( ui_language, "english", FCVAR_PRIVILEGED, "selected game language" );
+ 
+ fs_api_t g_fsapi;
++FSIOSTATS fs_pfnGetIOStats; // NULL if the filesystem library predates it
+ fs_globals_t *FI;
+ 
+ static pfnCreateInterface_t fs_pfnCreateInterface;
+@@ -216,6 +217,27 @@ static void FS_UnloadProgs( void )
  #define FILESYSTEM_STDIO_DLL "filesystem_stdio." OS_LIB_EXT
  #endif
  
@@ -516,6 +512,7 @@ index 3bda62d..07bcb8e 100644
 +// directly instead of going through COM_LoadLibrary.
 +extern int GetFSAPI( int version, fs_api_t *api, fs_globals_t **globals, fs_interface_t *engfuncs );
 +extern void *CreateInterface( const char *interface, int *retval );
++extern void FS_GetIOStats( fs_iostats_t *out );
 +
 +static qboolean FS_LoadProgs( void )
 +{
@@ -524,6 +521,7 @@ index 3bda62d..07bcb8e 100644
 +		Sys_Error( "%s: filesystem static link API version mismatch\n", __func__ );
 +		return false;
 +	}
++	fs_pfnGetIOStats = FS_GetIOStats;
 +	fs_pfnCreateInterface = (pfnCreateInterface_t)CreateInterface;
 +	fs_hInstance = (void *)0x1; // sentinel; never dlclosed
 +	return true;
@@ -532,7 +530,12 @@ index 3bda62d..07bcb8e 100644
  static qboolean FS_LoadProgs( void )
  {
  	const char *name = FILESYSTEM_STDIO_DLL;
-@@ -253,6 +272,7 @@ static qboolean FS_LoadProgs( void )
+@@ -250,9 +272,12 @@ static qboolean FS_LoadProgs( void )
+ 		return false;
+ 	}
+ 
++	fs_pfnGetIOStats = (FSIOSTATS)COM_GetProcAddress( fs_hInstance, GET_FS_IOSTATS ); // optional
++
  	Con_DPrintf( "%s: filesystem_stdio successfully loaded\n", __func__ );
  	return true;
  }
@@ -541,10 +544,28 @@ index 3bda62d..07bcb8e 100644
  static qboolean FS_DetermineRootDirectory( char *out, size_t size )
  {
 diff --git a/engine/common/host.c b/engine/common/host.c
-index ebb7fe0..6ae8e74 100644
+index ebb7fe0..108f6b9 100644
 --- a/engine/common/host.c
 +++ b/engine/common/host.c
-@@ -650,6 +650,58 @@ static qboolean Host_FilterTime( double time )
+@@ -54,9 +54,16 @@ To fix this, we create jmp_buf in Host_Main function, when jumping into with
+ non-zero value will immediately return from it with `error_on_exit`.
+ ===============
+ */
++// The jump needs a live frame to land in. Host_Main keeps one for the
++// whole run; the Host_DoInit/Host_DoFrame split the visionOS app drives
++// only has one while Host_DoInit runs, so a quit from a later frame exits.
++static qboolean return_from_main_armed;
++
+ void Host_ExitInMain( void )
+ {
+-	longjmp( return_from_main_buf, 1 );
++	if( return_from_main_armed )
++		longjmp( return_from_main_buf, 1 );
++	exit( error_on_exit );
+ }
+ 
+ #ifdef XASH_ENGINE_TESTS
+@@ -650,6 +657,95 @@ static qboolean Host_FilterTime( double time )
  	return true;
  }
  
@@ -573,24 +594,61 @@ index ebb7fe0..6ae8e74 100644
 +	Sys_PrintLog( text );
 +}
 +
++extern FSIOSTATS fs_pfnGetIOStats;
++static fs_iostats_t lt_io;
++
++// what the filesystem did since the previous mark: system calls with
++// their time, and lookups the RAM mirror answered
++static void LT_IODelta( char *out, size_t size )
++{
++	fs_iostats_t now, *was = &lt_io;
++	size_t n = 0;
++
++	out[0] = 0;
++	if( !fs_pfnGetIOStats )
++		return;
++	fs_pfnGetIOStats( &now );
++
++#define LT_IO_ADD( label, cnt, ns ) \
++	if( now.cnt != was->cnt ) \
++		n += Q_snprintf( out + n, size - n, " %s %u/%.1f", label, now.cnt - was->cnt, ( now.ns - was->ns ) / 1e6 );
++	LT_IO_ADD( "open", opens, open_ns )
++	LT_IO_ADD( "stat", stats, stat_ns )
++	LT_IO_ADD( "ls", dirlists, dirlist_ns )
++	LT_IO_ADD( "read", reads, read_ns )
++	LT_IO_ADD( "write", writes, write_ns )
++#undef LT_IO_ADD
++	if( now.ram_hits != was->ram_hits || now.ram_misses_skipped != was->ram_misses_skipped )
++		n += Q_snprintf( out + n, size - n, " ram %u+%u", now.ram_hits - was->ram_hits, now.ram_misses_skipped - was->ram_misses_skipped );
++	*was = now;
++}
++
 +void LT_Begin( const char *what )
 +{
++	char io[160];
++
 +	if( lt_state == 1 )
 +		return; // the trigger's queued changelevel command, already timing
 +	lt_start = lt_last = Platform_DoubleTime();
 +	lt_state = 1;
-+	LT_Print( "[LT] begin %s\n", what );
++	LT_IODelta( io, sizeof( io ));
++	LT_Print( "[LT] begin %s  (fs ram: %s, %u files, %.0f MB, built in %.0f ms)\n", what,
++		lt_io.ram_state == 2 ? "ready" : lt_io.ram_state == 1 ? "building" : "off",
++		lt_io.ram_files, lt_io.ram_bytes / 1048576.0, lt_io.ram_build_ms );
 +}
 +
 +void LT_Mark( const char *step )
 +{
++	char io[160];
 +	double now;
 +
 +	if( !lt_state )
 +		return;
 +
 +	now = Platform_DoubleTime();
-+	LT_Print( "[LT] %-28s %7.1f ms  (at %.1f)\n", step, ( now - lt_last ) * 1000.0, ( now - lt_start ) * 1000.0 );
++	LT_IODelta( io, sizeof( io ));
++	LT_Print( "[LT] %-28s %7.1f ms  (at %.1f)%s%s\n", step, ( now - lt_last ) * 1000.0, ( now - lt_start ) * 1000.0,
++		io[0] ? "  |" : "", io );
 +	lt_last = now;
 +}
 +
@@ -603,7 +661,7 @@ index ebb7fe0..6ae8e74 100644
  /*
  =================
  Host_Frame
-@@ -677,6 +729,27 @@ void Host_Frame( double time )
+@@ -677,6 +773,27 @@ void Host_Frame( double time )
  
  	host.framecount++;
  	host.pureframetime = Platform_DoubleTime() - t1;
@@ -631,7 +689,7 @@ index ebb7fe0..6ae8e74 100644
  }
  
  /*
-@@ -1152,9 +1225,37 @@ static void Sys_Quit_f( void )
+@@ -1152,13 +1269,67 @@ static void Sys_Quit_f( void )
  Host_Main
  =================
  */
@@ -643,10 +701,22 @@ index ebb7fe0..6ae8e74 100644
 +int EXPORT Host_DoInit( int argc, char **argv, const char *progname, int bChangeGame, pfnChangeGame pChangeGame );
 +int EXPORT Host_DoFrame( void );
 +
++static int Host_DoInitBody( int argc, char **argv, const char *progname, int bChangeGame, pfnChangeGame pChangeGame );
++
  int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGame, pfnChangeGame pChangeGame )
  {
 -	static double oldtime;
-+	int rc = Host_DoInit( argc, argv, progname, bChangeGame, pChangeGame );
+-	string demoname, exename;
++	int rc;
+ 
+ 	if( setjmp( return_from_main_buf ))
++	{
++		return_from_main_armed = false;
+ 		return error_on_exit;
++	}
++	return_from_main_armed = true;
++
++	rc = Host_DoInit( argc, argv, progname, bChangeGame, pChangeGame );
 +	if( rc != 0 )
 +		return rc;
 +
@@ -666,11 +736,30 @@ index ebb7fe0..6ae8e74 100644
 +
 +int EXPORT Host_DoInit( int argc, char **argv, const char *progname, int bChangeGame, pfnChangeGame pChangeGame )
 +{
++	int rc;
++
++	if( return_from_main_armed ) // inside Host_Main, which owns the jump
++		return Host_DoInitBody( argc, argv, progname, bChangeGame, pChangeGame );
++
++	if( setjmp( return_from_main_buf ))
++	{
++		return_from_main_armed = false;
++		return error_on_exit;
++	}
++	return_from_main_armed = true;
++	rc = Host_DoInitBody( argc, argv, progname, bChangeGame, pChangeGame );
++	return_from_main_armed = false;
++	return rc;
++}
++
++static int Host_DoInitBody( int argc, char **argv, const char *progname, int bChangeGame, pfnChangeGame pChangeGame )
++{
 +	double oldtime;
- 	string demoname, exename;
++	string demoname, exename;
  
- 	if( setjmp( return_from_main_buf ))
-@@ -1311,14 +1412,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
+ 	host.starttime = Platform_DoubleTime();
+ 
+@@ -1311,14 +1482,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
  	// check after all configs were executed
  	HPAK_CheckIntegrity( hpk_custom_file.string );
  
@@ -1134,30 +1223,155 @@ index 0000000..f3f5ef5
 +#endif // XASH_SOUND == SOUND_COREAUDIO
 +#endif // XASH_DEDICATED
 diff --git a/engine/platform/visionos/vid_visionos.c b/engine/platform/visionos/vid_visionos.c
-index 97536bb..9da0b3f 100644
---- a/engine/platform/visionos/vid_visionos.c
+new file mode 100644
+index 0000000..9da0b3f
+--- /dev/null
 +++ b/engine/platform/visionos/vid_visionos.c
-@@ -21,12 +21,18 @@ extern void *eglGetProcAddress( const char *procname );
- 
- // ---- Video / VID -----------------------------------------------------------
- 
+@@ -0,0 +1,144 @@
++/*
++vid_visionos.c — minimal stub platform layer for visionOS / Apple Vision Pro
++
++CompositorServices owns the per-eye drawables; the host app's bridge feeds
++input/audio. The renderer (eventually ref_vk_lite) talks to MoltenVK directly.
++This file exists only to satisfy the engine's platform contract for the few
++entry points platform.h doesn't already inline-stub for non-SDL builds.
++*/
++
++#include "platform/platform.h"
++#include "client.h"
++#include "ref_common.h"
++#include <dlfcn.h>
++
++#if XASH_VIDEO == VIDEO_VISIONOS
++
++// ANGLE's EGL is statically linked into the app exec. Declared here to
++// avoid pulling EGL/egl.h (and its system-header dependencies) into the
++// engine's include path.
++extern void *eglGetProcAddress( const char *procname );
++
++// ---- Video / VID -----------------------------------------------------------
++
 +// Render-target size chosen by the host app (Lambda_Bridge.c) from the
 +// CompositorServices drawable properties. Defined in the app bridge; both
 +// live in the single statically-linked binary.
 +extern int lambda_vid_render_width;
 +extern int lambda_vid_render_height;
 +
- qboolean R_Init_Video( ref_graphic_apis_t type )
- {
- 	(void)type;
- 	host.renderinfo_changed = false;
--	refState.width  = 2048;
--	refState.height = 2048;
++qboolean R_Init_Video( ref_graphic_apis_t type )
++{
++	(void)type;
++	host.renderinfo_changed = false;
 +	refState.width  = lambda_vid_render_width  > 0 ? lambda_vid_render_width  : 2048;
 +	refState.height = lambda_vid_render_height > 0 ? lambda_vid_render_height : 2048;
- 	if( ref.dllFuncs.GL_InitExtensions )
- 		ref.dllFuncs.GL_InitExtensions();
- 	return true;
++	if( ref.dllFuncs.GL_InitExtensions )
++		ref.dllFuncs.GL_InitExtensions();
++	return true;
++}
++
++void R_Free_Video( void )
++{
++}
++
++qboolean VID_SetMode( void )
++{
++	return true;
++}
++
++void VID_Info_f( void )
++{
++	Con_Printf( "visionOS: CompositorServices owns the present (no window)\n" );
++}
++
++void VID_RestoreScreenResolution( window_mode_t window_mode )
++{
++	(void)window_mode;
++}
++
++void VID_SaveWindowSize( int width, int height, qboolean maximized )
++{
++	(void)width; (void)height; (void)maximized;
++}
++
++rserr_t R_ChangeDisplaySettings( int width, int height, window_mode_t window_mode )
++{
++	(void)window_mode;
++	refState.width  = width;
++	refState.height = height;
++	return rserr_ok;
++}
++
++void *GL_GetProcAddress( const char *name )
++{
++	if( !name ) return NULL;
++	void *fn = eglGetProcAddress( name );
++	if( !fn ) fn = dlsym( RTLD_DEFAULT, name );
++	return fn;
++}
++
++int GL_SetAttribute( int attr, int val )
++{
++	(void)attr; (void)val;
++	return 0;
++}
++
++int GL_GetAttribute( int attr, int *val )
++{
++	(void)attr;
++	if( val ) *val = 0;
++	return 0;
++}
++
++void GL_SwapBuffers( void )
++{
++}
++
++void GL_UpdateSwapInterval( void )
++{
++}
++
++int R_MaxVideoModes( void )
++{
++	return 0;
++}
++
++struct vidmode_s *R_GetVideoMode( int num )
++{
++	(void)num;
++	return NULL;
++}
++
++ref_window_type_t R_GetWindowHandle( void **handle, ref_window_type_t type )
++{
++	(void)type;
++	if( handle ) *handle = NULL;
++	return REF_WINDOW_TYPE_NULL;
++}
++
++qboolean SW_CreateBuffer( int width, int height, uint *stride, uint *bpp, uint *r, uint *g, uint *b )
++{
++	(void)width; (void)height; (void)stride; (void)bpp; (void)r; (void)g; (void)b;
++	return false;
++}
++
++void *SW_LockBuffer( void )
++{
++	return NULL;
++}
++
++void SW_UnlockBuffer( void )
++{
++}
++
++platform_orientation_t Platform_GetDisplayOrientation( void )
++{
++	return ORIENTATION_LANDSCAPE;
++}
++
++void Platform_Minimize_f( void )
++{
++}
++
++#endif // XASH_VIDEO == VIDEO_VISIONOS
 diff --git a/engine/server/sv_game.c b/engine/server/sv_game.c
 index 226a39b..d9e93a7 100644
 --- a/engine/server/sv_game.c
@@ -1180,10 +1394,38 @@ index 226a39b..d9e93a7 100644
  	if( FBitSet( flags, MAP_INVALID_VERSION ))
  	{
 diff --git a/engine/server/sv_init.c b/engine/server/sv_init.c
-index f253ebc..e4a0023 100644
+index f253ebc..b988c37 100644
 --- a/engine/server/sv_init.c
 +++ b/engine/server/sv_init.c
-@@ -1034,8 +1034,11 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
+@@ -597,6 +597,7 @@ void SV_ActivateServer( int runPhysics )
+ 	// Activate the DLL server code
+ 	svgame.globals->time = sv.time;
+ 	svgame.dllFuncs.pfnServerActivate( svgame.edicts, svgame.numEntities, svs.maxclients );
++	LT_Mark( "  activate: game dll" );
+ 
+ 	SV_SetStringArrayMode( true );
+ 
+@@ -617,15 +618,19 @@ void SV_ActivateServer( int runPhysics )
+ 	// run some frames to allow everything to settle
+ 	for( i = 0; i < numFrames; i++ )
+ 		SV_Physics();
++	LT_Mark( "  activate: settle physics" );
+ 
+ 	// create a baseline for more efficient communications
+ 	SV_CreateBaseline();
++	LT_Mark( "  activate: baseline" );
+ 
+ 	// collect all info from precached resources
+ 	SV_CreateResourceList();
++	LT_Mark( "  activate: resource list" );
+ 
+ 	// check and count all files that marked by user as unmodified (typically is a player models etc)
+ 	SV_TransferConsistencyInfo();
++	LT_Mark( "  activate: consistency" );
+ 
+ 	// send serverinfo to all connected clients
+ 	for( i = 0, cl = svs.clients; i < svs.maxclients; i++, cl++ )
+@@ -1034,8 +1039,11 @@ qboolean SV_SpawnServer( const char *mapname, const char *startspot, qboolean ba
  
  	Q_snprintf( sv.model_precache[WORLD_INDEX], sizeof( sv.model_precache[0] ), "maps/%s.bsp", sv.name );
  	SetBits( sv.model_precache_flags[WORLD_INDEX], RES_FATALIFMISSING );
@@ -1196,10 +1438,79 @@ index f253ebc..e4a0023 100644
  	if( FBitSet( host.features, ENGINE_QUAKE_COMPATIBLE ) && FS_FileExists( "progs.dat", false ))
  	{
 diff --git a/engine/server/sv_save.c b/engine/server/sv_save.c
-index dab5c4b..6a52a92 100644
+index dab5c4b..d53a1e1 100644
 --- a/engine/server/sv_save.c
 +++ b/engine/server/sv_save.c
-@@ -2075,7 +2075,9 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
+@@ -1484,6 +1484,7 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
+ 		return NULL;
+ 
+ 	pSaveData = SaveInit( SAVE_HEAPSIZE, SAVE_HASHSTRINGS );
++	LT_Mark( "  save: init heap" );
+ 
+ 	Q_snprintf( name, sizeof( name ), DEFAULT_SAVE_DIRECTORY "%s.HL1", sv.name );
+ 	COM_FixSlashes( name );
+@@ -1558,6 +1559,8 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
+ 			SetBits( pTable->flags, FENTTABLE_PLAYER );
+ 	}
+ 
++	LT_Mark( "  save: game dll entities" );
++
+ 	// total data what includes:
+ 	// 1. save header
+ 	// 2. adjacency list
+@@ -1602,18 +1605,21 @@ static SAVERESTOREDATA *SaveGameState( int changelevel )
+ 	FS_Write( pFile, pTableData, tableSize );		// dump ETABLE structures
+ 	FS_Write( pFile, pSaveData->pBaseData, dataSize );	// and finally store all the other data
+ 	FS_Close( pFile );
++	LT_Mark( "  save: table + write .HL1" );
+ 
+ 	if( !EntityPatchWrite( pSaveData, sv.name ))
+ 	{
+ 		SaveFinish( pSaveData );
+ 		return NULL;
+ 	}
++	LT_Mark( "  save: entity patch .HL2" );
+ 
+ 	if( !SaveClientState( pSaveData, sv.name, changelevel ))
+ 	{
+ 		SaveFinish( pSaveData );
+ 		return NULL;
+ 	}
++	LT_Mark( "  save: client state .HL3" );
+ 
+ 	return pSaveData;
+ }
+@@ -1634,6 +1640,7 @@ static int LoadGameState( char const *level, qboolean changelevel )
+ 	int		i;
+ 
+ 	pSaveData = LoadSaveData( level );
++	LT_Mark( "  restore: read .HL1" );
+ 	if( !pSaveData ) return 0; // couldn't load the file
+ 
+ 	// must set mapname before calling into DLL
+@@ -1657,8 +1664,11 @@ static int LoadGameState( char const *level, qboolean changelevel )
+ 	Cvar_SetValue( "sv_skyvec_y", header.skyVec_y );
+ 	Cvar_SetValue( "sv_skyvec_z", header.skyVec_z );
+ 
++	LT_Mark( "  restore: tables, patch" );
++
+ 	// create entity list
+ 	CreateEntitiesInRestoreList( pSaveData, 0, true );
++	LT_Mark( "  restore: create entities" );
+ 
+ 	// now spawn entities
+ 	for( i = 0; i < pSaveData->tableCount; i++ )
+@@ -1684,7 +1694,9 @@ static int LoadGameState( char const *level, qboolean changelevel )
+ 		}
+ 	}
+ 
++	LT_Mark( "  restore: game dll entities" );
+ 	LoadClientState( pSaveData, level, changelevel, false );
++	LT_Mark( "  restore: client state" );
+ 
+ 	SaveFinish( pSaveData );
+ 
+@@ -2075,7 +2087,9 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
  		svgame.globals->changelevel = true;
  
  		// save the current level's state
@@ -1209,7 +1520,7 @@ index dab5c4b..6a52a92 100644
  
  		if( !pSaveData )
  		{
-@@ -2090,22 +2092,28 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
+@@ -2090,22 +2104,28 @@ void SV_ChangeLevel( qboolean loadfromsavedgame, const char *mapname, const char
  	SV_InactivateClients ();
  	SV_FinalMessage( "", true );
  	SV_DeactivateServer ();
@@ -1263,10 +1574,143 @@ index 5b5e3a6..c882802 100644
  		if bld.get_define('HAVE_FFMPEG'):
  			libs.append('SWRESAMPLE')
 diff --git a/filesystem/filesystem.c b/filesystem/filesystem.c
-index 302548a..f7e0033 100644
+index 302548a..b18c403 100644
 --- a/filesystem/filesystem.c
 +++ b/filesystem/filesystem.c
-@@ -1293,6 +1293,33 @@ static uint32_t FS_PathExecFlag( const char *dir )
+@@ -132,6 +132,16 @@ static const fs_archive_t g_android_archive =
+ };
+ #endif
+ 
++#if !XASH_WIN32
++static int FS_CountedStat( const char *path, struct stat *buf )
++{
++	uint64_t t0 = FS_IONow();
++	int ret = stat( path, buf );
++	FS_IOCOUNT( stats, stat_ns, t0 );
++	return ret;
++}
++#endif
++
+ #ifdef XASH_REDUCE_FD
+ static file_t *fs_last_readfile;
+ static zip_t *fs_last_zip;
+@@ -276,7 +286,73 @@ static void listlowercase( stringlist_t *list )
+ }
+ #endif
+ 
++/*
++Directory listings are memoized. The case-insensitive lookup relists a
++directory whenever a name is missing from it, and image lookups search
++"<name>.*" in the root of every search path, so one level load lists the
++same few directories hundreds of times; in the visionOS sandbox each
++listing is expensive. Anything the filesystem writes, renames, deletes or
++creates drops the memo, and entries expire after a couple of seconds for
++changes made behind its back.
++*/
++#define FS_LSMEMO_SIZE 64
++#define FS_LSMEMO_TTL_NS 2000000000ull
++
++typedef struct
++{
++	char         path[MAX_SYSPATH];
++	qboolean     dirs_only;
++	stringlist_t list;
++	uint64_t     time;
++	uint32_t     generation;
++} fs_lsmemo_t;
++
++static fs_lsmemo_t fs_lsmemo[FS_LSMEMO_SIZE];
++static int fs_lsmemo_next;
++static uint32_t fs_lsmemo_generation = 1;
++
++static void FS_DirectoriesChanged( void )
++{
++	fs_lsmemo_generation++;
++}
++
++static void listdirectory_( stringlist_t *list, const char *path, qboolean dirs_only );
++
+ void listdirectory( stringlist_t *list, const char *path, qboolean dirs_only )
++{
++	uint64_t now = FS_IONow();
++	fs_lsmemo_t *m;
++	int i;
++
++	for( i = 0; i < FS_LSMEMO_SIZE; i++ )
++	{
++		m = &fs_lsmemo[i];
++		if( m->generation == fs_lsmemo_generation && m->dirs_only == dirs_only
++			&& now - m->time < FS_LSMEMO_TTL_NS && !Q_strcmp( m->path, path ))
++		{
++			int j;
++			for( j = 0; j < m->list.numstrings; j++ )
++				stringlistappend( list, m->list.strings[j] );
++			return;
++		}
++	}
++
++	m = &fs_lsmemo[fs_lsmemo_next];
++	fs_lsmemo_next = ( fs_lsmemo_next + 1 ) % FS_LSMEMO_SIZE;
++
++	stringlistfreecontents( &m->list );
++	stringlistinit( &m->list );
++	listdirectory_( &m->list, path, dirs_only );
++	Q_strncpy( m->path, path, sizeof( m->path ));
++	m->dirs_only = dirs_only;
++	m->time = now;
++	m->generation = fs_lsmemo_generation;
++
++	for( i = 0; i < m->list.numstrings; i++ )
++		stringlistappend( list, m->list.strings[i] );
++}
++
++static void listdirectory_( stringlist_t *list, const char *path, qboolean dirs_only )
+ {
+ #if XASH_WIN32
+ 	char pattern[4096];
+@@ -303,11 +379,15 @@ void listdirectory( stringlist_t *list, const char *path, qboolean dirs_only )
+ #else
+ 	DIR *dir;
+ 	struct dirent *entry;
++	uint64_t t0 = FS_IONow();
+ 
+ 	dir = opendir( path );
+ 
+ 	if( !dir )
++	{
++		FS_IOCOUNT( dirlists, dirlist_ns, t0 );
+ 		return;
++	}
+ 
+ 	// iterate through the directory
+ 	while(( entry = readdir( dir )))
+@@ -321,6 +401,7 @@ void listdirectory( stringlist_t *list, const char *path, qboolean dirs_only )
+ 	}
+ 
+ 	closedir( dir );
++	FS_IOCOUNT( dirlists, dirlist_ns, t0 );
+ #endif
+ 
+ #if XASH_DOS4GW
+@@ -375,6 +456,8 @@ void FS_CreatePath( char *path )
+ 			_mkdir( path ); // use _wmkdir maybe?
+ #else // !XASH_WIN32
+ 			mkdir( path, S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH );
++			fs_iostats.mkdirs++;
++			FS_DirectoriesChanged();
+ #endif // !XASH_WIN32
+ 			*ofs = save;
+ 		}
+@@ -527,6 +610,8 @@ void FS_ClearSearchPath( void )
+ 	searchpath_t *cur, **prev;
+ 	int i;
+ 
++	FS_RamCacheInvalidate();
++
+ 	prev = &fs_searchpaths;
+ 
+ 	while( true )
+@@ -1293,6 +1378,33 @@ static uint32_t FS_PathExecFlag( const char *dir )
  #endif // !XASH_ANDROID
  }
  
@@ -1300,7 +1744,7 @@ index 302548a..f7e0033 100644
  /*
  ================
  FS_AddGameHierarchy
-@@ -1373,25 +1400,25 @@ void FS_AddGameHierarchy( const char *dir, uint flags )
+@@ -1373,25 +1485,25 @@ void FS_AddGameHierarchy( const char *dir, uint flags )
  	if( FBitSet( mount_flags, FS_MOUNT_HD ))
  	{
  		Q_snprintf( buf, sizeof( buf ), "%s_hd/", dir );
@@ -1330,7 +1774,16 @@ index 302548a..f7e0033 100644
  	}
  
  	if( is_game_dir )
-@@ -1601,6 +1628,7 @@ static void *Sys_GetNativeObjectStub( const char *object )
+@@ -1441,6 +1553,8 @@ void FS_Rescan( uint32_t flags, const char *language )
+ 
+ 	((gameinfo_t *)GI)->added = true; // getting rid of const here, as this modifier only for the engine
+ 	FS_AddGameHierarchy( GI->gamefolder, FS_GAMEDIR_PATH | flags );
++
++	FS_RamCacheStart( fs_searchpaths, fs_rodir, GI->gamefolder );
+ }
+ 
+ /*
+@@ -1601,6 +1715,7 @@ static void *Sys_GetNativeObjectStub( const char *object )
  static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qboolean *has_game_dir )
  {
  	stringlist_t dirs;
@@ -1338,7 +1791,7 @@ index 302548a..f7e0033 100644
  	int i;
  
  	stringlistinit( &dirs );
-@@ -1609,7 +1637,11 @@ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qb
+@@ -1609,7 +1724,11 @@ static void FS_ValidateDirectories( const char *path, qboolean *has_base_dir, qb
  
  	for( i = 0; i < dirs.numstrings; i++ )
  	{
@@ -1351,6 +1804,934 @@ index 302548a..f7e0033 100644
  			continue;
  
  		if( !Q_stricmp( fs_basedir, dirs.strings[i] ))
+@@ -1783,6 +1902,7 @@ void FS_ShutdownStdio( void )
+ 	FI.numgames = 0;
+ 
+ 	FS_ClearSearchPath(); // release all wad files too
++	memset( fs_lsmemo, 0, sizeof( fs_lsmemo )); // its strings live in the pool
+ 	Mem_FreePool( &fs_mempool );
+ }
+ 
+@@ -1833,7 +1953,7 @@ int FS_SysFileTime( const char *filename )
+ 	if( _wstat( FS_PathToWideChar( filename ), &buf ) < 0 )
+ #else
+ 	struct stat buf;
+-	if( stat( filename, &buf ) < 0 )
++	if( FS_CountedStat( filename, &buf ) < 0 )
+ #endif
+ 		return -1;
+ 
+@@ -1911,6 +2031,7 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
+ 		// if it's unsupported, we can open it on disk
+ 	}
+ 
++	uint64_t t0 = FS_IONow();
+ 	if( fd < 0 )
+ 	{
+ #if XASH_WIN32
+@@ -1919,6 +2040,9 @@ file_t *FS_SysOpen( const char *filepath, const char *mode )
+ 		fd = open( filepath, mod|opt, 0666 );
+ #endif
+ 	}
++	FS_IOCOUNT( opens, open_ns, t0 );
++	if( fd >= 0 && FBitSet( opt, O_CREAT ))
++		FS_DirectoriesChanged();
+ 
+ 	if( fd < 0 )
+ 	{
+@@ -2025,7 +2149,7 @@ qboolean FS_SysFileExists( const char *path )
+ 	if( _wstat( FS_PathToWideChar( path ), &buf ) < 0 )
+ #else
+ 	struct stat buf;
+-	if( stat( path, &buf ) < 0 )
++	if( FS_CountedStat( path, &buf ) < 0 )
+ #endif
+ 		return false;
+ 
+@@ -2046,7 +2170,7 @@ qboolean FS_SysFolderExists( const char *path )
+ 	if( _wstat( FS_PathToWideChar( path ), &buf ) < 0 )
+ #else
+ 	struct stat buf;
+-	if( stat( path, &buf ) < 0 )
++	if( FS_CountedStat( path, &buf ) < 0 )
+ #endif
+ 		return false;
+ 
+@@ -2067,7 +2191,7 @@ qboolean FS_SysFileOrFolderExists( const char *path )
+ 	return _wstat( FS_PathToWideChar( path ), &buf ) >= 0;
+ #else
+ 	struct stat buf;
+-	return stat( path, &buf ) >= 0;
++	return FS_CountedStat( path, &buf ) >= 0;
+ #endif
+ }
+ 
+@@ -2143,6 +2267,20 @@ static searchpath_t *FS_FindFile( const char *name, int *index, char *fixedname,
+ {
+ 	searchpath_t	*search;
+ 
++	switch( FS_RamCacheFind( name, flags, &search, index, fixedname, len ))
++	{
++	case 1:
++		return search;
++	case 0:
++		if( !fs_ext_path )
++		{
++			if( index != NULL )
++				*index = -1;
++			return NULL;
++		}
++		break;
++	}
++
+ 	// search through the path, one element at a time
+ 	for( search = fs_searchpaths; search; search = search->next )
+ 	{
+@@ -2477,8 +2615,10 @@ fs_offset_t FS_Write( file_t *file, const void *data, size_t datasize )
+ 	FS_Purge( file );
+ 
+ 	// write the buffer and update the position
++	uint64_t t0 = FS_IONow();
+ 	result = write( file->handle, data, datasize );
+ 	file->position = lseek( file->handle, 0, SEEK_CUR );
++	FS_IOCOUNT( writes, write_ns, t0 );
+ 
+ 	if( file->real_length < file->position )
+ 		file->real_length = file->position;
+@@ -2531,6 +2671,16 @@ fs_offset_t FS_Read( file_t *file, void *buffer, size_t buffersize )
+ 
+ 	// NOTE: at this point, the read buffer is always empty
+ 
++	if( file->mem )
++	{
++		count = file->real_length - file->position;
++		if( count > (fs_offset_t)buffersize )
++			count = (fs_offset_t)buffersize;
++		memcpy( &((byte *)buffer)[done], file->mem + file->position, count );
++		file->position += count;
++		return done + count;
++	}
++
+ 	FS_EnsureOpenFile( file ); // FIXME: broken XASH_REDUCE_FD in case of compressed files!
+ 
+ 	if( FBitSet( file->flags, FILE_DEFLATED ))
+@@ -2626,8 +2776,11 @@ fs_offset_t FS_Read( file_t *file, void *buffer, size_t buffersize )
+ 	{
+ 		if( count > (fs_offset_t)buffersize )
+ 			count = (fs_offset_t)buffersize;
++		uint64_t t0 = FS_IONow();
+ 		lseek( file->handle, file->offset + file->position, SEEK_SET );
+ 		nb = read( file->handle, &((byte *)buffer)[done], count );
++		FS_IOCOUNT( reads, read_ns, t0 );
++		if( nb > 0 ) fs_iostats.read_bytes += nb;
+ 
+ 		if( nb > 0 )
+ 		{
+@@ -2641,8 +2794,11 @@ fs_offset_t FS_Read( file_t *file, void *buffer, size_t buffersize )
+ 	{
+ 		if( count > (fs_offset_t)sizeof( file->buff ))
+ 			count = (fs_offset_t)sizeof( file->buff );
++		uint64_t t0 = FS_IONow();
+ 		lseek( file->handle, file->offset + file->position, SEEK_SET );
+ 		nb = read( file->handle, file->buff, count );
++		FS_IOCOUNT( reads, read_ns, t0 );
++		if( nb > 0 ) fs_iostats.read_bytes += nb;
+ 
+ 		if( nb > 0 )
+ 		{
+@@ -2829,6 +2985,13 @@ int FS_Seek( file_t *file, fs_offset_t offset, int whence )
+ 		return 0;
+ 	}
+ 
++	if( file->mem )
++	{
++		FS_Purge( file );
++		file->position = offset;
++		return 0;
++	}
++
+ 	FS_EnsureOpenFile( file );
+ 	// Purge cached data
+ 	FS_Purge( file );
+@@ -3288,6 +3451,7 @@ qboolean FS_Rename( const char *oldname, const char *newname )
+ 		return false;
+ 
+ 	ret = rename( oldpath, newpath );
++	FS_DirectoriesChanged();
+ 	if( ret < 0 )
+ 	{
+ 		Con_Printf( "%s: failed to rename file %s (%s) to %s (%s): %s\n",
+@@ -3324,6 +3488,7 @@ qboolean GAME_EXPORT FS_Delete( const char *path )
+ 		return true;
+ 
+ 	ret = remove( real_path );
++	FS_DirectoriesChanged();
+ 	if( ret < 0 && errno != ENOENT )
+ 	{
+ 		Con_Printf( "%s: failed to delete file %s (%s): %s\n", __func__, real_path, path, strerror( errno ));
+diff --git a/filesystem/filesystem.h b/filesystem/filesystem.h
+index 02251b7..17ef13f 100644
+--- a/filesystem/filesystem.h
++++ b/filesystem/filesystem.h
+@@ -268,6 +268,24 @@ typedef struct fs_interface_t
+ typedef int (*FSAPI)( int version, fs_api_t *api, fs_globals_t **globals, const fs_interface_t *interface );
+ #define GET_FS_API "GetFSAPI"
+ 
++// Running totals of the system calls behind the filesystem, and of the
++// RAM mirror of the read-only game directory (ramcache.c). The engine
++// diffs two readings to show what a stretch of loading spent on disk.
++typedef struct fs_iostats_s
++{
++	uint32_t opens, stats, dirlists, reads, writes, mkdirs;
++	uint64_t open_ns, stat_ns, dirlist_ns, read_ns, write_ns;
++	uint64_t read_bytes;
++	uint32_t ram_hits, ram_misses_skipped; // lookups answered from RAM: found / known absent
++	int      ram_state;                    // 0 off, 1 building, 2 ready
++	uint32_t ram_files;
++	uint64_t ram_bytes;
++	double   ram_build_ms;
++} fs_iostats_t;
++
++typedef void (*FSIOSTATS)( fs_iostats_t *out );
++#define GET_FS_IOSTATS "FS_GetIOStats"
++
+ #ifdef __cplusplus
+ }
+ #endif // __cplusplus
+diff --git a/filesystem/filesystem_internal.h b/filesystem/filesystem_internal.h
+index c2e963a..6fc89d6 100644
+--- a/filesystem/filesystem_internal.h
++++ b/filesystem/filesystem_internal.h
+@@ -61,6 +61,7 @@ struct file_s
+ 	fs_offset_t  real_length; // uncompressed file size (for files opened in "read" mode)
+ 	fs_offset_t  position;    // current position in the file
+ 	fs_offset_t  offset;      // offset into the package (0 if external file)
++	const byte   *mem;        // whole contents in memory (RAM mirror); handle is -1
+ 	uint32_t     flags;
+ 	ztoolkit_t   *ztk; // if not NULL, all read functions must go through decompression
+ 
+@@ -107,6 +108,7 @@ typedef struct searchpath_s
+ 		wfile_t *wad;
+ 		zip_t   *zip;
+ 		android_assets_t *assets;
++		struct ramcache_s *ramcache;
+ 	};
+ 
+ 	struct searchpath_s *next;
+@@ -253,6 +255,18 @@ void FS_InitDirectorySearchpath( searchpath_t *search, const char *path, int fla
+ void FS_InitAndroid( void );
+ searchpath_t *FS_AddAndroidAssets_Fullpath( const char *path, int flags );
+ 
++//
++// ramcache.c
++//
++extern fs_iostats_t fs_iostats;
++uint64_t FS_IONow( void );
++#define FS_IOCOUNT( counter, ns_field, t0 ) ( fs_iostats.counter++, fs_iostats.ns_field += FS_IONow() - ( t0 ))
++void FS_RamCacheStart( searchpath_t *searchpaths, const char *rodir, const char *gamefolder );
++void FS_RamCacheInvalidate( void );
++// 1: found, *search/*index/fixedname filled in; 0: known not to exist
++// anywhere; -1: not covered, search the paths as usual
++int FS_RamCacheFind( const char *name, uint32_t flags, searchpath_t **search, int *index, char *fixedname, size_t len );
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/filesystem/ramcache.c b/filesystem/ramcache.c
+new file mode 100644
+index 0000000..67d1927
+--- /dev/null
++++ b/filesystem/ramcache.c
+@@ -0,0 +1,689 @@
++/*
++ramcache.c - RAM mirror of the read-only game directory
++Copyright (C) 2026 Ixion
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU General Public License as published by
++the Free Software Foundation, either version 3 of the License, or
++(at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++GNU General Public License for more details.
++*/
++
++/*
++Every file lookup through the plain-directory search paths costs system
++calls: a stat per path component and per search path tried, a full
++directory listing whenever a name is missing from a directory's cached
++listing, then open, stat, lseek, read and close. On a desktop that is
++microseconds; inside the visionOS sandbox it is what makes a level
++change 3-8x slower than the same load on a Mac, while the CPU-bound
++steps run faster there.
++
++So once the search paths are mounted, a background thread reads the
++game assets under <rodir>/<game>/ into memory: models, sprites, sounds,
++maps, WADs, images and text. Lookups for those files are then answered
++from a hash table without touching the disk, and a mirrored file opens
++as a memory-backed file_t. Names that are known to exist nowhere
++(texture and sound variants the engine probes for) are answered too.
++
++Correctness rules:
++ - A file is mirrored only if no search path ahead of the read-only
++   game directory has the same path, so overrides still win.
++ - Absence is only answered for top-level directories that no other
++   plain search path has at all, when no pack or zip is mounted, and only
++   for extensions the mirror covers.
++ - Until the build finishes nothing changes: lookups go to disk.
++ - The read-only tree never changes while running, so a mirror is kept
++   for the life of the process and reused when the paths are rescanned
++   with the same layout. Memory-backed files may point into it at any
++   time, so it is never freed.
++*/
++
++#include "build.h"
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <unistd.h>
++#include <dirent.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <time.h>
++#include "port.h"
++#include "filesystem.h"
++#include "filesystem_internal.h"
++#include "crtlib.h"
++
++fs_iostats_t fs_iostats;
++
++uint64_t FS_IONow( void )
++{
++#if XASH_APPLE
++	return clock_gettime_nsec_np( CLOCK_UPTIME_RAW );
++#else
++	struct timespec ts;
++	clock_gettime( CLOCK_MONOTONIC, &ts );
++	return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
++#endif
++}
++
++#define RAM_MAX_PATHS 16
++
++typedef struct ramfile_s
++{
++	uint32_t    hash;
++	char        *key;  // lowercase, relative to the game directory
++	char        *path; // as on disk
++	byte        *data;
++	fs_offset_t size;
++	int         mtime;
++} ramfile_t;
++
++// top-level directories that absence can be answered for
++static const char *ram_negative_dirs[] = { "models", "sprites", "sound", "gfx", "events" };
++#define RAM_NUM_NEGATIVE_DIRS ( sizeof( ram_negative_dirs ) / sizeof( ram_negative_dirs[0] ))
++
++typedef struct ramcache_s
++{
++	// layout it was built for
++	char root[MAX_SYSPATH]; // "<rodir>/<game>/"
++	int  root_flags;
++	char shadows[RAM_MAX_PATHS][MAX_SYSPATH]; // plain paths searched before root
++	int  numshadows;
++	char others[RAM_MAX_PATHS][MAX_SYSPATH];  // every other plain path
++	int  numothers;
++	qboolean has_archives;                    // a pak/zip/pk3dir is mounted
++	qboolean read_failed;                     // a covered file couldn't be read
++
++	ramfile_t *files;
++	int       numfiles, maxfiles;
++	int       *slots; // open addressing, -1 empty
++	uint32_t  mask;
++	uint32_t  negative_ok; // bit per ram_negative_dirs entry
++	qboolean  negative_root_wads; // no other path has a WAD at its root
++	uint64_t  bytes;
++	double    build_ms;
++
++	searchpath_t search; // what FS_FindFile hands back for a mirrored file
++
++	struct ramcache_s *next_retired;
++} ramcache_t;
++
++static _Atomic( ramcache_t * ) fs_ram;       // published, ready for lookups
++static atomic_int fs_ram_generation;        // bumped by every start/invalidate
++static atomic_int fs_ram_building;
++static ramcache_t *fs_ram_retired;           // kept alive: files may point in
++
++static const char *ram_extensions[] =
++{
++	"mdl", "spr", "wav", "bsp", "wad", "tga", "bmp", "lmp", "txt", "res", "lst", "sc",
++	"dds", "png", "jpg", "ktx" // none ship with HL; covered so probes for them are answered
++};
++
++// not worth memory, or written by the engine
++static const char *ram_skip_dirs[] =
++{
++	"save", "overviews", "dlls", "cl_dlls", "media", "logos", "graphs"
++};
++
++static uint32_t RAM_Hash( const char *s )
++{
++	uint32_t h = 2166136261u;
++
++	for( ; *s; s++ )
++	{
++		byte c = (byte)*s;
++		if( c >= 'A' && c <= 'Z' ) c += 'a' - 'A';
++		if( c == '\\' ) c = '/';
++		h = ( h ^ c ) * 16777619u;
++	}
++	return h;
++}
++
++static qboolean RAM_KeyEquals( const char *key, const char *name )
++{
++	for( ; *key && *name; key++, name++ )
++	{
++		byte c = (byte)*name;
++		if( c >= 'A' && c <= 'Z' ) c += 'a' - 'A';
++		if( c == '\\' ) c = '/';
++		if( (byte)*key != c )
++			return false;
++	}
++	return *key == *name;
++}
++
++static qboolean RAM_ExtensionCovered( const char *name )
++{
++	const char *ext = COM_FileExtension( name );
++	size_t i;
++
++	for( i = 0; i < ARRAYSIZE( ram_extensions ); i++ )
++	{
++		if( !Q_stricmp( ext, ram_extensions[i] ))
++			return true;
++	}
++	return false;
++}
++
++static qboolean RAM_SkipDir( const char *name )
++{
++	size_t i;
++
++	for( i = 0; i < ARRAYSIZE( ram_skip_dirs ); i++ )
++	{
++		if( !Q_stricmp( name, ram_skip_dirs[i] ))
++			return true;
++	}
++	return false;
++}
++
++static qboolean RAM_PathExists( const char *base, const char *rel )
++{
++	char path[MAX_SYSPATH * 2];
++	struct stat st;
++
++	Q_snprintf( path, sizeof( path ), "%s%s", base, rel );
++	return stat( path, &st ) == 0;
++}
++
++static qboolean RAM_RootHasWad( const char *base )
++{
++	struct dirent *entry;
++	qboolean found = false;
++	DIR *dir = opendir( base );
++
++	if( !dir )
++		return false;
++	while( !found && ( entry = readdir( dir )))
++		found = !Q_stricmp( COM_FileExtension( entry->d_name ), "wad" );
++	closedir( dir );
++	return found;
++}
++
++static void RAM_AddFile( ramcache_t *rc, const char *rel, const char *full )
++{
++	struct stat st;
++	ramfile_t *f;
++	byte *data;
++	ssize_t got;
++	fs_offset_t done = 0;
++	int fd, i;
++
++	for( i = 0; i < rc->numshadows; i++ )
++	{
++		if( RAM_PathExists( rc->shadows[i], rel ))
++			return; // an override is searched first; leave it to the disk
++	}
++
++	// from here on, a file left out would be wrongly reported absent
++	fd = open( full, O_RDONLY );
++	if( fd < 0 )
++	{
++		rc->read_failed = true;
++		return;
++	}
++
++	if( fstat( fd, &st ) < 0 || !S_ISREG( st.st_mode ))
++	{
++		rc->read_failed = true;
++		close( fd );
++		return;
++	}
++
++	data = malloc( st.st_size + 1 );
++	if( !data )
++	{
++		rc->read_failed = true;
++		close( fd );
++		return;
++	}
++
++	while( done < st.st_size && ( got = read( fd, data + done, st.st_size - done )) > 0 )
++		done += got;
++	close( fd );
++
++	if( done != st.st_size )
++	{
++		rc->read_failed = true;
++		free( data );
++		return;
++	}
++	data[done] = 0;
++
++	if( rc->numfiles == rc->maxfiles )
++	{
++		rc->maxfiles = rc->maxfiles ? rc->maxfiles * 2 : 4096;
++		rc->files = realloc( rc->files, sizeof( *rc->files ) * rc->maxfiles );
++	}
++
++	f = &rc->files[rc->numfiles++];
++	f->path = strdup( rel );
++	f->key = strdup( rel );
++	Q_strnlwr( rel, f->key, Q_strlen( rel ) + 1 );
++	f->hash = RAM_Hash( f->key );
++	f->data = data;
++	f->size = done;
++	f->mtime = (int)st.st_mtime;
++	rc->bytes += done;
++}
++
++static void RAM_Walk( ramcache_t *rc, const char *rel )
++{
++	char full[MAX_SYSPATH * 2], child[MAX_SYSPATH];
++	struct dirent *entry;
++	DIR *dir;
++
++	Q_snprintf( full, sizeof( full ), "%s%s", rc->root, rel );
++	dir = opendir( full );
++	if( !dir )
++		return;
++
++	while(( entry = readdir( dir )))
++	{
++		qboolean is_dir;
++
++		if( entry->d_name[0] == '.' )
++			continue;
++
++		Q_snprintf( child, sizeof( child ), "%s%s", rel, entry->d_name );
++
++#if HAVE_DIRENT_D_TYPE
++		if( entry->d_type == DT_DIR )
++			is_dir = true;
++		else if( entry->d_type == DT_REG )
++			is_dir = false;
++		else
++#endif
++		{
++			struct stat st;
++			Q_snprintf( full, sizeof( full ), "%s%s", rc->root, child );
++			if( stat( full, &st ) < 0 )
++				continue;
++			is_dir = S_ISDIR( st.st_mode );
++		}
++
++		if( is_dir )
++		{
++			if( RAM_SkipDir( entry->d_name ))
++				continue;
++			Q_strncat( child, "/", sizeof( child ));
++			RAM_Walk( rc, child );
++		}
++		else if( RAM_ExtensionCovered( entry->d_name ))
++		{
++			Q_snprintf( full, sizeof( full ), "%s%s", rc->root, child );
++			RAM_AddFile( rc, child, full );
++		}
++	}
++
++	closedir( dir );
++}
++
++static void RAM_BuildTable( ramcache_t *rc )
++{
++	uint32_t size = 1;
++	int i;
++
++	while( size < (uint32_t)rc->numfiles * 2 )
++		size <<= 1;
++	rc->mask = size - 1;
++	rc->slots = malloc( sizeof( *rc->slots ) * size );
++	memset( rc->slots, 0xff, sizeof( *rc->slots ) * size );
++
++	for( i = 0; i < rc->numfiles; i++ )
++	{
++		uint32_t slot = rc->files[i].hash & rc->mask;
++
++		while( rc->slots[slot] >= 0 )
++			slot = ( slot + 1 ) & rc->mask;
++		rc->slots[slot] = i;
++	}
++}
++
++static int RAM_Lookup( const ramcache_t *rc, const char *name )
++{
++	uint32_t slot = RAM_Hash( name ) & rc->mask;
++
++	for( ; rc->slots[slot] >= 0; slot = ( slot + 1 ) & rc->mask )
++	{
++		const ramfile_t *f = &rc->files[rc->slots[slot]];
++		if( RAM_KeyEquals( f->key, name ))
++			return rc->slots[slot];
++	}
++	return -1;
++}
++
++static ramcache_t *RAM_Current( void )
++{
++	return atomic_load_explicit( &fs_ram, memory_order_acquire );
++}
++
++/*
++============
++searchpath callbacks for mirrored files
++============
++*/
++static file_t *RAM_OpenFile( searchpath_t *search, const char *filename, const char *mode, int pack_ind )
++{
++	const ramcache_t *rc = search->ramcache;
++	const ramfile_t *f;
++	file_t *file;
++
++	if( pack_ind < 0 || pack_ind >= rc->numfiles )
++		return NULL;
++	f = &rc->files[pack_ind];
++
++	file = (file_t *)Mem_Calloc( fs_mempool, sizeof( *file ));
++	file->handle = -1;
++	file->ungetc = EOF;
++	file->filetime = f->mtime;
++	file->searchpath = search;
++	file->real_length = f->size;
++	file->mem = f->data;
++	return file;
++}
++
++static byte *RAM_LoadFile( searchpath_t *search, const char *path, int pack_ind, fs_offset_t *filesizeptr, void *( *pfnAlloc )( size_t ), void ( *pfnFree )( void * ))
++{
++	const ramcache_t *rc = search->ramcache;
++	const ramfile_t *f;
++	byte *buf;
++
++	if( pack_ind < 0 || pack_ind >= rc->numfiles )
++		return NULL;
++	f = &rc->files[pack_ind];
++
++	buf = pfnAlloc( f->size + 1 );
++	if( !buf )
++		return NULL;
++	memcpy( buf, f->data, f->size + 1 ); // mirrored data carries the terminating zero
++	if( filesizeptr )
++		*filesizeptr = f->size;
++	return buf;
++}
++
++static int RAM_FileTime( searchpath_t *search, const char *filename )
++{
++	const ramcache_t *rc = search->ramcache;
++	int i = RAM_Lookup( rc, filename );
++	return i >= 0 ? rc->files[i].mtime : -1;
++}
++
++static int RAM_FindFileCallback( searchpath_t *search, const char *path, char *fixedname, size_t len )
++{
++	const ramcache_t *rc = search->ramcache;
++	int i = RAM_Lookup( rc, path );
++
++	if( i >= 0 && fixedname )
++		Q_strncpy( fixedname, rc->files[i].path, len );
++	return i;
++}
++
++static void RAM_PrintInfo( searchpath_t *search, char *dst, size_t size )
++{
++	const ramcache_t *rc = search->ramcache;
++	Q_snprintf( dst, size, "%s (RAM mirror, %i files)", rc->root, rc->numfiles );
++}
++
++static void RAM_Search( searchpath_t *search, stringlist_t *list, const char *pattern, int caseinsensitive )
++{
++	// listings come from the directory search path this mirrors
++}
++
++static void RAM_Close( searchpath_t *search )
++{
++}
++
++/*
++============
++build thread
++============
++*/
++typedef struct
++{
++	ramcache_t *rc;
++	int generation;
++} ram_job_t;
++
++static void *RAM_BuildThread( void *arg )
++{
++	ram_job_t *job = arg;
++	ramcache_t *rc = job->rc;
++	uint64_t t0 = FS_IONow();
++	size_t d;
++	int i;
++
++	pthread_setname_np( "xash.fs-ramcache" );
++
++	RAM_Walk( rc, "" );
++	RAM_BuildTable( rc );
++
++	// absence is only known where nothing else can have the directory
++	if( !rc->has_archives && !rc->read_failed )
++	{
++		for( d = 0; d < RAM_NUM_NEGATIVE_DIRS; d++ )
++		{
++			qboolean elsewhere = false;
++
++			for( i = 0; i < rc->numothers && !elsewhere; i++ )
++				elsewhere = RAM_PathExists( rc->others[i], ram_negative_dirs[d] );
++
++			if( !elsewhere )
++				SetBits( rc->negative_ok, BIT( d ));
++		}
++
++		// the map's WAD list names WADs bare; ones that don't exist would
++		// otherwise relist every search path's root, once per name
++		rc->negative_root_wads = true;
++		for( i = 0; i < rc->numothers && rc->negative_root_wads; i++ )
++			rc->negative_root_wads = !RAM_RootHasWad( rc->others[i] );
++	}
++
++	rc->build_ms = ( FS_IONow() - t0 ) / 1e6;
++
++	if( atomic_load( &fs_ram_generation ) == job->generation )
++	{
++		fs_iostats.ram_files = rc->numfiles;
++		fs_iostats.ram_bytes = rc->bytes;
++		fs_iostats.ram_build_ms = rc->build_ms;
++		atomic_store_explicit( &fs_ram, rc, memory_order_release );
++	}
++	// else: the paths changed while building; it stays retired and unused
++
++	atomic_store( &fs_ram_building, 0 );
++	free( job );
++	return NULL;
++}
++
++static qboolean RAM_SameLayout( const ramcache_t *a, const ramcache_t *b )
++{
++	int i;
++
++	if( Q_strcmp( a->root, b->root ) || a->numshadows != b->numshadows
++		|| a->numothers != b->numothers || a->has_archives != b->has_archives )
++		return false;
++
++	for( i = 0; i < a->numshadows; i++ )
++		if( Q_strcmp( a->shadows[i], b->shadows[i] ))
++			return false;
++	for( i = 0; i < a->numothers; i++ )
++		if( Q_strcmp( a->others[i], b->others[i] ))
++			return false;
++	return true;
++}
++
++void FS_RamCacheInvalidate( void )
++{
++	atomic_fetch_add( &fs_ram_generation, 1 );
++	atomic_store_explicit( &fs_ram, NULL, memory_order_release );
++}
++
++void FS_RamCacheStart( searchpath_t *searchpaths, const char *rodir, const char *gamefolder )
++{
++	char root[MAX_SYSPATH];
++	const char *env = getenv( "XASH_FS_RAMCACHE" );
++	searchpath_t *sp;
++	ramcache_t *rc, *old;
++	qboolean before_root = true, found_root = false;
++	pthread_t thread;
++	pthread_attr_t attr;
++	ram_job_t *job;
++
++#if XASH_VISIONOS
++	if( env && env[0] == '0' )
++		return;
++#else
++	if( !env || env[0] != '1' )
++		return;
++#endif
++
++	if( COM_StringEmptyOrNULL( rodir ) || COM_StringEmptyOrNULL( gamefolder ))
++		return;
++
++	Q_snprintf( root, sizeof( root ), "%s/%s/", rodir, gamefolder );
++
++	rc = calloc( 1, sizeof( *rc ));
++	Q_strncpy( rc->root, root, sizeof( rc->root ));
++
++	for( sp = searchpaths; sp; sp = sp->next )
++	{
++		if( sp->type == SEARCHPATH_PAK || sp->type == SEARCHPATH_ZIP
++			|| sp->type == SEARCHPATH_PK3DIR || sp->type == SEARCHPATH_ANDROID_ASSETS )
++		{
++			rc->has_archives = true;
++			continue;
++		}
++
++		if( sp->type != SEARCHPATH_PLAIN )
++			continue; // WADs: only lump types, none of which the mirror covers
++
++		if( !Q_strcmp( sp->filename, root ))
++		{
++			before_root = false;
++			found_root = true;
++			rc->root_flags = sp->flags;
++			continue;
++		}
++
++		if( before_root && rc->numshadows < RAM_MAX_PATHS )
++			Q_strncpy( rc->shadows[rc->numshadows++], sp->filename, MAX_SYSPATH );
++		if( rc->numothers < RAM_MAX_PATHS )
++			Q_strncpy( rc->others[rc->numothers++], sp->filename, MAX_SYSPATH );
++		else rc->has_archives = true; // too many to reason about; no absence answers
++	}
++
++	if( !found_root )
++	{
++		free( rc );
++		return;
++	}
++
++	// a rescan with the same layout reuses what is already in memory
++	for( old = fs_ram_retired; old; old = old->next_retired )
++	{
++		if( old->slots && RAM_SameLayout( old, rc ))
++		{
++			free( rc );
++			atomic_fetch_add( &fs_ram_generation, 1 );
++			atomic_store_explicit( &fs_ram, old, memory_order_release );
++			return;
++		}
++	}
++
++	if( atomic_exchange( &fs_ram_building, 1 ))
++	{
++		free( rc ); // one build at a time; the running one will be dropped if stale
++		return;
++	}
++
++	rc->search.type = SEARCHPATH_PLAIN; // so disk-path queries give the real file
++	Q_strncpy( rc->search.filename, root, sizeof( rc->search.filename ));
++	rc->search.flags = rc->root_flags;
++	rc->search.ramcache = rc;
++	rc->search.pfnPrintInfo = RAM_PrintInfo;
++	rc->search.pfnClose = RAM_Close;
++	rc->search.pfnOpenFile = RAM_OpenFile;
++	rc->search.pfnFileTime = RAM_FileTime;
++	rc->search.pfnFindFile = RAM_FindFileCallback;
++	rc->search.pfnSearch = RAM_Search;
++	rc->search.pfnLoadFile = RAM_LoadFile;
++
++	rc->next_retired = fs_ram_retired;
++	fs_ram_retired = rc;
++
++	job = malloc( sizeof( *job ));
++	job->rc = rc;
++	job->generation = atomic_fetch_add( &fs_ram_generation, 1 ) + 1;
++
++	pthread_attr_init( &attr );
++	pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_DETACHED );
++#if XASH_APPLE
++	pthread_attr_set_qos_class_np( &attr, QOS_CLASS_USER_INITIATED, 0 );
++#endif
++	if( pthread_create( &thread, &attr, RAM_BuildThread, job ) != 0 )
++	{
++		atomic_store( &fs_ram_building, 0 );
++		free( job );
++	}
++	pthread_attr_destroy( &attr );
++}
++
++int FS_RamCacheFind( const char *name, uint32_t flags, searchpath_t **search, int *index, char *fixedname, size_t len )
++{
++	ramcache_t *rc = RAM_Current();
++	int i;
++	size_t d;
++
++	fs_iostats.ram_state = rc ? 2 : atomic_load( &fs_ram_building ) ? 1 : 0;
++
++	if( !rc )
++		return -1;
++
++	if( flags && !FBitSet( rc->root_flags, flags ))
++		return -1;
++
++	i = RAM_Lookup( rc, name );
++	if( i >= 0 )
++	{
++		fs_iostats.ram_hits++;
++		*search = &rc->search;
++		if( index ) *index = i;
++		if( fixedname ) Q_strncpy( fixedname, rc->files[i].path, len );
++		return 1;
++	}
++
++	if( rc->negative_root_wads && !Q_strchr( name, '/' ) && !Q_strchr( name, '\\' )
++		&& !Q_stricmp( COM_FileExtension( name ), "wad" )
++		&& Q_strnicmp( name, "tempdecal", 9 ) && Q_strnicmp( name, "pldecal", 7 )) // sprays, written while running
++	{
++		fs_iostats.ram_misses_skipped++;
++		return 0;
++	}
++
++	if( !rc->negative_ok || !RAM_ExtensionCovered( name ))
++		return -1;
++
++	for( d = 0; d < RAM_NUM_NEGATIVE_DIRS; d++ )
++	{
++		size_t n = Q_strlen( ram_negative_dirs[d] );
++
++		if( FBitSet( rc->negative_ok, BIT( d ))
++			&& !Q_strnicmp( name, ram_negative_dirs[d], n )
++			&& ( name[n] == '/' || name[n] == '\\' ))
++		{
++			fs_iostats.ram_misses_skipped++;
++			return 0;
++		}
++	}
++	return -1;
++}
++
++void EXPORT FS_GetIOStats( fs_iostats_t *out );
++void EXPORT FS_GetIOStats( fs_iostats_t *out )
++{
++	*out = fs_iostats;
++}
 diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
 index 3fa5df3..6490f31 100644
 --- a/ref/gl/gl2_shim/gl2_shim.c
