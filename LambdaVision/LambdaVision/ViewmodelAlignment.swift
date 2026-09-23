@@ -51,9 +51,13 @@ nonisolated enum ViewmodelAlignment {
     struct Result {
         /// Viewmodel gun space → world-model layout space (rotation only).
         var rotation: simd_quatf
+        /// World-model layout = rotation · viewmodel + offset.
+        var offset: SIMD3<Float>
         var coverage: Float
         var residual: Float
         var degrees: Float { abs(rotation.angle) * 180 / .pi }
+        /// Where the world model's hand lands in the viewmodel's space.
+        var handPoint: SIMD3<Float> { rotation.inverse.act(-offset) }
         /// The rotation's turn about the up axis, radians: where the
         /// viewmodel's +X lands, seen from above (negative = to the right,
         /// i.e. the gun was toed in to the left).
@@ -106,7 +110,7 @@ nonisolated enum ViewmodelAlignment {
         let covered = source.filter {
             grid.nearest(to: rotation.act($0) + offset, within: coverageRadius) != nil
         }.count
-        return Result(rotation: rotation,
+        return Result(rotation: rotation, offset: offset,
                       coverage: Float(covered) / Float(source.count), residual: residual)
     }
 

@@ -31,4 +31,23 @@ class AppModel {
     /// app's data container and is lost on an uninstall/reinstall). Shown as
     /// a banner in ContentView; nil means no problem to report.
     var engineFailureMessage: String?
+
+    /// The warm-up before the game starts (WeaponWarmup): true until it has
+    /// run, and the play button waits for it, so nothing is computed on first
+    /// sight once in the immersive space. `preparationProgress` is fits done
+    /// out of fits needed — (0, 0) while the models are still being read, and
+    /// usually stays there on later launches, when everything is cached.
+    var isPreparing = true
+    var preparationProgress = (done: 0, total: 0)
+
+    /// Runs the warm-up once. Called when the main window first appears.
+    func prepare() async {
+        guard isPreparing else { return }
+        if let dir = GameData.directory {
+            await WeaponWarmup.run(gameDirectory: dir) { [weak self] done, total in
+                self?.preparationProgress = (done, total)
+            }
+        }
+        isPreparing = false
+    }
 }

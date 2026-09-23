@@ -49,9 +49,16 @@ struct ToggleImmersiveSpaceButton: View {
                 }
             }
         } label: {
-            Text(appModel.immersiveSpaceState == .open ? "Hide Immersive Space" : "Show Immersive Space")
+            if appModel.isPreparing {
+                let p = appModel.preparationProgress
+                Text(p.total > 0 ? "Preparing weapons… \(p.done)/\(p.total)" : "Preparing…")
+            } else {
+                Text(appModel.immersiveSpaceState == .open ? "Hide Immersive Space" : "Show Immersive Space")
+            }
         }
-        .disabled(appModel.immersiveSpaceState == .inTransition)
+        // Wait for the warm-up (AppModel.prepare) before the game starts.
+        .disabled(appModel.immersiveSpaceState == .inTransition || appModel.isPreparing)
+        .task { await appModel.prepare() }
         .animation(.none, value: 0)
         .fontWeight(.semibold)
     }

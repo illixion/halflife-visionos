@@ -128,12 +128,30 @@ enum ViewmodelGrip {
         // viewmodel being authored in view space).
         let fingers = fingerChains(parents: parents, geometry: geometry)
         let hands = boneNames.indices.filter { fingers[$0].count >= 4 && $0 < pose.count }
+        if hands.isEmpty, let worn = wornGrip(parents: parents, pose: pose, geometry: geometry) { return worn }
         guard let hand = hands.min(by: { pose[$0].columns.3.y < pose[$1].columns.3.y }),
               let frame = synthesisedHandFrame(hand: hand, fingers: fingers[hand], pose: pose,
                                                isLeft: pose[hand].columns.3.y > 0)
         else { return nil }
         return Grip(bone: hand, fixup: pose[hand].inverse * frame,
                     isLeft: pose[hand].columns.3.y > 0, fingerPrefix: nil)
+    }
+
+    /// A viewmodel with no hand drawn at all is worn over the fist: the
+    /// hivehand, a creature whose own skeleton (`Bip01 Pelvis`…`Head`) runs
+    /// forward from the wrist. Its root sits on the creature's centre line at
+    /// the rear, which is where fitting it onto its world model puts that
+    /// model's hand (2 units off on the classic model). So the root is the
+    /// grip, with the model's axes as authored: the frame is the root's
+    /// position with no rotation, so the hold reads as aimed. Nil when the
+    /// model draws any hand, or has no root.
+    static func wornGrip(parents: [Int?], pose: [float4x4],
+                         geometry: [(hand: Int, other: Int)]) -> Grip? {
+        guard geometry.allSatisfy({ $0.hand == 0 }),
+              let root = parents.firstIndex(where: { $0 == nil }), root < pose.count else { return nil }
+        var at = matrix_identity_float4x4
+        at.columns.3 = pose[root].columns.3
+        return Grip(bone: root, fixup: pose[root].inverse * at, isLeft: false, fingerPrefix: nil)
     }
 
     /// Per bone, the children whose subtrees are mostly hand geometry — the

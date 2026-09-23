@@ -64,6 +64,18 @@ func runWorldModelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, 
             let geometry = ViewmodelGrip.boneGeometry(
                 boneCount: vm.boneNames.count, textureNames: vm.textureNames,
                 vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+            if ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
+                                  extractorChoice: vm.handBone, geometry: geometry) == nil {
+                let gun = vm.triangles.flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
+                let world = m.triangles.flatMap { $0.v.map { (p, b) in (layout.palette[min(b, layout.palette.count - 1)] * SIMD4(p, 1)).xyz3 } }
+                let lo = gun.reduce(SIMD3<Float>(repeating: .infinity)) { simd_min($0, $1) }
+                let hi = gun.reduce(SIMD3<Float>(repeating: -.infinity)) { simd_max($0, $1) }
+                if let r = ViewmodelAlignment.fit(gun: gun, world: world) {
+                    let h = r.handPoint
+                    print(String(format: "      gripless viewmodel onto it: %.1f° off, covers %.0f%%, residual %.2f; hand at (%.1f %.1f %.1f) in box (%.1f %.1f %.1f)…(%.1f %.1f %.1f) yaw %+.1f°",
+                                 r.degrees, r.coverage * 100, r.residual, h.x, h.y, h.z, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z, r.yaw * 180 / .pi))
+                } else { print("      gripless viewmodel onto it: no fit") }
+            }
             if let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
                                              extractorChoice: vm.handBone, geometry: geometry),
                ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose) == .aimed {

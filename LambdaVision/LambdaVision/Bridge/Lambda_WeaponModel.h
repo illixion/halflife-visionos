@@ -218,6 +218,18 @@ uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out);
 int      lambda_body_sequence(int seq, char name[32], int *numframes);
 uint32_t lambda_body_pose_at(int seq, float frame, lambda_weapon_pose_t *out);
 
+// A model read straight off disk into a slot of its own, for the platform's
+// warm-up before the game starts: it bakes every weapon's viewmodel and world
+// model once, exactly as the weapon slots will, and works out what the weapon
+// pass would otherwise compute the first time each one is drawn. Same lock
+// rules as the other slots; the pose is sequence 0 frame 0 (a viewmodel's
+// idle). One model at a time — each load replaces the last. Not thread-safe
+// against itself; the warm-up runs it from one task.
+int      lambda_scratch_load(const char *path, int body);
+uint32_t lambda_scratch_lock(lambda_weapon_mesh_t *out);
+void     lambda_scratch_unlock(void);
+uint32_t lambda_scratch_copy_pose(lambda_weapon_pose_t *out);
+
 // Where the player's feet are, published by the client each normal refdef
 // (cl_dll/view.cpp g_vr_body_state) for the avatar's legs. Plain floats read
 // across threads; a torn read costs one frame of one leg.

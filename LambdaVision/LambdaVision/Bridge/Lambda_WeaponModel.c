@@ -285,6 +285,9 @@ static model_slot_t g_body   = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
 // publishes beside the viewmodel's; only its rest pose is ever needed.
 static model_slot_t g_world  = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
                                  .last_modelindex = -1, .last_body = -1 };
+// Models read off disk for the platform's warm-up (see lambda_scratch_load).
+static model_slot_t g_scratch = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
+                                  .last_modelindex = -1, .last_body = -1 };
 
 // The slot mutexes are RECURSIVE. lambda_*_lock hands out interior pointers
 // and returns still holding the lock, so a caller that reasonably reads the
@@ -298,6 +301,7 @@ static void slot_mutexes_init(void) {
     pthread_mutex_init(&g_weapon.mtx, &attr);
     pthread_mutex_init(&g_body.mtx, &attr);
     pthread_mutex_init(&g_world.mtx, &attr);
+    pthread_mutex_init(&g_scratch.mtx, &attr);
     pthread_mutexattr_destroy(&attr);
 }
 static void slot_lock_mutex(model_slot_t *slot) {
@@ -1042,12 +1046,12 @@ uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out) { return slot_
 // any authored sequence, so the pose this slot publishes is only the rest
 // pose, which the IK uses as its reference.
 
-int lambda_body_load(const char *path, int body) {
-    model_slot_t *slot = &g_body;
-
+// Reads a studio model off disk and bakes it into `slot`, which then owns the
+// file buffer (snapshots point into it).
+static int slot_load_file(model_slot_t *slot, const char *path, int body, const char *dump_path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[lambda_body] cannot open %s\n", path);
+        fprintf(stderr, "[lambda_model] cannot open %s\n", path);
         return 0;
     }
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
@@ -1062,27 +1066,36 @@ int lambda_body_load(const char *path, int body) {
 
     const studiohdr_t *hdr = (const studiohdr_t *)buf;
     if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
-        fprintf(stderr, "[lambda_body] %s is not a studio v10 model\n", path);
+        fprintf(stderr, "[lambda_model] %s is not a studio v10 model\n", path);
         free(buf);
         return 0;
     }
-    // Textures may live in a companion <name>T.mdl; the player models we use
+    // Textures may live in a companion <name>T.mdl; the models we read
     // embed theirs, so an external table is a hard failure rather than a
     // silent magenta model.
     if (hdr->numtextures <= 0) {
-        fprintf(stderr, "[lambda_body] %s has no embedded textures\n", path);
+        fprintf(stderr, "[lambda_model] %s has no embedded textures\n", path);
         free(buf);
         return 0;
     }
 
-    int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, "body_dump.obj");
+    int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, dump_path);
     if (!ok) { free(buf); return 0; }
 
-    free(slot->owned);          // release any previous body buffer
+    free(slot->owned);          // release any previous buffer
     slot->owned = buf;          // snapshots point into this; keep it alive
     slot->last_valid = 1;
     return 1;
 }
+
+int lambda_body_load(const char *path, int body) {
+    return slot_load_file(&g_body, path, body, "body_dump.obj");
+}
+
+int      lambda_scratch_load(const char *path, int body) { return slot_load_file(&g_scratch, path, body, NULL); }
+uint32_t lambda_scratch_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_scratch, out); }
+void     lambda_scratch_unlock(void) { pthread_mutex_unlock(&g_scratch.mtx); }
+uint32_t lambda_scratch_copy_pose(lambda_weapon_pose_t *out) { return slot_copy_pose(&g_scratch, out); }
 
 uint32_t lambda_body_generation(void) { return g_body.generation; }
 

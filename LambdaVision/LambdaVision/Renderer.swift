@@ -1374,31 +1374,16 @@ actor Renderer {
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true))?.path ?? NSTemporaryDirectory()
         let basedir = (appSupport as NSString).appendingPathComponent("xash3d")
-        // Game assets: prefer a copy pushed to Documents/GameData (one-time
-        // `scripts/push-assets.sh` — survives plain reinstalls, so code-only
-        // installs stay small/fast, but lives in the data container and is
-        // wiped by an uninstall). Fall back to assets bundled into the app
-        // (`build-and-sign.sh --set BUNDLE_HL_ASSETS=1`), and if neither is
-        // present, tell the player instead of letting the engine fail.
-        let docsGameData = (try? FileManager.default.url(
-            for: .documentDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: true))
-            .map { $0.appendingPathComponent("GameData").path }
-        let bundleGameData = (Bundle.main.resourcePath ?? "") + "/GameData"
-        let rodir: String
-        if let d = docsGameData,
-           FileManager.default.fileExists(atPath: d + "/valve/liblist.gam") {
-            rodir = d
-        } else if FileManager.default.fileExists(atPath: bundleGameData + "/valve/liblist.gam") {
-            rodir = bundleGameData
-        } else {
+        // Game assets (see GameData.directory); if there are none, tell the
+        // player instead of letting the engine fail.
+        guard let rodir = GameData.directory else {
             // Neither the Documents copy (scripts/push-assets.sh) nor a
             // bundled copy (build-and-sign.sh --set BUNDLE_HL_ASSETS=1) is
             // present. Most commonly: the app's data container was wiped by
             // an uninstall/reinstall, which push-assets.sh's copy doesn't
             // survive. Don't bother calling into the engine — it will just
             // fail the same way — and tell the player how to fix it instead.
-            AppLog.render.line("[LambdaVision] GameData missing (checked \(docsGameData ?? "<no docs dir>") and \(bundleGameData)) — skipping engine init")
+            AppLog.render.line("[LambdaVision] GameData missing (checked Documents/GameData and the app bundle) — skipping engine init")
             Task { @MainActor [appModel] in
                 appModel.engineFailureMessage =
                     "Half-Life game data not found on this headset. From your Mac, run ./scripts/push-assets.sh (fetch it first with ./scripts/fetch-assets.sh if you haven't already), then relaunch."
@@ -2401,7 +2386,7 @@ actor Renderer {
                                                                       handIsLeft: left,
                                                                       yawCorrection: weaponPass.heldYawCorrection)
                 } else {
-                    // No hand to hold it by (the hivehand): the old tuned
+                    // Nothing to hold it by (no hand and no skeleton): the old tuned
                     // placement of the viewmodel origin at the hand.
                     let B = studioToWorld   // GoldSrc (x fwd, y left, z up, inches) → Apple metres
                     let C = matrix4x4_translation(0, 0, Renderer.gripPushM)

@@ -127,6 +127,16 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
 
         guard let grip else {
             print(String(format: "  %-20@ cut %3d/%3d tris  grip: none%@", file, cut, vm.triangles.count, synthNote))
+            if CommandLine.arguments.contains("--measure") {
+                var per: [Int: Int] = [:]
+                for tri in vm.triangles { for (_, b) in tri.v { per[b, default: 0] += 1 } }
+                for (i, n) in vm.boneNames.enumerated() {
+                    let p = PoseSolver.translation(of: vm.restPose[i])
+                    print(String(format: "      %2d %@ parent %@ verts %d at (%.1f %.1f %.1f)", i, n,
+                                 vm.parents[i].map { "\($0)" } ?? "-", per[i] ?? 0, p.x, p.y, p.z))
+                }
+                print("      textures \(vm.textureNames)")
+            }
             continue
         }
         let valveBarrel = ViewmodelGrip.barrelInGrip(grip: grip, idlePalette: vm.restPose)
@@ -152,7 +162,7 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
         // Valve's hand is far off +X (the classic grenade, 45°), and there
         // they are held.
         let stem = file.replacingOccurrences(of: ".mdl", with: "")
-        let guns: Set = ["v_357", "v_9mmar", "v_9mmhandgun", "v_crossbow", "v_egon", "v_gauss", "v_rpg", "v_shotgun"]
+        let guns: Set = ["v_357", "v_9mmar", "v_9mmhandgun", "v_crossbow", "v_egon", "v_gauss", "v_rpg", "v_shotgun", "v_hgun"]
         if guns.contains(stem) {
             if hold != .aimed { die("\(file) is a gun but was not aimed") }
             guard let m = muzzleInHand, m.x > 8, abs(m.y) < 6 else { die("\(file): muzzle not ahead of the hand") }

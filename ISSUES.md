@@ -242,6 +242,12 @@ instead of deleting them.
 - Sense-controller support if availability ever improves — same anchor
   code as hand tracking, different input source.
 
+- **Near-instant loading.** The pre-game warm-up (AppModel.prepare →
+  WeaponWarmup) now does every weapon's asset-derived work before the play
+  button enables, cached to disk. Next candidates for the same step: engine
+  init and the first map load (start the engine behind the window instead of
+  on immersive open), texture super-resolution when it lands, and anything
+  else still computed on first sight in-game.
 - **Crossbow scope glass.** Draw the scope lens as a magnified sample of the
   eye's own frame along the scope's line of sight (cheap; exact when the
   scope is at the eye, which is the only time it is useful) instead of the
