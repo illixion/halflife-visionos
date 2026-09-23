@@ -42,9 +42,12 @@ final class LoadSnapshot {
     /// debug dump (vrdump format, read by Tools/SnapshotProbe --metres).
     private var pendingViews: [(projection: float4x4, view: float4x4)] = []
     private var dump: (views: [(projection: float4x4, view: float4x4)],
-                       color: MTLBuffer, depth: MTLBuffer, width: Int, height: Int, frame: UInt64)?
+                       color: MTLBuffer, depth: MTLBuffer, width: Int, height: Int, frame: UInt64,
+                       wide: Bool)?
+    /// Bytes per pixel of the engine colour map as the dump copies it.
+    private static func colorBytes(_ t: MTLTexture) -> Int { t.pixelFormat == .rgba16Unorm ? 8 : 4 }
     /// Debug: write the next capture to Caches/snapshot-eyeN.bin, for
-    /// `Tools/SnapshotProbe --metres --reverse-z`. Off: ~190 MB of readback.
+    /// `Tools/SnapshotProbe --metres --reverse-z`. Off: ~280 MB of readback.
     static var dumpFirstCapture = false
     /// Readback buffers for that dump, allocated when the capture is armed
     /// so the frame can make them resident.
@@ -168,9 +171,9 @@ final class LoadSnapshot {
              zNear: Float, zFar: Float, now: Double) {
         let n = zNear / 39.37, f = zFar / 39.37
         if Self.dumpFirstCapture, dumpBuffers == nil, let color {
-            let bytes = color.width * color.height * 4 * 2
-            if let cb = device.makeBuffer(length: bytes, options: .storageModeShared),
-               let db = device.makeBuffer(length: bytes, options: .storageModeShared) {
+            let pixels = color.width * color.height * 2
+            if let cb = device.makeBuffer(length: pixels * Self.colorBytes(color), options: .storageModeShared),
+               let db = device.makeBuffer(length: pixels * 4, options: .storageModeShared) {
                 dumpBuffers = (cb, db)
             }
         }
@@ -221,19 +224,20 @@ final class LoadSnapshot {
         if Self.dumpFirstCapture {
             Self.dumpFirstCapture = false
             let w = colorMap.width, h = colorMap.height, image = w * h * 4
+            let cpp = Self.colorBytes(colorMap), colorImage = w * h * cpp
             if let (cb, db) = dumpBuffers {
                 for slice in 0..<2 {
                     enc.copy(sourceTexture: colorMap, sourceSlice: slice, sourceLevel: 0,
                              sourceOrigin: MTLOrigin(), sourceSize: size,
-                             destinationBuffer: cb, destinationOffset: slice * image,
-                             destinationBytesPerRow: w * 4, destinationBytesPerImage: image)
+                             destinationBuffer: cb, destinationOffset: slice * colorImage,
+                             destinationBytesPerRow: w * cpp, destinationBytesPerImage: colorImage)
                     enc.copy(sourceTexture: engineDepth, sourceSlice: slice, sourceLevel: 0,
                              sourceOrigin: MTLOrigin(), sourceSize: size,
                              destinationBuffer: db, destinationOffset: slice * image,
                              destinationBytesPerRow: w * 4, destinationBytesPerImage: image,
                              options: .depthFromDepthStencil)
                 }
-                dump = (pendingViews, cb, db, w, h, frame)
+                dump = (pendingViews, cb, db, w, h, frame, colorMap.pixelFormat == .rgba16Unorm)
             }
         }
         enc.barrier(afterStages: .blit, beforeQueueStages: .all, visibilityOptions: .device)
@@ -247,7 +251,7 @@ final class LoadSnapshot {
         dumpBuffers = nil
         DispatchQueue.global(qos: .utility).async {
             let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            let image = d.width * d.height * 4
+            let pixels = d.width * d.height, image = pixels * 4
             for (eye, v) in d.views.enumerated() where eye < 2 {
                 var out = Data()
                 for x in [Int32(0x4452_5656), 1, Int32(d.width), Int32(d.height)] { withUnsafeBytes(of: x) { out.append(contentsOf: $0) } }
@@ -255,11 +259,21 @@ final class LoadSnapshot {
                     for c in 0..<4 { for r in 0..<4 { withUnsafeBytes(of: m[c][r]) { out.append(contentsOf: $0) } } }
                 }
                 out.append(Data(count: 24))   // view origin + angles: unused
-                // BGRA → RGBA
-                var rgba = Data(bytes: d.color.contents() + eye * image, count: image)
-                rgba.withUnsafeMutableBytes { p in
-                    let b = p.bindMemory(to: UInt8.self)
-                    for i in stride(from: 0, to: image, by: 4) { b.swapAt(i, i + 2) }
+                // The probe reads RGBA8: narrow a 16-bit map, swizzle a BGRA one.
+                var rgba: Data
+                if d.wide {
+                    let w16 = (d.color.contents() + eye * pixels * 8).bindMemory(to: UInt16.self, capacity: pixels * 4)
+                    rgba = Data(count: image)
+                    rgba.withUnsafeMutableBytes { p in
+                        let b = p.bindMemory(to: UInt8.self)
+                        for i in 0..<(pixels * 4) { b[i] = UInt8((UInt32(w16[i]) * 255 + 32767) / 65535) }
+                    }
+                } else {
+                    rgba = Data(bytes: d.color.contents() + eye * image, count: image)
+                    rgba.withUnsafeMutableBytes { p in
+                        let b = p.bindMemory(to: UInt8.self)
+                        for i in stride(from: 0, to: image, by: 4) { b.swapAt(i, i + 2) }
+                    }
                 }
                 out.append(rgba)
                 out.append(Data(bytes: d.depth.contents() + eye * image, count: image))

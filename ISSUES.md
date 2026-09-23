@@ -93,6 +93,16 @@ instead of deleting them.
   only (head-aimed there, no bridge); on device, check the pool follows
   the barrel, the eye fallback behind walls, and brush-entity surfaces.
 
+- **Dark-gradient banding fix: device check pending.** The engine now
+  renders into a 16-bit normalized colour map (8-bit fallback if ANGLE
+  rejects it, logged as `colorMap … not renderable`), and the composite
+  dithers half a stored code before the drawable rounds (format-aware:
+  `drawable colorFormat=… → composite dither` in the log). On device:
+  confirm the log lines, dim vents (c1a2/c2a1) show grain not splotches,
+  GPU cost vs. before, and whether the drawable is `_srgb` — if it is, the
+  engine's gamma-encoded output is being encoded twice (lifted blacks);
+  fixing that changes overall brightness, so it is a separate decision.
+
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

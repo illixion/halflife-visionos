@@ -133,6 +133,40 @@ fragment float4 fxaaFragmentShader(ColorInOut in [[stage_in]],
     return float4(float3(fxaaResolve(colorMap, s, uv, px, in.eye, rgbM)), 1.0);
 }
 
+// Output dither for the composite. The engine image is 16-bit, so a
+// dark gradient arrives smooth; the drawable is what rounds it, and at
+// 8 bits a dim vent spans a handful of codes that read as flat splotches.
+// Half a code of fixed per-pixel noise before that rounding turns the
+// steps into grain far finer than a pixel. The noise is added in the
+// drawable's STORED encoding (an _srgb drawable quantizes after the
+// hardware encode), and scaled to its code size; a float drawable needs
+// none. Set per pipeline from the layer's colour format (Renderer).
+constant bool  kOutputSRGB [[function_constant(20)]];
+constant float kOutputLSB  [[function_constant(21)]]; // one stored code; 0 = no dither
+
+static inline float3 srgbEncode(float3 c)
+{
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
+static inline float3 srgbDecode(float3 c)
+{
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+static inline float3 ditherOutput(float3 c, float2 pixel)
+{
+    if (kOutputLSB <= 0.0)
+        return c;
+    // interleaved gradient noise (Jimenez 2014): fixed per physical pixel,
+    // so it cannot shimmer between frames or between the two eyes' passes
+    const float n = fract(52.9829189 * fract(dot(pixel, float2(0.06711056, 0.00583715)))) - 0.5;
+    c = max(c, 0.0);
+    if (kOutputSRGB)
+        return srgbDecode(max(srgbEncode(c) + n * kOutputLSB, 0.0));
+    return max(c + n * kOutputLSB, 0.0);
+}
+
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
 {
@@ -150,7 +184,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     float2 uv = in.texCoord;
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
 
-    return float4(colorSample);
+    return float4(ditherOutput(float3(colorSample.rgb), in.position.xy), float(colorSample.a));
 }
 
 // Composite pass with FXAA folded in (Renderer.compositeFXAA, default on).
@@ -170,5 +204,5 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
-    return float4(float3(rgb), float(colorSample.a));
+    return float4(ditherOutput(float3(rgb), in.position.xy), float(colorSample.a));
 }

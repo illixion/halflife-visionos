@@ -1128,13 +1128,36 @@ actor Renderer {
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.label = fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline"
         pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
-        pipelineDescriptor.fragmentFunction = library?.makeFunction(
-            name: fxaa ? "fragmentShaderFXAA" : "fragmentShader")
+        let format = layerRenderer.configuration.colorFormat
+        let output = outputQuantization(format)
+        let constants = MTLFunctionConstantValues()
+        var srgb = output.srgb, lsb = output.lsb
+        constants.setConstantValue(&srgb, type: .bool, index: 20)
+        constants.setConstantValue(&lsb, type: .float, index: 21)
+        pipelineDescriptor.fragmentFunction = try library?.makeFunction(
+            name: fxaa ? "fragmentShaderFXAA" : "fragmentShader", constantValues: constants)
+        if !fxaa {
+            AppLog.render.line("[LambdaVision] drawable colorFormat=\(format.rawValue) (\(format)) → composite dither srgb=\(srgb) lsb=\(lsb)")
+        }
         pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
         pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
         pipelineDescriptor.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
         pipelineDescriptor.maxVertexAmplificationCount = layerRenderer.properties.viewCount
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    /// How the drawable stores what the composite writes: whether the
+    /// hardware sRGB-encodes it first, and the size of one stored code
+    /// (0 for float formats, which need no dither).
+    static func outputQuantization(_ format: MTLPixelFormat) -> (srgb: Bool, lsb: Float) {
+        switch format {
+        case .bgra8Unorm_srgb, .rgba8Unorm_srgb:            return (true, 1.0 / 255.0)
+        case .bgra8Unorm, .rgba8Unorm:                      return (false, 1.0 / 255.0)
+        case .bgr10_xr_srgb, .bgra10_xr_srgb:              return (true, 1.0 / 510.0)
+        case .bgr10_xr, .bgra10_xr:                         return (false, 1.0 / 510.0)
+        case .rgb10a2Unorm, .bgr10a2Unorm:                  return (false, 1.0 / 1023.0)
+        default:                                            return (false, 0)
+        }
     }
 
     // FXAA pass: fullscreen triangle colorMap → fxaaMap (both eye slices
@@ -1261,22 +1284,45 @@ actor Renderer {
         }
         w = Int((Double(w) * s).rounded())
         h = Int((Double(h) * s).rounded())
-        AppLog.render.line("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) bgra8Unorm via ANGLE")
 
         // ANGLE renders into this Swift-allocated MTLTexture each frame; the
-        // display pass samples it. GL is the only pixel producer.
-        let desc = MTLTextureDescriptor()
-        desc.textureType = .type2DArray
-        desc.pixelFormat = .bgra8Unorm
-        desc.width = w
-        desc.height = h
-        desc.arrayLength = 2
-        desc.mipmapLevelCount = 1
-        desc.usage = [.renderTarget, .shaderRead, .pixelFormatView]
-        desc.storageMode = .private
-        guard let tex = device.makeTexture(descriptor: desc) else {
-            fatalError("Unable to allocate \(w)x\(h) colorMap")
+        // display pass samples it. GL is the only pixel producer. 16-bit
+        // normalized, not 8-bit: texture × lightmap in a dark room lands on a
+        // few 8-bit codes, which read as flat splotches on the headset (dim
+        // vents). Normalized rather than half-float so blending still clamps
+        // at 1 exactly as the 8-bit target did (additive sprites, 2× modulate
+        // decals); RGB10A2 would have kept the size but rounded alpha to 2
+        // bits. The composite dithers the one rounding left, into the drawable.
+        // If ANGLE cannot render into it (its format caps gate the norm16
+        // extension), fall back to the old 8-bit target rather than a black
+        // view: the probe runs the frame's own EGLImage path on the worker.
+        var chosen: MTLTexture?
+        for format in [MTLPixelFormat.rgba16Unorm, .bgra8Unorm] {
+            let desc = MTLTextureDescriptor()
+            desc.textureType = .type2DArray
+            desc.pixelFormat = format
+            desc.width = w
+            desc.height = h
+            desc.arrayLength = 2
+            desc.mipmapLevelCount = 1
+            desc.usage = [.renderTarget, .shaderRead, .pixelFormatView]
+            desc.storageMode = .private
+            guard let tex = device.makeTexture(descriptor: desc) else {
+                fatalError("Unable to allocate \(w)x\(h) colorMap")
+            }
+            if format == .bgra8Unorm { chosen = tex; break }
+            let slice = tex.makeTextureView(pixelFormat: format, textureType: .type2D,
+                                            levels: 0..<1, slices: 0..<1)!
+            var status = [CChar](repeating: 0, count: 384)
+            let rc = status.withUnsafeMutableBufferPointer { buf in
+                lambda_gl_worker_probe_target(Unmanaged.passUnretained(slice).toOpaque(),
+                                              Int32(w), Int32(h), buf.baseAddress, Int32(buf.count))
+            }
+            if rc == 0 { chosen = tex; break }
+            AppLog.render.line("[LambdaVision] colorMap \(format) not renderable through ANGLE (rc=\(rc): \(String(cString: status))), falling back to 8-bit")
         }
+        let tex = chosen!
+        AppLog.render.line("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) \(tex.pixelFormat) via ANGLE")
         tex.label = "AngleColorMap"
         colorMap = tex
 

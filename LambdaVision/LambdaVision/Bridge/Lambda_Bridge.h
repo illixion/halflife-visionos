@@ -438,6 +438,12 @@ void lambda_gl_set_frame_fence(void *mtl_shared_event,
 //  -6 eglMakeCurrent failed
 int lambda_gl_smoke_test(char *status_out, int status_cap);
 
+// Whether ANGLE can render into this Metal texture (its format), tried on
+// the GL worker through the same EGLImage path frames use, and cleared to
+// black. 0 = renderable. Call after lambda_gl_worker_setup.
+int lambda_gl_worker_probe_target(void *mtl_texture, int width, int height,
+                                  char *status_out, int status_cap);
+
 #ifdef __cplusplus
 }
 #endif

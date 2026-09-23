@@ -3470,7 +3470,11 @@ typedef enum {
     WORK_FRAME,
     WORK_FRAME_EYE2,
     WORK_TICK,       // a frame nobody waits for (level loads), see lambda_gl_worker_tick_async
+    WORK_PROBE,      // can ANGLE render into this Metal texture? see lambda_gl_worker_probe_target
 } gl_work_kind_t;
+
+static void *g_w_probe_tex = NULL;
+static int   g_w_probe_w = 0, g_w_probe_h = 0;
 
 // engine console command (Cbuf_AddText) is the public C entry point.
 // declared here so we don't have to pull engine headers in.
@@ -3758,6 +3762,14 @@ static void *gl_worker_main(void *arg) {
         case WORK_FRAME:
             g_w_result = worker_engine_frame();
             break;
+        case WORK_PROBE:
+            // The same EGLImage → renderbuffer → FBO path the frame uses;
+            // an unrenderable format fails the completeness check.
+            g_w_result = lambda_gl_clear_mtl_texture(g_w_probe_tex, g_w_probe_w, g_w_probe_h,
+                                                     0.0f, 0.0f, 0.0f,
+                                                     g_w_status, g_w_status_cap);
+            if (g_w_result == 0 && glGetError() != GL_NO_ERROR) g_w_result = -6;
+            break;
         case WORK_FRAME_EYE2: {
             // Second eye: rebind FBO to the other slice and re-run only the
             // renderer (no sim tick). cl_stereo_eye_offset shifts the camera
@@ -3824,6 +3836,19 @@ static int worker_post_and_wait(gl_work_kind_t kind) {
         pthread_cond_wait(&g_w_done, &g_w_mtx);
     int rc = g_w_result;
     pthread_mutex_unlock(&g_w_mtx);
+    return rc;
+}
+
+int lambda_gl_worker_probe_target(void *mtl_texture, int width, int height,
+                                  char *status_out, int status_cap) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    g_w_probe_tex = mtl_texture;
+    g_w_probe_w = width;
+    g_w_probe_h = height;
+    int rc = worker_post_and_wait(WORK_PROBE);
+    g_w_probe_tex = NULL;
+    if (status_out && status_cap > 0) snprintf(status_out, status_cap, "%s", g_w_status);
+    pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
 }
 
