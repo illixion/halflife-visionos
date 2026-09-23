@@ -1151,6 +1151,14 @@ actor Renderer {
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
 
+    /// The world light at the eye (0…1), sampled by the client for the
+    /// external weapon's shading; only fresh while that weapon is drawn.
+    static func eyeLightLuma() -> Float {
+        var rgb = [Float](repeating: 0, count: 3)
+        rgb.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
+        return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+    }
+
     /// How the drawable stores what the composite writes: whether the
     /// hardware sRGB-encodes it first, and the size of one stored code
     /// (0 for float formats, which need no dither).
@@ -2302,6 +2310,7 @@ actor Renderer {
                                     aim: weaponActive ? reticleAim(headTransform: headM) : nil,
                                     reticle: Renderer.aimReticle,
                                     head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
+                                    ambient: weaponActive ? Self.eyeLightLuma() : nil,
                                     time: drawable.frameTiming.presentationTime.timeInterval)
             if hudScene != nil { hudRenderer = holo }
         }

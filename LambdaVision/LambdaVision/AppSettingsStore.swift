@@ -56,7 +56,7 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: fxaaEnabledKey) }
     }
     static var gamma: Double {
-        get { double(gammaKey, 2.5) }
+        get { double(gammaKey, 2.4) }   // tuned on the headset (engine default 2.5)
         set { defaults.set(newValue, forKey: gammaKey) }
     }
     static var brightness: Double {

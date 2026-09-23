@@ -84,6 +84,17 @@ nonisolated final class HEVHUD: @unchecked Sendable {
     private var armOpacity: Float = 0
     private var ammoOpacity: Float = 0
     private var lastTime: Double?
+    /// Hologram brightness adapted to the room, eased like eye adaptation.
+    private var adaptedBrightness: Float = 1
+
+    /// How bright the holograms glow for the world light at the eye (0…1,
+    /// R_LightPoint scale): full in a lit room, down to `darkBrightness` in
+    /// a dark vent, where full strength glares against the OLED black.
+    static let darkBrightness: Float = 0.35
+    static func brightness(forAmbient luma: Float) -> Float {
+        let t = max(0, min(1, (luma - 0.03) / (0.40 - 0.03)))
+        return darkBrightness + (1 - darkBrightness) * t * t * (3 - 2 * t)
+    }
 
     init() { _ = Self.fontRequested }
 
@@ -109,10 +120,15 @@ nonisolated final class HEVHUD: @unchecked Sendable {
 
     /// This frame's panels, or nil when nothing shows.
     func scene(state s: lambda_hud_state_t, readouts: Bool, gunArm: Arm?, offArm: Arm?,
-               aim: Aim?, reticle: Reticle, head: SIMD3<Float>, time: Double) -> RAVEHoloScene? {
+               aim: Aim?, reticle: Reticle, head: SIMD3<Float>, ambient: Float?,
+               time: Double) -> RAVEHoloScene? {
         guard let font = renderer?.font else { return nil }
         let dt = Float(min(0.1, max(0, time - (lastTime ?? time))))
         lastTime = time
+        // No probe this frame (it rides the external weapon): hold the level.
+        if let ambient {
+            adaptedBrightness = approach(adaptedBrightness, Self.brightness(forAmbient: ambient), rate: 2, dt: dt)
+        }
 
         // HIDEHUD_* from the game (hud.h): 1 weapons, 2 flashlight, 4 all, 8 health.
         let hideAll = !readouts || s.has_suit == 0 || (s.hide_flags & 4) != 0 || s.intermission != 0
@@ -154,6 +170,7 @@ nonisolated final class HEVHUD: @unchecked Sendable {
         if reticle != .off, s.intermission == 0, let aim {
             reticlePanels(aim, style: reticle, head: head, into: &scene)
         }
+        for i in scene.panels.indices { scene.panels[i].brightness = adaptedBrightness }
         return scene.panels.isEmpty ? nil : scene
     }
 
@@ -202,6 +219,8 @@ nonisolated final class HEVHUD: @unchecked Sendable {
     /// How far each panel stands off its anchor toward the eyes: past the
     /// HEV sleeve for the forearm, past the gun body for the ammo.
     static let forearmClearance: Float = 0.08
+    /// Corner radius of each gauge segment (m): rounded like the panels.
+    static let segmentCorner: Float = 0.0006
     static let gunClearance: Float = 0.05
 
     private static func towardEyes(_ point: SIMD3<Float>, head: SIMD3<Float>, by distance: Float) -> SIMD3<Float> {
@@ -230,7 +249,8 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             p.text(value, font: font, x: w / 2 - 0.005, y: y - (big ? 0.0135 : 0.011),
                    capHeight: big ? 0.0105 : 0.007, alignment: .trailing, color: SIMD4(color, 1))
             p.bar(x: x0 + 0.005, y: y - 0.0175, width: w * 0.62, height: 0.0028,
-                  fraction: fraction, segments: 10, gap: 0.0007, color: SIMD4(color, 0.95))
+                  fraction: fraction, segments: 10, gap: 0.0007, corner: Self.segmentCorner,
+                  color: SIMD4(color, 0.95))
         }
         row("HEALTH", value: "\(max(0, s.health))", fraction: Float(s.health) / 100,
             color: healthColor, y: top - 0.003, big: true)
@@ -242,7 +262,8 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             p.text("LIGHT", font: font, x: x0 + 0.005, y: y - 0.0055, capHeight: 0.0030, tracking: 0.0006,
                    color: SIMD4(c * (s.flashlight_on != 0 ? 0.9 : 0.55), 0.9))
             p.bar(x: x0 + 0.026, y: y - 0.0062, width: w * 0.62 - 0.021, height: 0.0022,
-                  fraction: s.flashlight_charge, color: SIMD4(c, s.flashlight_on != 0 ? 0.95 : 0.5))
+                  fraction: s.flashlight_charge, corner: 0.0011,   // capsule: half its height
+                  color: SIMD4(c, s.flashlight_on != 0 ? 0.95 : 0.5))
         }
     }
 
@@ -284,7 +305,9 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             // (the MP5's 50) read as a continuous gauge.
             let segments = hasClip && s.max_clip > 0 && s.max_clip <= 20 ? Int(s.max_clip) : 0
             p.bar(x: x0 + 0.005, y: -h / 2 + 0.004, width: w - 0.010, height: 0.0028,
-                  fraction: fraction, segments: segments, gap: 0.0006, color: SIMD4(color, 0.95))
+                  fraction: fraction, segments: segments, gap: 0.0006,
+                  corner: segments > 0 ? Self.segmentCorner : 0.0014,   // continuous: capsule
+                  color: SIMD4(color, 0.95))
         }
     }
 
