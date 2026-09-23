@@ -152,6 +152,11 @@ final class GameSettings {
     /// a mark stuck on the view that nothing lands on (the aim reticle does
     /// that job, and stands down in gaze mode).
     private var stockCrosshair: Int { fireAimMode == .gaze ? 1 : 0 }
+    /// Flashlight mounted on the weapon hand (default) or the stock headlamp.
+    var flashlightOnGun: Bool = AppSettingsStore.flashlightOnGun {
+        didSet { AppSettingsStore.flashlightOnGun = flashlightOnGun
+                 Renderer.flashlightOnGun = flashlightOnGun }
+    }
     /// Immersive gesture input (pass 2). When on, curling the dominant hand's
     /// index finger fires (finger-gun) in place of gaze+pinch fire. Read
     /// live by the render thread via Renderer.gestureInputEnabled.
@@ -234,6 +239,7 @@ final class GameSettings {
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
+        Renderer.flashlightOnGun   = flashlightOnGun
         Renderer.gestureInputEnabled = gestureInputEnabled
         HandMovement.armSwingEnabled = armSwingEnabled
         HandMovement.armSwingFollowsHands = (armSwingDirection == .hands)

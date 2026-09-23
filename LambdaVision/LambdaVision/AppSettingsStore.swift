@@ -85,6 +85,7 @@ enum AppSettingsStore {
     private static let dominantHandKey        = "lambdavision.settings.dominantHand"
     private static let fireAimModeKey         = "lambdavision.settings.fireAimMode"
     private static let gestureInputEnabledKey = "lambdavision.settings.gestureInputEnabled"
+    private static let flashlightOnGunKey     = "lambdavision.settings.flashlightOnGun"
     private static let fastWeaponSwitchKey    = "lambdavision.settings.fastWeaponSwitch"
     private static let armSwingEnabledKey     = "lambdavision.settings.armSwingEnabled"
     private static let armSwingDirectionKey   = "lambdavision.settings.armSwingDirection"
@@ -127,6 +128,10 @@ enum AppSettingsStore {
             return v
         }
         set { defaults.set(newValue.rawValue, forKey: fireAimModeKey) }
+    }
+    static var flashlightOnGun: Bool {
+        get { bool(flashlightOnGunKey, true) }
+        set { defaults.set(newValue, forKey: flashlightOnGunKey) }
     }
     static var gestureInputEnabled: Bool {
         get { bool(gestureInputEnabledKey, false) }

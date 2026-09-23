@@ -83,6 +83,16 @@ instead of deleting them.
   listed in `weapon_*.txt`), messages, console, menu. Offsets and the fade
   angle are first guesses (`HEVHUD.forearmClearance` / `gunClearance`).
 
+- **Gun-mounted flashlight: device check pending.** The flashlight now
+  rides the weapon hand (`Renderer.flashlightOnGun`, Settings "Gun-mounted
+  flashlight"): from the drawn muzzle along the barrel, or the grip along
+  the hand for melee weapons; head-aimed as stock when the hand is not
+  tracked. `cl_tent.c` traces from that beam and the renderer splats it as
+  a cone (`R_AddFlashlightCone`, `cl_flashlight_cone 0` = stock disc).
+  Brightness, range and battery are untouched. Verified on the Mac build
+  only (head-aimed there, no bridge); on device, check the pool follows
+  the barrel, the eye fallback behind walls, and brush-entity surfaces.
+
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

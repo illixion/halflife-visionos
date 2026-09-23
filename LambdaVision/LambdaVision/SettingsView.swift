@@ -104,6 +104,7 @@ struct SettingsView: View {
                     Picker("Fire aims at", selection: $settings.fireAimMode) {
                         ForEach(FireAimMode.allCases) { Text($0.label).tag($0) }
                     }
+                    Toggle("Gun-mounted flashlight", isOn: $settings.flashlightOnGun)
                     Toggle("Hand-tracked weapon model", isOn: $settings.weaponExternal)
                     Picker("Weapon model", selection: $settings.weaponModel) {
                         ForEach(WeaponModelStyle.allCases) { Text($0.label).tag($0) }

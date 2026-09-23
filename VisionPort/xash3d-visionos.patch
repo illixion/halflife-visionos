@@ -60,10 +60,18 @@ index 7cd9c1f..b0b9759 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
-index cb7aa9c..899392a 100644
+index cb7aa9c..907959e 100644
 --- a/engine/client/cl_main.c
 +++ b/engine/client/cl_main.c
-@@ -291,11 +291,14 @@ void CL_SignonReply( connprotocol_t proto )
+@@ -32,6 +32,7 @@ CVAR_DEFINE_AUTO( showpause, "1", 0, "show pause logo when paused" );
+ CVAR_DEFINE_AUTO( mp_decals, "300", FCVAR_ARCHIVE, "decals limit in multiplayer" );
+ static CVAR_DEFINE_AUTO( dev_overview, "0", 0, "draw level in overview-mode" );
+ static CVAR_DEFINE_AUTO( cl_resend, "6.0", 0, "time to resend connect" );
++CVAR_DEFINE_AUTO( cl_flashlight_cone, "1", FCVAR_ARCHIVE, "LambdaVision: draw the flashlight as a cone along its beam (0 = stock disc)" );
+ CVAR_DEFINE( cl_allow_download, "cl_allowdownload", "1", FCVAR_ARCHIVE, "allow to downloading resources from the server" );
+ static CVAR_DEFINE( cl_allow_upload, "cl_allowupload", "1", FCVAR_ARCHIVE, "allow to uploading resources to the server" );
+ CVAR_DEFINE_AUTO( cl_download_ingame, "1", FCVAR_ARCHIVE, "allow to downloading resources while client is active" );
+@@ -291,11 +292,14 @@ void CL_SignonReply( connprotocol_t proto )
  	switch( cls.signon )
  	{
  	case 1:
@@ -78,7 +86,7 @@ index cb7aa9c..899392a 100644
  		SCR_EndLoadingPlaque();
  		if( cl.proxy_redirect && !cls.spectator )
  			CL_Disconnect();
-@@ -509,8 +512,19 @@ static void CL_ApplyAddAngle( void )
+@@ -509,8 +513,19 @@ static void CL_ApplyAddAngle( void )
  
  	amove = addangletotal - cl.prevaddangletotal;
  
@@ -100,7 +108,7 @@ index cb7aa9c..899392a 100644
  
  	// remember last total
  	cl.prevaddangletotal = addangletotal;
-@@ -700,6 +714,24 @@ static void CL_CreateCmd( void )
+@@ -700,6 +715,24 @@ static void CL_CreateCmd( void )
  	clgame.dllFuncs.CL_CreateMove( host.frametime, cmd, active );
  	IN_EngineAppendMove( host.frametime, cmd, active );
  
@@ -125,6 +133,14 @@ index cb7aa9c..899392a 100644
  	CL_PopPMStates();
  
  	if( !cls.demoplayback )
+@@ -3465,6 +3498,7 @@ static void CL_InitLocal( void )
+ 	Cvar_RegisterVariable( &topcolor );
+ 	Cvar_RegisterVariable( &bottomcolor );
+ 	Cvar_RegisterVariable( &cl_lw );
++	Cvar_RegisterVariable( &cl_flashlight_cone );
+ 	Cvar_Get( "cl_lc", "1", FCVAR_ARCHIVE|FCVAR_USERINFO, "enable lag compensation" );
+ 	Cvar_Get( "password", "", FCVAR_USERINFO, "server password" );
+ 	Cvar_Get( "team", "", FCVAR_USERINFO, "player team" );
 diff --git a/engine/client/cl_scrn.c b/engine/client/cl_scrn.c
 index a530230..9b16372 100644
 --- a/engine/client/cl_scrn.c
@@ -203,6 +219,77 @@ index a530230..9b16372 100644
  /*
  ================
  SCR_EndLoadingPlaque
+diff --git a/engine/client/cl_tent.c b/engine/client/cl_tent.c
+index f1d4c1a..0bb5969 100644
+--- a/engine/client/cl_tent.c
++++ b/engine/client/cl_tent.c
+@@ -2638,6 +2638,16 @@ dlight_t *CL_GetEntityLight( int number )
+ 	return &cl_elights[number];
+ }
+ 
++// LambdaVision: gun-mounted flashlight. The visionOS bridge stages the
++// weapon hand's beam here at each tick start: [0] > 0 while a tracked hand
++// holds it, [1..3] the source (the drawn muzzle, or the grip for a melee
++// weapon) relative to the eye in the composed view's yaw frame (fwd, left,
++// up; the same frame as hlsdk's g_vr_muzzle_offset), [4..5] the beam's
++// pitch/yaw offset from the composed view. Inactive, the flashlight is the
++// stock headlamp.
++float cl_vr_flashlight[6] = { -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
++extern convar_t cl_flashlight_cone; // cl_main.c
++
+ /*
+ ================
+ CL_UpdateFlashlight
+@@ -2679,6 +2689,32 @@ static void CL_UpdateFlashlight( cl_entity_t *ent )
+ 	}
+ 
+ 	VectorAdd( ent->origin, view_ofs, vecSrc );
++
++	if( ent->index == ( cl.playernum + 1 ) && cl_vr_flashlight[0] > 0.0f )
++	{
++		extern int   cl_stereo_view_angles_override_active;
++		extern float cl_stereo_view_angles_override[3]; // abs pitch, delta yaw, abs roll
++		const float *o = cl_vr_flashlight;
++		const float viewYaw = cl.viewangles[YAW] + ( cl_stereo_view_angles_override_active ? cl_stereo_view_angles_override[1] : 0.0f );
++		const float viewPitch = cl_stereo_view_angles_override_active ? cl_stereo_view_angles_override[0] : cl.viewangles[PITCH];
++		const float y = DEG2RAD( viewYaw ), c = cosf( y ), s = sinf( y );
++		vec3_t beam, source;
++
++		beam[PITCH] = viewPitch + o[4];
++		beam[YAW] = viewYaw + o[5];
++		beam[ROLL] = 0.0f;
++		AngleVectors( beam, forward, NULL, NULL );
++
++		source[0] = vecSrc[0] + c * o[1] - s * o[2];
++		source[1] = vecSrc[1] + s * o[1] + c * o[2];
++		source[2] = vecSrc[2] + o[3];
++
++		// same rule as the shot: a torch pushed through a wall stays at the eye
++		trace = CL_TraceLine( vecSrc, source, PM_STUDIO_BOX );
++		if( trace.fraction >= 1.0f && !trace.startsolid && !trace.allsolid )
++			VectorCopy( source, vecSrc );
++	}
++
+ 	VectorMA( vecSrc, FLASHLIGHT_DISTANCE, forward, vecEnd );
+ 
+ 	trace = CL_TraceLine( vecSrc, vecEnd, PM_STUDIO_BOX );
+@@ -2703,6 +2739,16 @@ static void CL_UpdateFlashlight( cl_entity_t *ent )
+ 	dl->color.r = dl->color.g = dl->color.b = bound( 0, falloff * 255, 255 );
+ 	dl->die = cl.time + 0.01f; // die on next frame
+ 	dl->radius = 80;
++
++	// the renderer draws the local flashlight as a cone along this beam
++	if( ent->index == ( cl.playernum + 1 ) && cl_flashlight_cone.value )
++	{
++		refState.vr_flashlight_slot = ( dl - cl_dlights ) + 1;
++		refState.vr_flashlight_die = dl->die;
++		VectorCopy( vecSrc, refState.vr_flashlight_origin );
++		VectorCopy( forward, refState.vr_flashlight_dir );
++		refState.vr_flashlight_dist = trace.fraction * FLASHLIGHT_DISTANCE;
++	}
+ }
+ 
+ static void R_EntityDimlight( cl_entity_t *ent, int key )
 diff --git a/engine/client/cl_view.c b/engine/client/cl_view.c
 index d4628f3..295b93d 100644
 --- a/engine/client/cl_view.c
@@ -1372,6 +1459,28 @@ index 0000000..9da0b3f
 +}
 +
 +#endif // XASH_VIDEO == VIDEO_VISIONOS
+diff --git a/engine/ref_api.h b/engine/ref_api.h
+index ec2a151..4142acb 100644
+--- a/engine/ref_api.h
++++ b/engine/ref_api.h
+@@ -172,6 +172,17 @@ typedef struct ref_globals_s
+ 	// scaling factor of physical window size compared to logical
+ 	float scale_x;
+ 	float scale_y;
++
++	// LambdaVision: the local player's flashlight beam, written by the
++	// engine's CL_UpdateFlashlight each frame so the renderer can splat it
++	// into the lightmap as a cone instead of a radial disc. slot is the
++	// dlight index + 1 (0 = none) and die that dlight's die time this frame:
++	// both must match, so a muzzle flash reusing the slot draws stock.
++	int    vr_flashlight_slot;
++	float  vr_flashlight_die;
++	vec3_t vr_flashlight_origin; // beam source (eye, or the gun's muzzle)
++	vec3_t vr_flashlight_dir;    // unit beam axis
++	float  vr_flashlight_dist;   // source to impact along the beam
+ } ref_globals_t;
+ 
+ typedef struct ref_client_s
 diff --git a/engine/server/sv_game.c b/engine/server/sv_game.c
 index 226a39b..d9e93a7 100644
 --- a/engine/server/sv_game.c
@@ -2732,6 +2841,46 @@ index 0000000..67d1927
 +{
 +	*out = fs_iostats;
 +}
+diff --git a/ref/common/ref_common.h b/ref/common/ref_common.h
+index 4d31d67..fc5c851 100644
+--- a/ref/common/ref_common.h
++++ b/ref/common/ref_common.h
+@@ -54,6 +54,19 @@ void *_Mem_Realloc( poolhandle_t poolptr, void *memptr, size_t size, qboolean cl
+ #define Mem_EmptyPool( pool )          gEngfuncs._Mem_EmptyPool( pool, __FILE__, __LINE__ )
+ 
+ extern dlight_t *gp_dlights;
++
++// LambdaVision: is this the local flashlight published in gpGlobals this
++// frame? (see ref_globals_t.vr_flashlight_slot)
++static inline qboolean R_IsVRFlashlight( const dlight_t *dl )
++{
++	return gpGlobals->vr_flashlight_slot == ( dl - gp_dlights ) + 1
++		&& dl->die == gpGlobals->vr_flashlight_die;
++}
++
++// The cone stretches its footprint along a wall it meets at a slant. Mark
++// surfaces this far past the stock radius so the stretch reaches faces the
++// BSP split off, and clip the splat to the same distance from the impact.
++#define VR_FLASHLIGHT_REACH 2.5f
+ extern int g_lightstylevalue[MAX_LIGHTSTYLES];
+ extern poolhandle_t r_temppool;
+ 
+diff --git a/ref/common/ref_light.c b/ref/common/ref_light.c
+index d8a16d2..f17ffba 100644
+--- a/ref/common/ref_light.c
++++ b/ref/common/ref_light.c
+@@ -97,8 +97,9 @@ R_MarkLights
+ */
+ static void R_MarkLights( const dlight_t *light, int bit, const mnode_t *node, model_t *model, int dlightframecount )
+ {
+-	const float virtual_radius = light->radius * Q_max( 1.0f, r_dlight_virtual_radius.value );
+-	const float maxdist = light->radius * light->radius;
++	const float radius = R_IsVRFlashlight( light ) ? light->radius * VR_FLASHLIGHT_REACH : light->radius;
++	const float virtual_radius = radius * Q_max( 1.0f, r_dlight_virtual_radius.value );
++	const float maxdist = radius * radius;
+ start:
+ 	if( !node || node->contents < 0 )
+ 		return;
 diff --git a/ref/gl/gl2_shim/gl2_shim.c b/ref/gl/gl2_shim/gl2_shim.c
 index 3fa5df3..6490f31 100644
 --- a/ref/gl/gl2_shim/gl2_shim.c
@@ -3161,6 +3310,143 @@ index 0568486..ce56dca 100644
  
  	return;
  }
+diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
+index df6f012..6959ddd 100644
+--- a/ref/gl/gl_rsurf.c
++++ b/ref/gl/gl_rsurf.c
+@@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
+ 	return base;
+ }
+ 
++/*
++===============
++R_AddFlashlightCone
++
++LambdaVision: the local flashlight as a spot. Stock splats a radial disc
++around the impact point, the same shape whatever angle the beam meets the
++surface at. This lights each lightmap sample by the angle it makes with the
++beam instead: the sample is projected onto the plane through the impact
++square to the beam (gnomonic), so a surface facing the beam gets exactly
++a disc the size of the stock one, and a surface met at a slant gets it stretched into the
++ellipse a real torch throws. Brightness keeps the stock linear falloff and
++drops with the square of distance past the impact, never above stock, so
++the flashlight lights no more than it did.
++===============
++*/
++static void R_AddFlashlightCone( const msurface_t *surf, const dlight_t *dl, const vec3_t center, const vec3_t impact,
++	float sl, float tl, int smax, int tmax, float sample_size )
++{
++	const mextrasurf_t *info = surf->info;
++	const float rad = dl->radius;
++	const float lim = rad - dl->minlight;
++	const float reach = rad * VR_FLASHLIGHT_REACH;
++	const float d = Q_max( gpGlobals->vr_flashlight_dist, 1.0f );
++	vec3_t src, dir, n, a, b, tmp;
++	float det;
++	int s, t;
++
++	if( lim <= 0.0f )
++		return;
++
++	// beam into the surface's model space (brush entities are drawn moved)
++	if( !tr.modelviewIdentity )
++	{
++		Matrix4x4_VectorITransform( RI.objectMatrix, gpGlobals->vr_flashlight_origin, src );
++		Matrix4x4_VectorIRotate( RI.objectMatrix, gpGlobals->vr_flashlight_dir, dir );
++	}
++	else
++	{
++		VectorCopy( gpGlobals->vr_flashlight_origin, src );
++		VectorCopy( gpGlobals->vr_flashlight_dir, dir );
++	}
++
++	// only the side of the surface that faces the torch
++	VectorCopy( surf->plane->normal, n );
++	if( FBitSet( surf->flags, SURF_PLANEBACK ))
++		VectorNegate( n, n );
++	VectorSubtract( src, impact, tmp );
++	if( DotProduct( tmp, n ) <= 0.0f )
++		return;
++
++	// World offset of a lightmap coordinate step: invert [L0; L1; N] once.
++	// Exact for any texture projection, so no luxel-scale assumptions.
++	CrossProduct( info->lmvecs[1], n, a );
++	CrossProduct( n, info->lmvecs[0], b );
++	det = DotProduct( info->lmvecs[0], a );
++	if( fabs( det ) < 1e-6f )
++		return;
++	VectorScale( a, 1.0f / det, a );
++	VectorScale( b, 1.0f / det, b );
++
++	for( t = 0; t < tmax; t++ )
++	{
++		const float dt = sample_size * t - tl;
++
++		for( s = 0; s < smax; s++ )
++		{
++			const float ds = sample_size * s - sl;
++			vec3_t p, v;
++			float along, len2, perp, r, amount;
++			uint *bl;
++
++			p[0] = impact[0] + a[0] * ds + b[0] * dt;
++			p[1] = impact[1] + a[1] * ds + b[1] * dt;
++			p[2] = impact[2] + a[2] * ds + b[2] * dt;
++
++			VectorSubtract( p, center, tmp );
++			if( DotProduct( tmp, tmp ) >= reach * reach )
++				continue;
++
++			VectorSubtract( p, src, v );
++			along = DotProduct( v, dir );
++			if( along < 1.0f )
++				continue;
++
++			len2 = DotProduct( v, v );
++			perp = sqrt( Q_max( len2 - along * along, 0.0f ));
++			r = perp * d / along;
++			if( r >= lim )
++				continue;
++
++			amount = rad - r;
++			if( len2 > d * d )
++				amount *= d * d / len2;
++
++			bl = &r_blocklights[(s + (t * smax)) * 3];
++			bl[0] += ((int)( amount * 256 ) * dl->color.r ) / 256;
++			bl[1] += ((int)( amount * 256 ) * dl->color.g ) / 256;
++			bl[2] += ((int)( amount * 256 ) * dl->color.b ) / 256;
++		}
++	}
++}
++
+ /*
+ ===============
+ R_AddDynamicLights
+@@ -637,8 +739,9 @@ static void R_AddDynamicLights( const msurface_t *surf )
+ 		rad -= fabs( dist );
+ 
+ 		// rad is now the highest intensity on the plane
++		// (the flashlight cone reaches further; it clips itself)
+ 		minlight = dl->minlight;
+-		if( rad < minlight )
++		if( rad < minlight && !R_IsVRFlashlight( dl ))
+ 			continue;
+ 
+ 		minlight = rad - minlight;
+@@ -653,6 +756,12 @@ static void R_AddDynamicLights( const msurface_t *surf )
+ 		sl = DotProduct( impact, info->lmvecs[0] ) + info->lmvecs[0][3] - info->lightmapmins[0];
+ 		tl = DotProduct( impact, info->lmvecs[1] ) + info->lmvecs[1][3] - info->lightmapmins[1];
+ 
++		if( R_IsVRFlashlight( dl ))
++		{
++			R_AddFlashlightCone( surf, dl, origin_l, impact, sl, tl, smax, tmax, sample_size );
++			continue;
++		}
++
+ 		for( t = 0; t < tmax; t++ )
+ 		{
+ 			int td = (tl - sample_size * t) * sample_frac;
 diff --git a/ref/gl/wscript b/ref/gl/wscript
 index f085da6..9a9f280 100644
 --- a/ref/gl/wscript
