@@ -242,12 +242,16 @@ instead of deleting them.
 - Sense-controller support if availability ever improves — same anchor
   code as hand tracking, different input source.
 
-- **Near-instant loading.** The pre-game warm-up (AppModel.prepare →
-  WeaponWarmup) now does every weapon's asset-derived work before the play
-  button enables, cached to disk. Next candidates for the same step: engine
-  init and the first map load (start the engine behind the window instead of
-  on immersive open), texture super-resolution when it lands, and anything
-  else still computed on first sight in-game.
+- **Near-instant level transitions.** Today a changelevel runs inside one
+  engine frame on the render loop: measured on device (2026-09-23) the frame
+  that loads c0a0→c1a1 and c1a1→c1a0c takes 120–140 ms (one outlier frame of
+  457 ms on the first transition), during which no new frame is submitted and
+  the compositor holds the last one. A map's first visit also builds its node
+  graph (c1a0c.nod) in that window. Directions: keep head-tracked frames
+  flowing while the worker loads (don't block the render loop on a loading
+  engine frame; hold a faded, world-locked last image), prefetch the next map
+  when the player nears its trigger_changelevel, and move per-map one-off work
+  (node graphs) into the pre-game warm-up.
 - **Crossbow scope glass.** Draw the scope lens as a magnified sample of the
   eye's own frame along the scope's line of sight (cheap; exact when the
   scope is at the eye, which is the only time it is useful) instead of the
