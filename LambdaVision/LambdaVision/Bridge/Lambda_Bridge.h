@@ -295,6 +295,10 @@ int lambda_gl_depth_target_ok(void);
 int lambda_engine_loading(void);
 int lambda_gl_worker_busy(void);
 int lambda_gl_worker_tick_async(void);
+// Same, for the first load frame: ANGLE waits GPU-side until the shared event
+// reaches `value` (the app's snapshot copy) before the frames' GL work runs,
+// so the load needn't wait a display frame for that copy to finish.
+int lambda_gl_worker_tick_async_after(void *mtl_shared_event, unsigned long long value);
 
 // Sets where the crash handler writes the backtrace (one file, overwritten
 // each crash). Call once at launch with a path inside the app sandbox.
@@ -343,6 +347,13 @@ void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
 // unless a wall sits between the eye and the muzzle. active=0 fires from the
 // eye, as stock. Thread-safe; applied on the GL worker each tick.
 void lambda_set_muzzle(float fwd, float left, float up, int active);
+
+// Gun-mounted flashlight beam: the source relative to the eye in the same
+// view-yaw frame as lambda_set_muzzle (xash units), and the beam's pitch/yaw
+// offset from the composed view (degrees, same conventions as
+// lambda_set_aim_offset). active = 0 leaves the stock head-aimed flashlight.
+void lambda_set_flashlight_beam(float fwd, float left, float up,
+                                float pitch_deg, float yaw_deg, int active);
 
 // How far the aim ray from the muzzle runs before it hits something (xash
 // units), traced by the client each refdef; returns 0 with no hit to show

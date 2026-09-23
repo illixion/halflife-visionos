@@ -1,3 +1,5 @@
+#include <objc/runtime.h>
+#include <objc/message.h>
 #include "Lambda_Bridge.h"
 #include "Lambda_WeaponModel.h"
 #include <string.h>
@@ -2509,6 +2511,19 @@ void lambda_set_muzzle(float fwd, float left, float up, int active) {
     atomic_store(&g_pending_muzzle_active, active);
 }
 
+// Flashlight beam, engine side (engine/client/cl_tent.c), same staging.
+extern float cl_vr_flashlight[6];
+static _Atomic int g_pending_flashlight_cu[5];
+static _Atomic int g_pending_flashlight_active;
+
+void lambda_set_flashlight_beam(float fwd, float left, float up,
+                                float pitch_deg, float yaw_deg, int active) {
+    const float v[5] = { fwd, left, up, pitch_deg, yaw_deg };
+    for (int i = 0; i < 5; i++)
+        atomic_store(&g_pending_flashlight_cu[i], (int)lroundf(v[i] * 100.0f));
+    atomic_store(&g_pending_flashlight_active, active);
+}
+
 int lambda_aim_hit(float *distance) {
     float d = g_vr_aim_hit[0];
     if (g_vr_aim_hit[1] <= 0.0f || !(d > 0.0f)) return 0;
@@ -2562,6 +2577,9 @@ static void lambda_aim_offset_apply(void) {
     float muzzleActive = atomic_load(&g_pending_muzzle_active) ? 1.0f : -1.0f;
     g_vr_muzzle_offset[3] = muzzleActive;
     g_vr_muzzle_offset_cl[3] = muzzleActive;
+    for (int i = 0; i < 5; i++)
+        cl_vr_flashlight[1 + i] = (float)atomic_load(&g_pending_flashlight_cu[i]) / 100.0f;
+    cl_vr_flashlight[0] = atomic_load(&g_pending_flashlight_active) ? 1.0f : -1.0f;
     // Immersive +use ray and train throttle, same publish cadence.
     g_vr_use_offset[0] = (float)atomic_load(&g_pending_use_pitch_cd) / 100.0f;
     g_vr_use_offset[1] = (float)atomic_load(&g_pending_use_yaw_cd) / 100.0f;
@@ -3464,6 +3482,16 @@ static pthread_cond_t  g_w_post = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t  g_w_done = PTHREAD_COND_INITIALIZER;
 static gl_work_kind_t  g_w_kind = WORK_NONE;
 static int             g_w_started = 0;
+
+// CPU fallback for the tick's GPU wait: -[MTLSharedEvent
+// waitUntilSignaledValue:timeoutMS:] through the runtime (this file is C).
+static void lambda_mtl_shared_event_wait(void *event, unsigned long long value) {
+    typedef BOOL (*wait_fn)(id, SEL, uint64_t, uint64_t);
+    ((wait_fn)objc_msgSend)((id)event, sel_registerName("waitUntilSignaledValue:timeoutMS:"),
+                            value, 1000);
+}
+static void           *g_w_tick_wait_event = NULL; // id<MTLSharedEvent>, borrowed
+static unsigned long long g_w_tick_wait_value = 0;
 // Ticket counters. Posters wait until any prior work completes before
 // submitting their own (g_w_in_ticket == g_w_done_ticket), then bump
 // g_w_in_ticket; the worker writes g_w_done_ticket and broadcasts so
@@ -3692,6 +3720,32 @@ static void *gl_worker_main(void *arg) {
             // client is in: paced one per display frame, the handful of
             // frames a reconnect takes added ~16 ms each on device.
             g_frame_fence_event = NULL;
+            // Started in the same display frame as the app's snapshot copy:
+            // ANGLE's queue waits, GPU-side, for that copy before anything
+            // these frames draw can land in colorMap.
+            if (g_w_tick_wait_event) {
+                const EGLAttrib wait_attribs[] = {
+                    EGL_SYNC_METAL_SHARED_EVENT_OBJECT_ANGLE,
+                    (EGLAttrib)g_w_tick_wait_event,
+                    EGL_SYNC_METAL_SHARED_EVENT_SIGNAL_VALUE_LO_ANGLE,
+                    (EGLAttrib)(g_w_tick_wait_value & 0xffffffffull),
+                    EGL_SYNC_METAL_SHARED_EVENT_SIGNAL_VALUE_HI_ANGLE,
+                    (EGLAttrib)(g_w_tick_wait_value >> 32),
+                    EGL_SYNC_CONDITION,
+                    EGL_SYNC_METAL_SHARED_EVENT_SIGNALED_ANGLE,
+                    EGL_NONE
+                };
+                EGLSync sync = eglCreateSync(g_gl_disp, EGL_SYNC_METAL_SHARED_EVENT_ANGLE,
+                                             wait_attribs);
+                if (sync != EGL_NO_SYNC) {
+                    eglWaitSync(g_gl_disp, sync, 0);
+                    eglDestroySync(g_gl_disp, sync);
+                } else {
+                    // No GPU wait available: wait for the copy on the CPU.
+                    lambda_mtl_shared_event_wait(g_w_tick_wait_event, g_w_tick_wait_value);
+                }
+                g_w_tick_wait_event = NULL;
+            }
             double start = ft_now_ms();
             int frames = 0;
             do {
@@ -3777,7 +3831,13 @@ int lambda_gl_worker_setup(char *status_out, int status_cap) {
     pthread_mutex_lock(&g_w_api_mtx);
     if (!g_w_started) {
         g_w_started = 1;
-        pthread_create(&g_w_thread, NULL, gl_worker_main, NULL);
+        // The engine's whole frame, and every level load, runs here: don't
+        // leave its priority to whichever thread happened to start it.
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+        pthread_create(&g_w_thread, &attr, gl_worker_main, NULL);
+        pthread_attr_destroy(&attr);
     }
     int rc = worker_post_and_wait(WORK_SETUP);
     if (status_out && status_cap > 0)
@@ -3912,11 +3972,17 @@ int lambda_gl_worker_busy(void) {
 }
 
 int lambda_gl_worker_tick_async(void) {
+    return lambda_gl_worker_tick_async_after(NULL, 0);
+}
+
+int lambda_gl_worker_tick_async_after(void *mtl_shared_event, unsigned long long value) {
     pthread_mutex_lock(&g_w_api_mtx);
     pthread_mutex_lock(&g_w_mtx);
     int posted = 0;
     if (g_w_in_ticket == g_w_done_ticket) {
         ++g_w_in_ticket;
+        g_w_tick_wait_event = mtl_shared_event;
+        g_w_tick_wait_value = value;
         g_w_kind = WORK_TICK;
         pthread_cond_broadcast(&g_w_post);
         posted = 1;

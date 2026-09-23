@@ -260,6 +260,10 @@ actor Renderer {
     // that fires along gaze instead of the weapon barrel. Both live.
     nonisolated(unsafe) static var dominantHandIsLeft: Bool = false
     nonisolated(unsafe) static var fireAlongGaze: Bool = false
+    /// The flashlight rides the weapon hand like a gun-mounted light (the
+    /// drawn muzzle along the barrel, or the grip along the hand for a melee
+    /// weapon) instead of the stock headlamp. Independent of fire aim.
+    nonisolated(unsafe) static var flashlightOnGun: Bool = true
     // Immersive gesture input (pass 2, opt-in via Settings). When on, curling
     // the dominant hand's index finger pulls the trigger (finger-gun fire).
     // Gaze+pinch fire (LambdaVisionApp) stands down while this is on. The trigger
@@ -1647,6 +1651,8 @@ actor Renderer {
         var headAngles: SIMD3<Float>? = nil  // (abs pitch, delta yaw, abs roll) deg
         var headOffset = SIMD3<Float>(0, 0, 0)  // baseline-forward frame, xash units
         var muzzleOffset: SIMD3<Float>? = nil   // eye → muzzle, view-yaw frame, xash units
+        // Gun-mounted flashlight: source like muzzleOffset, beam offset from the view (deg)
+        var flashlightBeam: (source: SIMD3<Float>, pitch: Float, yaw: Float)? = nil
         if let cur = headPose {
             let fwd  = cur.rot.columns.0
             let left = cur.rot.columns.1
@@ -1764,6 +1770,24 @@ actor Renderer {
                     let r = yawDeg * .pi / 180
                     let c = cosf(r), s = sinf(r)
                     muzzleOffset = SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z)
+                }
+                // The flashlight rides the weapon hand whatever fire follows:
+                // from the drawn muzzle along the barrel, or for a weapon with
+                // no muzzle (crowbar, grenades) from the grip along the hand.
+                // Only its origin and aim change; brightness and range stay
+                // the engine's, so it lights no more than the stock one.
+                if Renderer.flashlightOnGun {
+                    let src = muzzlePoint(hand) ?? studioPoint(hand.worldGrip)
+                    let v = src - headBaselinePos! * appleToXash
+                    let r = yawDeg * .pi / 180
+                    let c = cosf(r), s = sinf(r)
+                    let b = barrelDirection(hand) ?? hand.worldForward
+                    let bx = SIMD3<Float>(-b.z, -b.x, b.y)  // Apple → xash basis
+                    let bPitch = atan2f(-bx.z, sqrtf(bx.x * bx.x + bx.y * bx.y)) * rad2deg
+                    var bYaw = atan2f(bx.y, bx.x) * rad2deg - yawDeg
+                    if bYaw > 180 { bYaw -= 360 } else if bYaw < -180 { bYaw += 360 }
+                    flashlightBeam = (SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z),
+                                      bPitch - pitchDeg, bYaw)
                 }
             } else {
                 lambda_clear_hand_pose()
@@ -1994,6 +2018,11 @@ actor Renderer {
         } else {
             lambda_set_muzzle(0, 0, 0, 0)
         }
+        if let f = flashlightBeam {
+            lambda_set_flashlight_beam(f.source.x, f.source.y, f.source.z, f.pitch, f.yaw, 1)
+        } else {
+            lambda_set_flashlight_beam(0, 0, 0, 0, 0, 0)
+        }
 
         // colorMap is written by ANGLE on its own MTLCommandQueue; glFinish
         // in the GL worker fences only that queue. OUR queue's reads of
@@ -2144,6 +2173,15 @@ actor Renderer {
         committedFrameIndex += 1
 
         commandQueue.signalEvent(self.endFrameEvent, value: committedFrameIndex)
+
+        // This frame copied the snapshot: start the load now rather than on
+        // the next display frame. ANGLE's queue waits for the copy (this
+        // event value) before the load frames' GL work, so nothing they
+        // draw can reach colorMap first.
+        if loadSnapshot.isHolding && loadSnapshot.captureFrame == committedFrameIndex {
+            _ = lambda_gl_worker_tick_async_after(
+                Unmanaged.passUnretained(endFrameEvent).toOpaque(), committedFrameIndex)
+        }
 
         endFrameEvent.notify(ftListener, atValue: committedFrameIndex) { _, _ in
             FrameTimingStats.shared.add("frameGPU", (CACurrentMediaTime() - ftEyesEnd) * 1000)
