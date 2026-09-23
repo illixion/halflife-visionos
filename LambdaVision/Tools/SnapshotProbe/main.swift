@@ -78,6 +78,7 @@ let libraryPath = args.removeFirst()
 var grid = 16          // pixels per mesh cell
 var tear: Float = 1.08 // depth ratio across a triangle that tears it
 var overscan: Float = 0.25
+var reverseZ = false   // the headset's depth convention: near 1, far 0, cleared to 0
 var dumps: [String] = []
 var outDir = ""
 while !args.isEmpty {
@@ -86,6 +87,7 @@ while !args.isEmpty {
     case "--grid": grid = Int(args.removeFirst())!
     case "--tear": tear = Float(args.removeFirst())!
     case "--overscan": overscan = Float(args.removeFirst())!
+    case "--reverse-z": reverseZ = true
     default: if outDir.isEmpty { outDir = a } else { dumps.append(a) }
     }
 }
@@ -123,11 +125,12 @@ func depthState(_ compare: MTLCompareFunction, write: Bool) -> MTLDepthStencilSt
     return device.makeDepthStencilState(descriptor: d)!
 }
 let backdropDepth = depthState(.always, write: false)
-let meshDepth = depthState(.less, write: true)
+let meshDepth = depthState(reverseZ ? .greater : .less, write: true)
 
 // GL clip z (−w…w) → Metal (0…w).
-let glToMetalClip = float4x4(rows: [SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0),
-                                    SIMD4(0, 0, 0.5, 0.5), SIMD4(0, 0, 0, 1)])
+let glToMetalClip = reverseZ
+    ? float4x4(rows: [SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, -0.5, 0.5), SIMD4(0, 0, 0, 1)])
+    : float4x4(rows: [SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 0.5, 0.5), SIMD4(0, 0, 0, 1)])
 
 func savePNG(_ texture: MTLTexture, _ path: String) {
     let w = texture.width, h = texture.height
@@ -188,7 +191,7 @@ for path in dumps {
         u.grid = SIMD2(UInt32((w + grid - 1) / grid), UInt32((h + grid - 1) / grid))
         u.eyeBase = 0
         u.flipV = 1
-        u.farZ = 0.99999
+        u.farZ = reverseZ ? 0.0001 : 0.99999
         u.tearRatio = tear
         u.alpha = 1
         u.minDistance = 4
@@ -208,7 +211,7 @@ for path in dumps {
         pass.colorAttachments[0].storeAction = .store
         pass.depthAttachment.texture = z
         pass.depthAttachment.loadAction = .clear
-        pass.depthAttachment.clearDepth = 1
+        pass.depthAttachment.clearDepth = reverseZ ? 0 : 1
         let cb = queue.makeCommandBuffer()!
         let enc = cb.makeRenderCommandEncoder(descriptor: pass)!
         enc.setCullMode(.none)

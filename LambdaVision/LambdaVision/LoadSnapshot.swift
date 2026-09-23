@@ -58,6 +58,8 @@ final class LoadSnapshot {
     private let backdropPipeline: MTLRenderPipelineState
     private let meshDepth: MTLDepthStencilState
     private let backdropDepth: MTLDepthStencilState
+    private let flattenPipeline: MTLRenderPipelineState
+    private let flattenDepth: MTLDepthStencilState
     private let vertexTable: MTL4ArgumentTable
     private let fragmentTable: MTL4ArgumentTable
     private let uniforms: [MTLBuffer]
@@ -89,6 +91,16 @@ final class LoadSnapshot {
         }
         meshPipeline = pipeline("snapshotMeshVertex")
         backdropPipeline = pipeline("snapshotBackdropVertex")
+        // Depth only: the live frame's constant far depth over the whole view.
+        let fd = MTLRenderPipelineDescriptor()
+        fd.label = "Snapshot depth flatten"
+        fd.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
+        fd.rasterSampleCount = device.rasterSampleCount
+        fd.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
+        fd.colorAttachments[0].writeMask = []
+        fd.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
+        fd.maxVertexAmplificationCount = layerRenderer.properties.viewCount
+        flattenPipeline = try! device.makeRenderPipelineState(descriptor: fd)
 
         let md = MTLDepthStencilDescriptor()
         md.depthCompareFunction = .greater      // reverse-Z
@@ -98,6 +110,10 @@ final class LoadSnapshot {
         bd.depthCompareFunction = .always
         bd.isDepthWriteEnabled = false
         backdropDepth = device.makeDepthStencilState(descriptor: bd)!
+        let fdd = MTLDepthStencilDescriptor()
+        fdd.depthCompareFunction = .always
+        fdd.isDepthWriteEnabled = true
+        flattenDepth = device.makeDepthStencilState(descriptor: fdd)!
 
         let vt = MTL4ArgumentTableDescriptor()
         vt.maxBufferBindCount = 3               // uniforms@2
@@ -245,6 +261,14 @@ final class LoadSnapshot {
             encoder.setDepthStencilState(meshDepth)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: vertices)
         }
+        // The compositor re-warps what we submit by its depth. The mesh's
+        // depth next to the backdrop's "infinitely far" tears opened gaps
+        // along every torn edge — black outlines on each head move. The
+        // parallax is already drawn in; hand it the live frame's constant
+        // far depth so it only corrects for rotation, as it does live.
+        encoder.setRenderPipelineState(flattenPipeline)
+        encoder.setDepthStencilState(flattenDepth)
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
     }
 
     func residentResources(slot: Int) -> [MTLResource] {
