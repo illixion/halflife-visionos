@@ -271,9 +271,30 @@ void lambda_engine_clear_view_angles(void);
 // it once at renderer bring-up. Defaults to 2048x2048.
 void lambda_engine_set_render_size(int width, int height);
 
-// Posts an engine console command (Cbuf_AddText) onto the worker thread.
+// Queues an engine console command (Cbuf_AddText) for the start of the
+// worker's next frame. Never waits, so it is safe from any thread at any
+// time, including before the engine is up and during a level load.
 // Use to dispatch "+forward" / "-forward" / "+left" / etc. for input.
+// Returns -1 if the queue (64 commands) is full.
 int lambda_gl_worker_cmd(const char *cmd);
+
+// Depth-stencil target for subsequent renders: a 2D view (one eye's slice)
+// of a depth32Float_stencil8 texture the app owns, which the engine then
+// draws its depth into instead of a private renderbuffer. NULL to go back.
+void lambda_gl_worker_set_depth_texture(void *mtl_depth_view);
+// Whether ANGLE accepted the last depth texture it was given (else the engine
+// fell back to its private depth, and the texture holds nothing).
+int lambda_gl_depth_target_ok(void);
+
+// Level loads. lambda_engine_loading() is 1 from the frame that starts a load
+// until the client is back in the new level (as of the last frame the worker
+// finished): the platform shows its snapshot instead of engine frames.
+// lambda_gl_worker_tick_async() posts one engine frame without waiting —
+// same staged view as the last render, no GPU fence, output not for display —
+// and returns 0 when the worker is still busy with the previous one.
+int lambda_engine_loading(void);
+int lambda_gl_worker_busy(void);
+int lambda_gl_worker_tick_async(void);
 
 // Sets where the crash handler writes the backtrace (one file, overwritten
 // each crash). Call once at launch with a path inside the app sandbox.

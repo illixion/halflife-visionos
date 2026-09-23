@@ -3172,6 +3172,15 @@ static int       g_frame_depth_h = 0;
 static int       g_frame_w = 0, g_frame_h = 0;
 static int       g_frame_samples = -1;  // -1 = not yet queried
 static EGLImage  g_frame_image = EGL_NO_IMAGE;
+// Depth-stencil the engine renders into this frame: the app's Metal texture
+// (a depth32Float_stencil8 slice) when it registered one, so the platform can
+// read the frame's depth; else the private renderbuffer above.
+static void     *g_frame_depth_mtl = NULL;
+static EGLImage  g_frame_depth_image = EGL_NO_IMAGE;
+static GLuint    g_frame_depth_ext = 0;
+static volatile int g_frame_depth_ok = 0;   // the last requested depth target took
+
+int lambda_gl_depth_target_ok(void) { return g_frame_depth_ok; }
 
 // GPU-side frame fence (EGL_ANGLE_metal_shared_event_sync). When the app
 // supplies an MTLSharedEvent + value, end_frame encodes a signal of that
@@ -3186,6 +3195,14 @@ static unsigned long long g_frame_fence_value = 0;
 void lambda_gl_set_frame_fence(void *mtl_shared_event, unsigned long long signal_value) {
     g_frame_fence_event = mtl_shared_event;
     g_frame_fence_value = signal_value;
+}
+
+static void lambda_gl_release_depth_target(void) {
+    if (g_frame_depth_ext) { glDeleteRenderbuffers(1, &g_frame_depth_ext); g_frame_depth_ext = 0; }
+    if (g_frame_depth_image != EGL_NO_IMAGE) {
+        eglDestroyImage(g_gl_disp, g_frame_depth_image);
+        g_frame_depth_image = EGL_NO_IMAGE;
+    }
 }
 
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
@@ -3258,13 +3275,28 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
         g_frame_depth_h = height;
     }
 
+    GLuint depth_rb = g_frame_depth;
+    if (g_frame_depth_mtl && g_frame_samples <= 1) {
+        g_frame_depth_image = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT,
+                                             EGL_METAL_TEXTURE_ANGLE,
+                                             (EGLClientBuffer)g_frame_depth_mtl,
+                                             img_attribs);
+        if (g_frame_depth_image != EGL_NO_IMAGE) {
+            glGenRenderbuffers(1, &g_frame_depth_ext);
+            glBindRenderbuffer(GL_RENDERBUFFER, g_frame_depth_ext);
+            pglEGLImg(GL_RENDERBUFFER, g_frame_depth_image);
+            depth_rb = g_frame_depth_ext;
+        }
+        g_frame_depth_ok = g_frame_depth_image != EGL_NO_IMAGE;
+    }
+
     glGenFramebuffers(1, &g_frame_fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER,
                               g_frame_samples > 1 ? g_frame_msaa_color : g_frame_rbo);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                              GL_RENDERBUFFER, g_frame_depth);
+                              GL_RENDERBUFFER, depth_rb);
 
     if (g_frame_samples > 1) {
         // Single-sample FBO wrapping the target texture; blit target for
@@ -3282,6 +3314,7 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
         if (g_frame_resolve_fbo) { glDeleteFramebuffers(1, &g_frame_resolve_fbo); g_frame_resolve_fbo = 0; }
         glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
         eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
+        lambda_gl_release_depth_target();
         return -5;
     }
 
@@ -3351,6 +3384,7 @@ int lambda_gl_end_frame(void) {
     if (g_frame_resolve_fbo) { glDeleteFramebuffers(1, &g_frame_resolve_fbo); g_frame_resolve_fbo = 0; }
     glDeleteRenderbuffers(1, &g_frame_rbo);  g_frame_rbo = 0;
     eglDestroyImage(g_gl_disp, g_frame_image); g_frame_image = EGL_NO_IMAGE;
+    lambda_gl_release_depth_target();
     return 0;
 }
 
@@ -3417,7 +3451,7 @@ typedef enum {
     WORK_INIT,
     WORK_FRAME,
     WORK_FRAME_EYE2,
-    WORK_CMD,
+    WORK_TICK,       // a frame nobody waits for (level loads), see lambda_gl_worker_tick_async
 } gl_work_kind_t;
 
 // engine console command (Cbuf_AddText) is the public C entry point.
@@ -3440,7 +3474,7 @@ static int             g_w_started = 0;
 static unsigned int    g_w_in_ticket = 0;
 static unsigned int    g_w_done_ticket = 0;
 // Held by lambda_gl_worker_* wrappers while they stage the payload and
-// post — keeps two callers from racing on g_w_cmd / g_w_mtl / etc.
+// post — keeps two callers from racing on g_w_mtl / g_w_depth / etc.
 static pthread_mutex_t g_w_api_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 // Per-kind payloads (only one in flight at a time, so a flat union is fine).
@@ -3457,8 +3491,9 @@ static const char *g_w_init_argv[W_MAX_ARGV];
 static void      *g_w_mtl = NULL;
 static int        g_w_w = 0, g_w_h = 0;
 static float      g_w_r = 0, g_w_g = 0, g_w_b = 0;
-// cmd
-static char       g_w_cmd[256];
+// depth-stencil target for the upcoming render (a 2D view of the app's
+// depth texture), or NULL for the private renderbuffer
+static void      *g_w_depth = NULL;
 // stereo offset for the current/upcoming render
 static float      g_w_eye_offset = 0.0f;
 // per-eye AVP frustum tangents (left, right, top, bottom) + depth range.
@@ -3519,6 +3554,51 @@ static void ft_commit_row(void) {
     fprintf(stderr, "%s\n", line);
 }
 
+// ---- Engine console commands ----------------------------------------------
+// Queued from any thread and handed to the engine (Cbuf_AddText, which is
+// not thread-safe) on the worker at the start of the next frame — the same
+// moment a posted command used to reach it, without waiting for the worker:
+// during a level load the worker is busy for a whole load, and the render
+// loop must keep drawing.
+#define LAMBDA_CMD_QUEUE 64
+static char            g_cmd_queue[LAMBDA_CMD_QUEUE][256];
+static int             g_cmd_head = 0, g_cmd_count = 0;
+static pthread_mutex_t g_cmd_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+int lambda_gl_worker_cmd(const char *cmd) {
+    if (!cmd) return -1;
+    pthread_mutex_lock(&g_cmd_mtx);
+    int rc = -1;
+    if (g_cmd_count < LAMBDA_CMD_QUEUE) {
+        int slot = (g_cmd_head + g_cmd_count) % LAMBDA_CMD_QUEUE;
+        snprintf(g_cmd_queue[slot], sizeof(g_cmd_queue[slot]), "%s", cmd);
+        g_cmd_count++;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&g_cmd_mtx);
+    return rc;
+}
+
+static void lambda_cmd_queue_apply(void) {
+    pthread_mutex_lock(&g_cmd_mtx);
+    while (g_cmd_count > 0) {
+        // Append "\n" so the engine treats it as a complete line.
+        Cbuf_AddText(g_cmd_queue[g_cmd_head]);
+        Cbuf_AddText("\n");
+        g_cmd_head = (g_cmd_head + 1) % LAMBDA_CMD_QUEUE;
+        g_cmd_count--;
+    }
+    pthread_mutex_unlock(&g_cmd_mtx);
+}
+
+// Whether the platform should hold its snapshot instead of showing the
+// engine's frames (SCR_VRLoading), as of the last frame the worker finished.
+extern void     SCR_FinishLoadingPlaque(void);
+extern int      SCR_VRLoading(void);
+static _Atomic int g_engine_loading = 0;
+
+int lambda_engine_loading(void) { return atomic_load(&g_engine_loading); }
+
 static void *gl_worker_main(void *arg) {
     (void)arg;
     pthread_setname_np("LambdaVision.gl-worker");
@@ -3543,10 +3623,18 @@ static void *gl_worker_main(void *arg) {
                                             g_w_init_argv,
                                             g_w_status, g_w_status_cap);
             break;
+        case WORK_TICK:
+            // Nobody waits on this frame and nobody displays it: the app
+            // shows its snapshot while the engine loads. No GPU fence —
+            // the app's queue never reads what this frame draws.
+            g_frame_fence_event = NULL;
+            // fallthrough
         case WORK_FRAME: {
+            SCR_FinishLoadingPlaque();   // a load started by a frame no second eye followed
             lambda_joy_apply();
             lambda_view_yaw_apply();
             lambda_aim_offset_apply();
+            g_frame_depth_mtl = g_w_depth;
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
@@ -3574,6 +3662,7 @@ static void *gl_worker_main(void *arg) {
                 // immersive reopen), then feed keyboard + synthetic menu
                 // cursor/clicks — all BEFORE the tick.
                 lambda_render_size_apply();
+                lambda_cmd_queue_apply();
                 lambda_key_queue_apply();
                 lambda_menu_input_apply();
                 double t0 = ft_now_ms();
@@ -3596,6 +3685,7 @@ static void *gl_worker_main(void *arg) {
                 g_ft_cur[0] = t1 - t0;
                 g_ft_cur[1] = ft_now_ms() - t1;
             }
+            atomic_store(&g_engine_loading, SCR_VRLoading() ? 1 : 0);
             g_w_result = (br != 0) ? br : er;
             break;
         }
@@ -3603,6 +3693,7 @@ static void *gl_worker_main(void *arg) {
             // Second eye: rebind FBO to the other slice and re-run only the
             // renderer (no sim tick). cl_stereo_eye_offset shifts the camera
             // along view-right inside V_RenderView.
+            g_frame_depth_mtl = g_w_depth;
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
@@ -3632,15 +3723,13 @@ static void *gl_worker_main(void *arg) {
                 g_ft_cur[3] = ft_now_ms() - t1;
                 ft_commit_row();
             }
+            // Both eyes of the frame that started a load are drawn: now the
+            // engine may tear the old level down.
+            SCR_FinishLoadingPlaque();
+            atomic_store(&g_engine_loading, SCR_VRLoading() ? 1 : 0);
             g_w_result = (br != 0) ? br : er;
             break;
         }
-        case WORK_CMD:
-            // Append "\n" so the engine treats it as a complete line.
-            Cbuf_AddText(g_w_cmd);
-            Cbuf_AddText("\n");
-            g_w_result = 0;
-            break;
         default: g_w_result = -1; break;
         }
 
@@ -3794,11 +3883,30 @@ int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
     return rc;
 }
 
-int lambda_gl_worker_cmd(const char *cmd) {
-    if (!cmd) return -1;
+void lambda_gl_worker_set_depth_texture(void *mtl_depth_view) {
     pthread_mutex_lock(&g_w_api_mtx);
-    snprintf(g_w_cmd, sizeof(g_w_cmd), "%s", cmd);
-    int rc = worker_post_and_wait(WORK_CMD);
+    g_w_depth = mtl_depth_view;
     pthread_mutex_unlock(&g_w_api_mtx);
-    return rc;
+}
+
+int lambda_gl_worker_busy(void) {
+    pthread_mutex_lock(&g_w_mtx);
+    int busy = g_w_in_ticket != g_w_done_ticket;
+    pthread_mutex_unlock(&g_w_mtx);
+    return busy;
+}
+
+int lambda_gl_worker_tick_async(void) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    pthread_mutex_lock(&g_w_mtx);
+    int posted = 0;
+    if (g_w_in_ticket == g_w_done_ticket) {
+        ++g_w_in_ticket;
+        g_w_kind = WORK_TICK;
+        pthread_cond_broadcast(&g_w_post);
+        posted = 1;
+    }
+    pthread_mutex_unlock(&g_w_mtx);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return posted;
 }

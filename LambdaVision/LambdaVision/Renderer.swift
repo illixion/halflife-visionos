@@ -139,6 +139,17 @@ actor Renderer {
     // CompositorServices hands us a drawable.
     var colorMap: MTLTexture!
     var colorMapLayerViews: [MTLTexture] = [] // per-slice 2D views handed to ANGLE
+    // The engine's depth-stencil, drawn by ANGLE into a texture of ours (the
+    // same per-eye slice views as colorMap) so the level-load snapshot can
+    // redraw the frame with parallax.
+    var engineDepth: MTLTexture!
+    var engineDepthLayerViews: [MTLTexture] = []
+    // Holds the last frame of a level still in the room while the next loads.
+    var loadSnapshot: LoadSnapshot!
+    // This frame's colorMap is copied into the snapshot (render() encodes it).
+    var captureSnapshotThisFrame = false
+    // A hold that timed out is not re-armed until the engine stops loading.
+    var snapshotRearmBlocked = false
     // Normal path: colorMap (engine render, sub-logical) → composite pass,
     // which samples it directly and applies FXAA in the same fragment shader
     // (fragmentShaderFXAA) — no intermediate texture, no extra pass.
@@ -972,6 +983,8 @@ actor Renderer {
         }
 
         self.depthState = Self.buildDepthStencilState(device: device)
+        self.loadSnapshot = LoadSnapshot(device: device, layerRenderer: layerRenderer,
+                                         slots: maxBuffersInFlight + 1)
 
         do {
             mesh = try Self.buildMesh(device: device, mtlVertexDescriptor: mtlVertexDescriptor)
@@ -1274,8 +1287,29 @@ actor Renderer {
                                 slices: slice..<(slice + 1))!
         }
 
+        let depthDesc = MTLTextureDescriptor()
+        depthDesc.textureType = .type2DArray
+        depthDesc.pixelFormat = .depth32Float_stencil8
+        depthDesc.width = w
+        depthDesc.height = h
+        depthDesc.arrayLength = 2
+        depthDesc.usage = [.renderTarget, .shaderRead, .pixelFormatView]
+        depthDesc.storageMode = .private
+        guard let depthTex = device.makeTexture(descriptor: depthDesc) else {
+            fatalError("Unable to allocate \(w)x\(h) engine depth")
+        }
+        depthTex.label = "AngleDepth"
+        engineDepth = depthTex
+        engineDepthLayerViews = (0..<2).map { slice in
+            depthTex.makeTextureView(pixelFormat: depthTex.pixelFormat,
+                                     textureType: .type2D,
+                                     levels: 0..<1,
+                                     slices: slice..<(slice + 1))!
+        }
+        let snapshotTextures = loadSnapshot.ensureTextures(colorMap: tex, engineDepth: depthTex)
+
         #if !targetEnvironment(simulator)
-        commandQueueResidencySet.addAllocations([tex])
+        commandQueueResidencySet.addAllocations([tex, depthTex] + snapshotTextures)
         commandQueueResidencySet.commit()
         #endif
 
@@ -1970,7 +2004,31 @@ actor Renderer {
         let ftEyesStart = CACurrentMediaTime()
         FrameTimingStats.shared.add("wait1", (ftEyesStart - ftWait1Start) * 1000)
 
-        for eye in 0..<2 {
+        // Level load: while the engine is busy, keep drawing the snapshot of
+        // its last frame instead of waiting on it (LoadSnapshot). Its frames
+        // run without anyone waiting; the live view returns once the client
+        // is back in and the worker is idle.
+        var engineHeld = false
+        if case .holding(let since) = loadSnapshot.phase {
+            if lambda_engine_loading() == 0 && lambda_gl_worker_busy() == 0 {
+                loadSnapshot.release(now: ftEyesStart)
+                AppLog.render.line(String(format: "[LambdaVision] load held %.0f ms",
+                                          (ftEyesStart - since) * 1000))
+            } else if ftEyesStart - since > LoadSnapshot.maxHoldSeconds {
+                AppLog.render.line("[LambdaVision] load still running after \(Int(LoadSnapshot.maxHoldSeconds)) s — waiting on the engine again")
+                loadSnapshot.drop()
+                snapshotRearmBlocked = true
+            } else {
+                engineHeld = true
+                // The copy must be done before the engine draws into
+                // colorMap again.
+                if endFrameEvent.signaledValue >= loadSnapshot.captureFrame {
+                    _ = lambda_gl_worker_tick_async()
+                }
+            }
+        }
+
+        for eye in 0..<2 where !engineHeld {
             // GPU-side fence for this eye: the bridge signals angleFenceEvent
             // with this value on ANGLE's queue when the eye's render
             // completes, instead of blocking the GL worker in glFinish.
@@ -1985,6 +2043,7 @@ actor Renderer {
             let eyeApple_x = primary.views[eye].transform.columns.3.x
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
+            lambda_gl_worker_set_depth_texture(Unmanaged.passUnretained(engineDepthLayerViews[eye]).toOpaque())
             var tang = primary.views[eye].tangents  // (left, right, top, bottom)
 
             // 2D overlay (HUD/console/menu) placement: a box of fixed
@@ -2044,12 +2103,28 @@ actor Renderer {
         // wait is GPU-side (queue stalls, not the CPU), pairing with the
         // per-eye fence signals above; angleFenceValue is the last (eye 1)
         // value, which implies eye 0's earlier value on the same event.
-        commandQueue.waitForEvent(angleFenceEvent, value: angleFenceValue)
+        if !engineHeld {
+            commandQueue.waitForEvent(angleFenceEvent, value: angleFenceValue)
+        }
+
+        // The frame just drawn started a load: copy it (both eyes are intact
+        // — the engine defers tearing the old level down until after the
+        // second eye) and hold it from the next frame on.
+        if lambda_engine_loading() == 0 { snapshotRearmBlocked = false }
+        if !engineHeld, !loadSnapshot.isHolding, !snapshotRearmBlocked,
+           lambda_engine_loading() != 0, let anchor = frameDeviceAnchor {
+            loadSnapshot.hasDepth = lambda_gl_depth_target_ok() != 0
+            loadSnapshot.arm(views: primary.views, anchor: anchor.originFromAnchorTransform,
+                             zNear: zNear, zFar: zFar, now: ftEyesStart)
+            captureSnapshotThisFrame = true
+        }
 
         let ftEyesEnd = CACurrentMediaTime()
         FrameTimingStats.shared.add("eyes", (ftEyesEnd - ftEyesStart) * 1000)
-        angleFenceEvent.notify(ftListener, atValue: angleFenceValue) { _, _ in
-            FrameTimingStats.shared.add("angleGPU", (CACurrentMediaTime() - ftEyesEnd) * 1000)
+        if !engineHeld {
+            angleFenceEvent.notify(ftListener, atValue: angleFenceValue) { _, _ in
+                FrameTimingStats.shared.add("angleGPU", (CACurrentMediaTime() - ftEyesEnd) * 1000)
+            }
         }
 
         for (i, drawable) in drawables.enumerated() {
@@ -2203,6 +2278,7 @@ actor Renderer {
                                                                      body: body?.mesh))
         }
         if let hudRenderer { residencySet.addAllocations(hudRenderer.allocations) }
+        residencySet.addAllocations(loadSnapshot.residentResources(slot: uniformBufferIndex))
         if !armVertices.isEmpty {
             residencySet.addAllocations(armPass.residentResources(uniformBufferIndex: uniformBufferIndex))
         }
@@ -2212,6 +2288,14 @@ actor Renderer {
         let commandAllocator = self.commandAllocators[uniformBufferIndex]
         commandBuffer.beginCommandBuffer(allocator: commandAllocator)
         commandBuffer.useResidencySet(residencySet)
+
+        if encodeUpscale && captureSnapshotThisFrame {
+            captureSnapshotThisFrame = false
+            // This command buffer signals committedFrameIndex + 1 (renderFrame).
+            loadSnapshot.encodeCapture(commandBuffer: commandBuffer, colorMap: colorMap,
+                                       engineDepth: engineDepth, frame: committedFrameIndex + 1)
+        }
+        let snapshotAlpha = loadSnapshot.alpha(now: CACurrentMediaTime())
 
         if encodeUpscale && !spatialScalers.isEmpty {
             // FXAA: colorMap → fxaaMap, both eye slices in one pass via
@@ -2281,11 +2365,20 @@ actor Renderer {
             renderEncoder.setVertexAmplificationCount(viewMappings)
         }
 
-        renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
-        let displayTexture: MTLTexture = displayMap ?? colorMap
-        self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
+        // While a load is held the engine's colorMap is not a frame worth
+        // showing (it is mid-load); the snapshot covers the view instead.
+        if !loadSnapshot.isHolding {
+            renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
+            let displayTexture: MTLTexture = displayMap ?? colorMap
+            self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
 
-        renderEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+            renderEncoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        if let snapshotAlpha {
+            loadSnapshot.encode(encoder: renderEncoder,
+                                viewProjections: drawableTarget.viewProjections(drawable: drawable),
+                                slot: uniformBufferIndex, alpha: snapshotAlpha)
+        }
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()

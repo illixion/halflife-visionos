@@ -242,16 +242,26 @@ instead of deleting them.
 - Sense-controller support if availability ever improves — same anchor
   code as hand tracking, different input source.
 
-- **Near-instant level transitions.** Today a changelevel runs inside one
-  engine frame on the render loop: measured on device (2026-09-23) the frame
-  that loads c0a0→c1a1 and c1a1→c1a0c takes 120–140 ms (one outlier frame of
-  457 ms on the first transition), during which no new frame is submitted and
-  the compositor holds the last one. A map's first visit also builds its node
-  graph (c1a0c.nod) in that window. Directions: keep head-tracked frames
-  flowing while the worker loads (don't block the render loop on a loading
-  engine frame; hold a faded, world-locked last image), prefetch the next map
-  when the player nears its trigger_changelevel, and move per-map one-off work
-  (node graphs) into the pre-game warm-up.
+- **Near-instant level transitions.** A changelevel still runs inside one
+  engine frame (device 2026-09-23: 120–140 ms, one 457 ms outlier; Mac native
+  build 76–110 ms). What changed: the render loop no longer waits for it. The
+  frame that starts a load is copied with its depth and pose, the engine's
+  frames run unawaited (`lambda_gl_worker_tick_async`), and every display
+  frame redraws the copy from the live head pose (`LoadSnapshot.swift`,
+  `SnapshotShaders.metal`; tuned on Mac dumps with
+  `Tools/SnapshotProbe`). The engine defers tearing the old level down until
+  both eyes of that frame are drawn and draws no plaque
+  (`SCR_BeginLoadingPlaque`/`SCR_FinishLoadingPlaque`, visionOS only). Needs
+  device confirmation that it reads as holding still. Where the time goes, per
+  `[LT]` log lines (Mac, c1a0→c1a0d): world textures 16 ms, server activate
+  10 ms, BSP tree/hulls 5 ms, save old level 4–7 ms, restore entities 5–8 ms,
+  client precache 3–7 ms, sky 3 ms, first frame 5–7 ms; a first visit builds
+  the node graph a few frames later (29 ms hitch, `[LT] late hitch`). Next,
+  if still wanted: prepare the next map's files in the background from the
+  trigger and swap once ready (the player keeps moving meanwhile; landmark
+  save already carries position and velocity), and check every map's files in
+  the pre-game warm-up so a broken map is refused with a message instead of
+  ending the session.
 - **Crossbow scope glass.** Draw the scope lens as a magnified sample of the
   eye's own frame along the scope's line of sight (cheap; exact when the
   scope is at the eye, which is the only time it is useful) instead of the

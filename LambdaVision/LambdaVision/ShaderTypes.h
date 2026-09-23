@@ -75,6 +75,27 @@ typedef struct
     simd_float4     renderFlags;
 } WeaponUniforms;
 
+// Level-load snapshot (SnapshotShaders.metal): the last engine frame before a
+// load, kept as colour + depth, redrawn every frame from the current head pose
+// so the world stays put while the engine is busy. Per eye, `captureClipToWorld`
+// takes the captured frame's GL clip space (x, y from the texel, z = 2·depth − 1)
+// to world space; `worldToClip` is the current view's world → Metal clip.
+typedef struct
+{
+    matrix_float4x4 captureClipToWorld[2];
+    matrix_float4x4 worldToClip[2];
+    simd_float4     captureEye[2];  // xyz = where the captured eye was, world units
+    simd_uint2      grid;           // mesh cells across, down
+    uint32_t        eyeBase;        // eye of amplification id 0
+    uint32_t        flipV;          // texture rows run bottom-up (GL-written)
+    float           farZ;           // output NDC depth for "infinitely far"
+    float           tearRatio;      // a triangle whose far corner is this much farther than its near one tears
+    float           alpha;          // opacity over whatever is behind
+    float           minDistance;    // world units: nearer than this counts as this near (no divide blow-ups)
+    float           overscan;       // the backdrop reaches this far past the captured frame (fraction of it), edge texels smeared and darkened
+    float           pad[3];
+} SnapshotUniforms;
+
 // Constant-buffer slot spacing for the per-submesh WeaponUniforms array, and
 // the number of submeshes one draw may bind (stock viewmodels top out at 11).
 #define WEAPON_UNIFORM_STRIDE 256

@@ -5,8 +5,18 @@
 # forbids dlopen of external dylibs, so engine + filesystem + 3rdparty +
 # HLSDK ship as one static archive; HLSDK entity factories are reached at
 # runtime via dlsym(RTLD_DEFAULT) into the app's main exec.
+#
+# XR_SIM=1 builds the same archive for the visionOS Simulator instead, as
+# Vendor/libxash/libxash-sim.a (the app links it for xrsimulator builds).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ "${XR_SIM:-0}" = "1" ]; then
+  WAF_PLATFORM=--xros-simulator; SDK_NAME=xrsimulator; LD_PLATFORM=xros-simulator
+  CLANG_TARGET=arm64-apple-xros2.0-simulator; ARCHIVE=libxash-sim.a
+else
+  WAF_PLATFORM=--xros; SDK_NAME=xros; LD_PLATFORM=xros
+  CLANG_TARGET=arm64-apple-xros2.0; ARCHIVE=libxash.a
+fi
 
 # llvm-objcopy is needed for the --redefine-sym prelink fixups below (Apple's
 # toolchain ships no objcopy). Prefer an explicit $LLVM_OBJCOPY, then Homebrew
@@ -29,12 +39,12 @@ echo "Using llvm-objcopy: $OBJCOPY"
 cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
 rm -rf build
-python3 ./waf configure --xros --disable-gl --disable-soft --enable-gles3compat
+python3 ./waf configure $WAF_PLATFORM --disable-gl --disable-soft --enable-gles3compat
 # Final `xash` exec link is expected to fail (filesystem is normally a
 # runtime-loaded dylib). We harvest .o files; ignore the link failure.
 python3 ./waf build || true
 
-SDK="$(xcrun --show-sdk-path --sdk xros)"
+SDK="$(xcrun --show-sdk-path --sdk $SDK_NAME)"
 # Engine objects, raw — but excluding launcher.c (defines _main, conflicts
 # with our SwiftUI app's main) and build/filesystem/ (those go through a
 # pre-link step below to hide symbols that collide with engine globals when
@@ -72,7 +82,7 @@ _TriWorldToScreen
 _Mod_LoadAliasModel
 EOF
 GL_OBJ="$PWD/build/ref/gl/ref_gl.combined.o"
-xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
   -unexported_symbols_list "$GL_UNEXPORTS" \
   -o "$GL_OBJ" "${GL_RAW_OBJS[@]}"
 # `ld -r -unexported_symbols_list` only LOCALIZES the listed symbols; it
@@ -124,7 +134,7 @@ __Mem_Free
 _FI
 EOF
 FS_OBJ="$PWD/build/filesystem/filesystem.combined.o"
-xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
   -unexported_symbols_list "$FS_UNEXPORTS" \
   -o "$FS_OBJ" "${FS_RAW_OBJS[@]}"
 # Filesystem defines `fs_globals_t FI;` (a 4112-byte struct) and engine
@@ -146,7 +156,7 @@ XASH_OBJS+=("$FS_OBJ")
 # for now the server is enough to get the engine past entity init.
 cd "$HERE/hlsdk-portable"
 rm -rf build
-python3 ./waf configure --xros
+python3 ./waf configure $WAF_PLATFORM
 python3 ./waf build
 # dlls/, game_shared/, pm_shared/ — only the .1.o flavor. waf compiles
 # weapons + pm_shared TWICE (once for dlls without CLIENT_DLL/CLIENT_WEAPONS,
@@ -169,7 +179,7 @@ HLSDK_VCS_OBJ="$PWD/build/game_shared/vcs_info.c.1.o"
 HLSDK_UNEXPORTS="$HERE/hlsdk-portable/build/unexports.list"
 printf '_VectorAngles\n' > "$HLSDK_UNEXPORTS"
 HLSDK_OBJ="$HERE/hlsdk-portable/build/hlsdk.combined.o"
-xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
   -unexported_symbols_list "$HLSDK_UNEXPORTS" \
   -o "$HLSDK_OBJ" "${HLSDK_RAW_OBJS[@]}"
 HLSDK_OBJS=("$HLSDK_OBJ" "$HLSDK_VCS_OBJ")
@@ -231,7 +241,7 @@ ENGINE_INPUT_OBJ="$HERE/xash3d-fwgs/build/engine/client/input/input.c.2.o"
   --redefine-sym _IN_MouseEvent=_xash_engine_IN_MouseEvent \
   "$ENGINE_INPUT_OBJ" "$ENGINE_INPUT_OBJ"
 HLSDK_CL_OBJ="$HERE/hlsdk-portable/build/cl_dll.combined.o"
-xcrun ld -r -arch arm64 -platform_version xros 2.0 26.4 \
+xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
   -exported_symbols_list "$HLSDK_CL_EXPORTS" \
   -o "$HLSDK_CL_OBJ" "${HLSDK_CL_RAW_OBJS[@]}"
 HLSDK_OBJS+=("$HLSDK_CL_OBJ")
@@ -240,19 +250,19 @@ OUT="$HERE/../LambdaVision/Vendor/libxash"
 mkdir -p "$OUT"
 
 # --- cl_dll stubs ---
-SDK="$(xcrun --show-sdk-path --sdk xros)"
+SDK="$(xcrun --show-sdk-path --sdk $SDK_NAME)"
 STUB_OBJ="$HERE/lambda_hlsdk_stubs.o"
-xcrun clang --target=arm64-apple-xros2.0 -isysroot "$SDK" -c \
+xcrun clang --target=$CLANG_TARGET -isysroot "$SDK" -c \
   "$HERE/lambda_hlsdk_stubs.c" -o "$STUB_OBJ"
 
 if [ "${SKIP_HLSDK:-0}" = "1" ]; then
-  echo "Bundling ${#XASH_OBJS[@]} engine + 1 stub (HLSDK skipped) into libxash.a"
-  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/libxash.a" \
+  echo "Bundling ${#XASH_OBJS[@]} engine + 1 stub (HLSDK skipped) into $ARCHIVE"
+  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/$ARCHIVE" \
     "${XASH_OBJS[@]}" "$STUB_OBJ"
 else
-  echo "Bundling ${#XASH_OBJS[@]} engine + ${#HLSDK_OBJS[@]} HLSDK + 1 stub object files into libxash.a"
-  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/libxash.a" \
+  echo "Bundling ${#XASH_OBJS[@]} engine + ${#HLSDK_OBJS[@]} HLSDK + 1 stub object files into $ARCHIVE"
+  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/$ARCHIVE" \
     "${XASH_OBJS[@]}" "${HLSDK_OBJS[@]}" "$STUB_OBJ"
 fi
-file "$OUT/libxash.a"
-echo "Wrote $OUT/libxash.a ($(stat -f%z "$OUT/libxash.a") bytes)"
+file "$OUT/$ARCHIVE"
+echo "Wrote $OUT/$ARCHIVE ($(stat -f%z "$OUT/$ARCHIVE") bytes)"
