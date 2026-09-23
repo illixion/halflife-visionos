@@ -216,7 +216,9 @@ final class LoadSnapshot {
         u.grid = grid
         u.eyeBase = 0
         u.flipV = 1
-        u.farZ = 0                              // reverse-Z far plane
+        // Just inside the reverse-Z far plane: exactly 0 sits on the clip
+        // boundary and the backdrop is clipped away, leaving torn edges black.
+        u.farZ = 0.0001
         u.tearRatio = hasDepth ? Self.tearRatio : .infinity
         u.alpha = alpha
         u.minDistance = 0.1

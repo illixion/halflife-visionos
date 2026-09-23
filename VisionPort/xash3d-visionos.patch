@@ -541,10 +541,10 @@ index 3bda62d..07bcb8e 100644
  static qboolean FS_DetermineRootDirectory( char *out, size_t size )
  {
 diff --git a/engine/common/host.c b/engine/common/host.c
-index ebb7fe0..abad5e0 100644
+index ebb7fe0..6ae8e74 100644
 --- a/engine/common/host.c
 +++ b/engine/common/host.c
-@@ -650,6 +650,45 @@ static qboolean Host_FilterTime( double time )
+@@ -650,6 +650,58 @@ static qboolean Host_FilterTime( double time )
  	return true;
  }
  
@@ -560,13 +560,26 @@ index ebb7fe0..abad5e0 100644
 +static double lt_start, lt_last, lt_watch_until;
 +static int lt_state; // 0 idle, 1 timing, 2 end after this host frame
 +
++// To the log only: on the console these would land in the notify lines,
++// on screen during the very load they time.
++static void LT_Print( const char *fmt, ... )
++{
++	char text[256];
++	va_list args;
++
++	va_start( args, fmt );
++	Q_vsnprintf( text, sizeof( text ), fmt, args );
++	va_end( args );
++	Sys_PrintLog( text );
++}
++
 +void LT_Begin( const char *what )
 +{
 +	if( lt_state == 1 )
 +		return; // the trigger's queued changelevel command, already timing
 +	lt_start = lt_last = Platform_DoubleTime();
 +	lt_state = 1;
-+	Con_Printf( "[LT] begin %s\n", what );
++	LT_Print( "[LT] begin %s\n", what );
 +}
 +
 +void LT_Mark( const char *step )
@@ -577,7 +590,7 @@ index ebb7fe0..abad5e0 100644
 +		return;
 +
 +	now = Platform_DoubleTime();
-+	Con_Printf( "[LT] %-28s %7.1f ms  (at %.1f)\n", step, ( now - lt_last ) * 1000.0, ( now - lt_start ) * 1000.0 );
++	LT_Print( "[LT] %-28s %7.1f ms  (at %.1f)\n", step, ( now - lt_last ) * 1000.0, ( now - lt_start ) * 1000.0 );
 +	lt_last = now;
 +}
 +
@@ -590,7 +603,7 @@ index ebb7fe0..abad5e0 100644
  /*
  =================
  Host_Frame
-@@ -677,6 +716,27 @@ void Host_Frame( double time )
+@@ -677,6 +729,27 @@ void Host_Frame( double time )
  
  	host.framecount++;
  	host.pureframetime = Platform_DoubleTime() - t1;
@@ -600,7 +613,7 @@ index ebb7fe0..abad5e0 100644
 +		LT_Mark( "-- host frame end" );
 +		if( lt_state == 2 )
 +		{
-+			Con_Printf( "[LT] end %.1f ms\n", ( Platform_DoubleTime() - lt_start ) * 1000.0 );
++			LT_Print( "[LT] end %.1f ms\n", ( Platform_DoubleTime() - lt_start ) * 1000.0 );
 +			lt_state = 0;
 +			lt_watch_until = Platform_DoubleTime() + 5.0;
 +		}
@@ -610,15 +623,15 @@ index ebb7fe0..abad5e0 100644
 +		// what the level still loads lazily once it runs: node graph,
 +		// models first seen, sounds
 +		double now = Platform_DoubleTime();
-+		if( host.pureframetime > 0.015 )
-+			Con_Printf( "[LT] late hitch %.1f ms, %.2f s after\n", host.pureframetime * 1000.0, now - ( lt_watch_until - 5.0 ));
++		if( host.pureframetime > 0.025 )
++			LT_Print( "[LT] late hitch %.1f ms, %.2f s after\n", host.pureframetime * 1000.0, now - ( lt_watch_until - 5.0 ));
 +		if( now > lt_watch_until )
 +			lt_watch_until = 0.0;
 +	}
  }
  
  /*
-@@ -1152,9 +1212,37 @@ static void Sys_Quit_f( void )
+@@ -1152,9 +1225,37 @@ static void Sys_Quit_f( void )
  Host_Main
  =================
  */
@@ -657,7 +670,7 @@ index ebb7fe0..abad5e0 100644
  	string demoname, exename;
  
  	if( setjmp( return_from_main_buf ))
-@@ -1311,14 +1399,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
+@@ -1311,14 +1412,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
  	// check after all configs were executed
  	HPAK_CheckIntegrity( hpk_custom_file.string );
  
