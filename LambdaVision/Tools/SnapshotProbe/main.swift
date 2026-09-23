@@ -13,7 +13,8 @@ import Metal
 import UniformTypeIdentifiers
 import simd
 
-let inchesPerMetre: Float = 39.37
+// World units per metre: engine dumps are in inches, headset dumps (--metres) in metres.
+var inchesPerMetre: Float = 39.37
 
 struct Dump {
     var width = 0, height = 0
@@ -88,6 +89,7 @@ while !args.isEmpty {
     case "--tear": tear = Float(args.removeFirst())!
     case "--overscan": overscan = Float(args.removeFirst())!
     case "--reverse-z": reverseZ = true
+    case "--metres": inchesPerMetre = 1
     default: if outDir.isEmpty { outDir = a } else { dumps.append(a) }
     }
 }
@@ -194,7 +196,7 @@ for path in dumps {
         u.farZ = reverseZ ? 0.0001 : 0.99999
         u.tearRatio = tear
         u.alpha = 1
-        u.minDistance = 4
+        u.minDistance = 0.1 * inchesPerMetre
         u.overscan = overscan
 
         let targetDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)

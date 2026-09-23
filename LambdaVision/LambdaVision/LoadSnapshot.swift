@@ -38,6 +38,17 @@ final class LoadSnapshot {
     /// Mesh cells across and down the captured frame.
     private var pendingGrid = SIMD2<UInt32>(16, 16)
     private var grid = SIMD2<UInt32>(16, 16)
+    /// Per eye: the engine's GL projection and the world → eye view, for the
+    /// debug dump (vrdump format, read by Tools/SnapshotProbe --metres).
+    private var pendingViews: [(projection: float4x4, view: float4x4)] = []
+    private var dump: (views: [(projection: float4x4, view: float4x4)],
+                       color: MTLBuffer, depth: MTLBuffer, width: Int, height: Int, frame: UInt64)?
+    /// Debug: write the next capture to Caches/snapshot-eyeN.bin, for
+    /// `Tools/SnapshotProbe --metres --reverse-z`. Off: ~190 MB of readback.
+    static var dumpFirstCapture = false
+    /// Readback buffers for that dump, allocated when the capture is armed
+    /// so the frame can make them resident.
+    private var dumpBuffers: (color: MTLBuffer, depth: MTLBuffer)?
     /// endFrameEvent value of the frame whose command buffer holds the copy:
     /// the engine may not draw into colorMap again before it completes.
     private(set) var captureFrame: UInt64 = 0
@@ -156,6 +167,14 @@ final class LoadSnapshot {
     func arm(views: [LayerRenderer.Drawable.View], anchor: float4x4,
              zNear: Float, zFar: Float, now: Double) {
         let n = zNear / 39.37, f = zFar / 39.37
+        if Self.dumpFirstCapture, dumpBuffers == nil, let color {
+            let bytes = color.width * color.height * 4 * 2
+            if let cb = device.makeBuffer(length: bytes, options: .storageModeShared),
+               let db = device.makeBuffer(length: bytes, options: .storageModeShared) {
+                dumpBuffers = (cb, db)
+            }
+        }
+        pendingViews = []
         pendingCapture = views.map { view in
             let eye = anchor * view.transform
             let t = view.tangents   // left, right, top, bottom
@@ -167,6 +186,7 @@ final class LoadSnapshot {
                 SIMD4(0, 2 * n / (top - b), 0, 0),
                 SIMD4((r + l) / (r - l), (top + b) / (top - b), -(f + n) / (f - n), -1),
                 SIMD4(0, 0, -2 * f * n / (f - n), 0)))
+            pendingViews.append((p, eye.inverse))
             return (eye * p.inverse, eye.columns.3)
         }
         // Cells of about cellDegrees across the frame's field of view.
@@ -198,8 +218,55 @@ final class LoadSnapshot {
                          destinationLevel: 0, destinationOrigin: MTLOrigin())
             }
         }
+        if Self.dumpFirstCapture {
+            Self.dumpFirstCapture = false
+            let w = colorMap.width, h = colorMap.height, image = w * h * 4
+            if let (cb, db) = dumpBuffers {
+                for slice in 0..<2 {
+                    enc.copy(sourceTexture: colorMap, sourceSlice: slice, sourceLevel: 0,
+                             sourceOrigin: MTLOrigin(), sourceSize: size,
+                             destinationBuffer: cb, destinationOffset: slice * image,
+                             destinationBytesPerRow: w * 4, destinationBytesPerImage: image)
+                    enc.copy(sourceTexture: engineDepth, sourceSlice: slice, sourceLevel: 0,
+                             sourceOrigin: MTLOrigin(), sourceSize: size,
+                             destinationBuffer: db, destinationOffset: slice * image,
+                             destinationBytesPerRow: w * 4, destinationBytesPerImage: image,
+                             options: .depthFromDepthStencil)
+                }
+                dump = (pendingViews, cb, db, w, h, frame)
+            }
+        }
         enc.barrier(afterStages: .blit, beforeQueueStages: .all, visibilityOptions: .device)
         enc.endEncoding()
+    }
+
+    /// Writes the debug dump once the GPU has finished the capture frame.
+    func flushDump(completedFrame: UInt64) {
+        guard let d = dump, completedFrame >= d.frame else { return }
+        dump = nil
+        dumpBuffers = nil
+        DispatchQueue.global(qos: .utility).async {
+            let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            let image = d.width * d.height * 4
+            for (eye, v) in d.views.enumerated() where eye < 2 {
+                var out = Data()
+                for x in [Int32(0x4452_5656), 1, Int32(d.width), Int32(d.height)] { withUnsafeBytes(of: x) { out.append(contentsOf: $0) } }
+                for m in [v.projection, v.view] {
+                    for c in 0..<4 { for r in 0..<4 { withUnsafeBytes(of: m[c][r]) { out.append(contentsOf: $0) } } }
+                }
+                out.append(Data(count: 24))   // view origin + angles: unused
+                // BGRA → RGBA
+                var rgba = Data(bytes: d.color.contents() + eye * image, count: image)
+                rgba.withUnsafeMutableBytes { p in
+                    let b = p.bindMemory(to: UInt8.self)
+                    for i in stride(from: 0, to: image, by: 4) { b.swapAt(i, i + 2) }
+                }
+                out.append(rgba)
+                out.append(Data(bytes: d.depth.contents() + eye * image, count: image))
+                try? out.write(to: dir.appendingPathComponent("snapshot-eye\(eye).bin"))
+            }
+            AppLog.render.line("[LoadSnapshot] wrote debug dump to Caches/snapshot-eye0/1.bin")
+        }
     }
 
     /// The load is over and the live view is back: fade the copy out.
@@ -272,6 +339,6 @@ final class LoadSnapshot {
     }
 
     func residentResources(slot: Int) -> [MTLResource] {
-        [uniforms[slot % uniforms.count]] + [color, depth].compactMap { $0 }
+        [uniforms[slot % uniforms.count]] + [color, depth, dumpBuffers?.color, dumpBuffers?.depth].compactMap { $0 }
     }
 }

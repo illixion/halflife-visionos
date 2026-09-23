@@ -14,8 +14,11 @@
 //    world and projects it into the current view, so near walls slide
 //    against far ones as the head moves. A triangle spanning a depth edge
 //    (a door frame against the room behind) would stretch into a sheet
-//    between the two; it tears instead and the backdrop shows through,
-//    which reads as the far side smearing rather than a wall of rubber.
+//    between the two; instead it is pushed back whole to its farthest
+//    corner's depth, so the far side smears across the gap the near side
+//    uncovers. The mesh alone covers the captured view; the backdrop only
+//    shows past its edges. (Leaving torn triangles open over the backdrop
+//    drew black outlines on the headset, never reproduced on the Mac.)
 //
 //  Shared with Tools/SnapshotProbe, which tunes it on dumps from the Mac
 //  engine build, so it names no app state: everything arrives in
@@ -82,23 +85,24 @@ vertex SnapshotOut snapshotMeshVertex(uint vid [[vertex_id]],
 
     // All three corners of this vertex's triangle, so every vertex of it
     // reaches the same verdict on tearing.
-    float nearest = INFINITY, farthest = 0.0;
-    float3 mine = 0.0;
+    float nearest = INFINITY, farthest = 0.0, farthestDepth = 0.0, mineDepth = 0.0;
     for (uint k = 0; k < 3; k++) {
         const float2 s = snapshotScreen(cell, first + k, u.grid);
-        const float3 w = snapshotWorld(u, eye, s, snapshotDepth(depth, s, u.flipV, eye));
-        const float d = max(distance(w, u.captureEye[eye].xyz), u.minDistance);
+        const float z = snapshotDepth(depth, s, u.flipV, eye);
+        const float d = max(distance(snapshotWorld(u, eye, s, z), u.captureEye[eye].xyz), u.minDistance);
         nearest = min(nearest, d);
-        farthest = max(farthest, d);
-        if (first + k == corner) mine = w;
+        if (d > farthest) { farthest = d; farthestDepth = z; }
+        if (first + k == corner) mineDepth = z;
     }
+    const bool torn = farthest > nearest * u.tearRatio;
 
     const float2 screen = snapshotScreen(cell, corner, u.grid);
+    const float3 world = snapshotWorld(u, eye, screen, torn ? farthestDepth : mineDepth);
     SnapshotOut out;
-    out.position = u.worldToClip[eye] * float4(mine, 1.0);
+    out.position = u.worldToClip[eye] * float4(world, 1.0);
     out.uv = snapshotUV(screen, u.flipV);
     out.eye = eye;
-    out.torn = farthest > nearest * u.tearRatio ? 1.0 : 0.0;
+    out.torn = 0.0;
     out.outside = 0.0;
     return out;
 }

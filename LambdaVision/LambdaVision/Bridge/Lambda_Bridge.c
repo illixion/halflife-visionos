@@ -3599,6 +3599,68 @@ static _Atomic int g_engine_loading = 0;
 
 int lambda_engine_loading(void) { return atomic_load(&g_engine_loading); }
 
+// One engine frame into the staged eye target: input, view overrides, the
+// tick, the weapon/menu publishes. Returns the begin/end-frame result.
+static int worker_engine_frame(void) {
+    SCR_FinishLoadingPlaque();   // a load started by a frame no second eye followed
+    lambda_joy_apply();
+    lambda_view_yaw_apply();
+    lambda_aim_offset_apply();
+    g_frame_depth_mtl = g_w_depth;
+    int br = lambda_gl_begin_frame_into_mtl_texture(
+        g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
+    int er = 0;
+    if (br == 0) {
+        lambda_engine_set_stereo_offset(g_w_eye_offset);
+        if (g_w_have_tangents)
+            lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
+        if (g_w_have_view_angles) {
+            lambda_engine_set_view_angles(g_w_view_angles[0],
+                                          g_w_view_angles[1],
+                                          g_w_view_angles[2]);
+            lambda_engine_set_view_offset(g_w_view_offset[0],
+                                          g_w_view_offset[1],
+                                          g_w_view_offset[2]);
+        }
+        // AFTER the view override is installed for THIS frame: the
+        // hand-pose apply mirrors it into the cl_dll globals, and
+        // the tick below composes the hand weapon from the mirror.
+        // Mirroring before the set (the old order) handed the
+        // entity a cleared/stale camera — the gun swam against
+        // head motion instead of sticking to the hand.
+        lambda_hand_pose_apply();
+        lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
+        // Sync refState if the render size changed (scale setting +
+        // immersive reopen), then feed keyboard + synthetic menu
+        // cursor/clicks — all BEFORE the tick.
+        lambda_render_size_apply();
+        lambda_cmd_queue_apply();
+        lambda_key_queue_apply();
+        lambda_menu_input_apply();
+        double t0 = ft_now_ms();
+        lambda_engine_frame();
+        double t1 = ft_now_ms();
+        // The client (HUD_CreateEntities) just published the active
+        // weapon's studio header when vr_weapon_external is on; bake a
+        // fresh bind-pose mesh if the model changed. Cheap no-op
+        // otherwise. Same thread as the publish, so the pointer is
+        // sequenced; the snapshot swap is mutex-guarded for the reader.
+        lambda_weapon_extract();
+        // Publish menu visibility for the spatial-event router.
+        lambda_menu_state_publish();
+        if (g_w_have_view_angles)
+            lambda_engine_clear_view_angles();
+        if (g_w_have_tangents)
+            lambda_engine_clear_projection_override();
+        lambda_engine_set_stereo_offset(0.0f);
+        er = lambda_gl_end_frame();
+        g_ft_cur[0] = t1 - t0;
+        g_ft_cur[1] = ft_now_ms() - t1;
+    }
+    atomic_store(&g_engine_loading, SCR_VRLoading() ? 1 : 0);
+    return (br != 0) ? br : er;
+}
+
 static void *gl_worker_main(void *arg) {
     (void)arg;
     pthread_setname_np("LambdaVision.gl-worker");
@@ -3623,72 +3685,25 @@ static void *gl_worker_main(void *arg) {
                                             g_w_init_argv,
                                             g_w_status, g_w_status_cap);
             break;
-        case WORK_TICK:
-            // Nobody waits on this frame and nobody displays it: the app
-            // shows its snapshot while the engine loads. No GPU fence —
-            // the app's queue never reads what this frame draws.
+        case WORK_TICK: {
+            // Nobody waits on these frames and nobody displays them: the app
+            // shows its snapshot while the engine loads. No GPU fence — the
+            // app's queue never reads what they draw. Back to back until the
+            // client is in: paced one per display frame, the handful of
+            // frames a reconnect takes added ~16 ms each on device.
             g_frame_fence_event = NULL;
-            // fallthrough
-        case WORK_FRAME: {
-            SCR_FinishLoadingPlaque();   // a load started by a frame no second eye followed
-            lambda_joy_apply();
-            lambda_view_yaw_apply();
-            lambda_aim_offset_apply();
-            g_frame_depth_mtl = g_w_depth;
-            int br = lambda_gl_begin_frame_into_mtl_texture(
-                g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
-            int er = 0;
-            if (br == 0) {
-                lambda_engine_set_stereo_offset(g_w_eye_offset);
-                if (g_w_have_tangents)
-                    lambda_engine_set_projection_tangents(g_w_tangents, g_w_znear, g_w_zfar);
-                if (g_w_have_view_angles) {
-                    lambda_engine_set_view_angles(g_w_view_angles[0],
-                                                  g_w_view_angles[1],
-                                                  g_w_view_angles[2]);
-                    lambda_engine_set_view_offset(g_w_view_offset[0],
-                                                  g_w_view_offset[1],
-                                                  g_w_view_offset[2]);
-                }
-                // AFTER the view override is installed for THIS frame: the
-                // hand-pose apply mirrors it into the cl_dll globals, and
-                // the tick below composes the hand weapon from the mirror.
-                // Mirroring before the set (the old order) handed the
-                // entity a cleared/stale camera — the gun swam against
-                // head motion instead of sticking to the hand.
-                lambda_hand_pose_apply();
-                lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
-                // Sync refState if the render size changed (scale setting +
-                // immersive reopen), then feed keyboard + synthetic menu
-                // cursor/clicks — all BEFORE the tick.
-                lambda_render_size_apply();
-                lambda_cmd_queue_apply();
-                lambda_key_queue_apply();
-                lambda_menu_input_apply();
-                double t0 = ft_now_ms();
-                lambda_engine_frame();
-                double t1 = ft_now_ms();
-                // The client (HUD_CreateEntities) just published the active
-                // weapon's studio header when vr_weapon_external is on; bake a
-                // fresh bind-pose mesh if the model changed. Cheap no-op
-                // otherwise. Same thread as the publish, so the pointer is
-                // sequenced; the snapshot swap is mutex-guarded for the reader.
-                lambda_weapon_extract();
-                // Publish menu visibility for the spatial-event router.
-                lambda_menu_state_publish();
-                if (g_w_have_view_angles)
-                    lambda_engine_clear_view_angles();
-                if (g_w_have_tangents)
-                    lambda_engine_clear_projection_override();
-                lambda_engine_set_stereo_offset(0.0f);
-                er = lambda_gl_end_frame();
-                g_ft_cur[0] = t1 - t0;
-                g_ft_cur[1] = ft_now_ms() - t1;
-            }
-            atomic_store(&g_engine_loading, SCR_VRLoading() ? 1 : 0);
-            g_w_result = (br != 0) ? br : er;
+            double start = ft_now_ms();
+            int frames = 0;
+            do {
+                g_w_result = worker_engine_frame();
+                if (!SCR_VRLoading()) break;
+                usleep(1000);   // let the clock move for the next frame
+            } while (++frames < 1000 && ft_now_ms() - start < 3000.0);
             break;
         }
+        case WORK_FRAME:
+            g_w_result = worker_engine_frame();
+            break;
         case WORK_FRAME_EYE2: {
             // Second eye: rebind FBO to the other slice and re-run only the
             // renderer (no sim tick). cl_stereo_eye_offset shifts the camera

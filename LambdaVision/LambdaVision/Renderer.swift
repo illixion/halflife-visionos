@@ -2014,6 +2014,7 @@ actor Renderer {
         // its last frame instead of waiting on it (LoadSnapshot). Its frames
         // run without anyone waiting; the live view returns once the client
         // is back in and the worker is idle.
+        loadSnapshot.flushDump(completedFrame: endFrameEvent.signaledValue)
         var engineHeld = false
         if case .holding(let since) = loadSnapshot.phase {
             if lambda_engine_loading() == 0 && lambda_gl_worker_busy() == 0 {
