@@ -144,8 +144,14 @@ final class GameSettings {
     }
     var fireAimMode: FireAimMode = AppSettingsStore.fireAimMode {
         didSet { AppSettingsStore.fireAimMode = fireAimMode
-                 Renderer.fireAlongGaze = (fireAimMode == .gaze) }
+                 Renderer.fireAlongGaze = (fireAimMode == .gaze)
+                 cvar("crosshair", stockCrosshair) }
     }
+    /// The engine's own crosshair marks the middle of the view, which is
+    /// where shots go only when they follow the gaze; with barrel aim it is
+    /// a mark stuck on the view that nothing lands on (the aim reticle does
+    /// that job, and stands down in gaze mode).
+    private var stockCrosshair: Int { fireAimMode == .gaze ? 1 : 0 }
     /// Immersive gesture input (pass 2). When on, curling the dominant hand's
     /// index finger fires (finger-gun) in place of gaze+pinch fire. Read
     /// live by the render thread via Renderer.gestureInputEnabled.
@@ -257,6 +263,7 @@ final class GameSettings {
         cvar("MP3Volume", musicVolume)
         cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0)
         cvar("vr_weapon_external", weaponExternal ? 1 : 0)
+        cvar("crosshair", stockCrosshair)
     }
 
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
