@@ -13,6 +13,7 @@
 //
 
 import GameController
+import QuartzCore
 
 @MainActor
 final class KeyboardInput {
@@ -22,6 +23,20 @@ final class KeyboardInput {
     // Shift state, tracked for character shifting. Touched from the (possibly
     // off-main) GameController handler; a plain bool with benign tearing.
     nonisolated(unsafe) private static var shiftDown = false
+
+    // Keyboard activity, read by the render thread to stand the hand
+    // gestures down: hands resting on the keys read as pinches, fists and
+    // pokes (a phantom +use, a crouch that drops WASD to a walk). Same
+    // benign-tearing scalars as shiftDown.
+    nonisolated(unsafe) private static var keysDown = Set<GCKeyCode>()
+    nonisolated(unsafe) private static var lastKeyTime: TimeInterval = -.infinity
+    /// How long after the last key event the keyboard still counts as in use.
+    nonisolated static let idleSeconds: TimeInterval = 4
+
+    /// A key is held, or one was pressed or released in the last few seconds.
+    nonisolated static func inUse(now: TimeInterval) -> Bool {
+        !keysDown.isEmpty || now - lastKeyTime < idleSeconds
+    }
 
     func start() {
         if let kb = GCKeyboard.coalesced { attach(kb) }
@@ -36,6 +51,9 @@ final class KeyboardInput {
     private func attach(_ kb: GCKeyboard) {
         guard let input = kb.keyboardInput else { return }
         input.keyChangedHandler = { _, _, code, pressed in
+            if pressed { KeyboardInput.keysDown.insert(code) } else { KeyboardInput.keysDown.remove(code) }
+            KeyboardInput.lastKeyTime = CACurrentMediaTime()
+
             // Snap turn (Z/X): an exact yaw step, not an HL bind.
             if pressed, code == .keyZ { Renderer.requestSnapTurn(-1); return }
             if pressed, code == .keyX { Renderer.requestSnapTurn(1); return }

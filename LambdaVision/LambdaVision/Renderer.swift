@@ -329,6 +329,7 @@ actor Renderer {
         var yaw: Float = 0
         var nTracked = 0, nNotTracked = 0, nNoSkeleton = 0, nNoAnchor = 0, nProviderDown = 0
         var gestureOn = false     // "Immersive gesture input" setting, render-thread view
+        var keyboardInUse = false // gestures stood down for the keyboard
         var indexExt: Float = 0   // live index extension ratio (finger-gun trigger)
         var fireGesture = false   // finger-gun trigger currently held
         var thumbExt: Float = 0   // live thumb extension ratio (reload gesture)
@@ -372,7 +373,7 @@ actor Renderer {
             "gate hits — tracked:\(d.nTracked) notTracked:\(d.nNotTracked) "
               + "noSkel:\(d.nNoSkeleton) noAnchor:\(d.nNoAnchor) provDown:\(d.nProviderDown)",
             String(format: "finger-gun: %@  indexExt %.2f  trigger %@",
-                   d.gestureOn ? "on" : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
+                   d.gestureOn ? (d.keyboardInUse ? "paused (keyboard)" : "on") : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
             String(format: "reload: thumbExt %.2f  hold %d%%",
                    d.thumbExt, Int(d.reloadProg * 100)),
             String(format: "wpn menu: spread %.3f  %@  sel %@",
@@ -1804,12 +1805,17 @@ actor Renderer {
             // must stand down (a fist is an index curl and a thumb curl at
             // once). Pointing it leaves the swing to the off arm and frees
             // it. HandMovement.poll drives the movement itself, later.
+            // Gestures stand down while the keyboard is in use: hands on
+            // the keys pinch, curl and poke without meaning to.
+            let keyboardInUse = KeyboardInput.inUse(now: CACurrentMediaTime())
+            let gesturesLive = Renderer.gestureInputEnabled && lambda_menu_active() == 0 && !keyboardInUse
+            Renderer.aimDiag.keyboardInUse = keyboardInUse
             var gunHandBusy = false
             if let da = frameDeviceAnchor {
                 let hm = da.originFromAnchorTransform
                 let anchors = handTracking.latestAnchors
                 HandMovement.shared.updateArmSwing(
-                    active: Renderer.gestureInputEnabled && lambda_menu_active() == 0,
+                    active: gesturesLive,
                     left: anchors.leftHand,
                     right: anchors.rightHand,
                     headForward: SIMD3(-hm.columns.2.x, -hm.columns.2.y, -hm.columns.2.z),
@@ -1827,7 +1833,7 @@ actor Renderer {
             }
 
             let hadWeaponMenu = weaponMenuAnchor != nil
-            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+            if gesturesLive,
                !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.menuSpread = hand.pinchAllSpread
                 if !hadWeaponMenu {
@@ -1874,7 +1880,7 @@ actor Renderer {
             // leave fire stuck on. Edge-only console commands, so this costs a
             // worker round-trip only on a press/release, not every frame.
             var wantFire = fireGestureDown
-            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+            if gesturesLive,
                !weaponMenuOpen, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.indexExt = hand.indexExtension
                 if hand.indexExtension < Renderer.fireCurlOn { wantFire = true }
@@ -1898,7 +1904,7 @@ actor Renderer {
             // cancels the hold outright. Latched until the thumb re-extends
             // so one hold = one reload.
             var thumbHold = reloadStart != nil
-            if Renderer.gestureInputEnabled, lambda_menu_active() == 0,
+            if gesturesLive,
                !weaponMenuOpen, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.thumbExt = hand.thumbExtension
                 if hand.indexExtension < Renderer.fireCurlOn {
@@ -1953,7 +1959,7 @@ actor Renderer {
                 Renderer.aimDiag.onTrain = onTrain
                 Renderer.aimDiag.trainGear = trainGear
                 let useRay = HandMovement.shared.poll(
-                    active: Renderer.gestureInputEnabled && lambda_menu_active() == 0,
+                    active: gesturesLive,
                     movementHand: moveHand,
                     headForward: headFwd,
                     headRight: headRight,
