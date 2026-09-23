@@ -293,6 +293,57 @@ enum ViewmodelGrip {
         i < palette.count ? palette[i] : matrix_identity_float4x4
     }
 
+    // MARK: - World models
+
+    /// A weapon's third-person (p_) model, laid out so it is placed exactly
+    /// like a viewmodel: `palette` poses it into its own right hand's frame,
+    /// turned so an aimed gun's barrel is +X, and `grip` is that hand.
+    struct WorldLayout {
+        var palette: [float4x4]
+        var grip: Grip
+        var hold: Hold
+        var muzzle: SIMD3<Float>?
+    }
+
+    /// Lays out a p_ model from its rest pose and its posed vertices (model
+    /// space, GoldSrc units), or nil when it has no right hand to be held by
+    /// (the egon hangs off the forearm, its backpack off the spine).
+    ///
+    /// p_ models are rigged to the player's skeleton, gun skinned under
+    /// `Bip01 R Hand`, and nothing in them marks the barrel. The gun's long
+    /// axis does: every stock and HD long gun lies within 3–10° of the hand's
+    /// fingers in its third-person grip, and the pistols within 25° (the
+    /// grip's rake). A gun is turned about the hand onto that axis, so it
+    /// points where the fingers do, as a viewmodel's barrel is laid; a held
+    /// object — crowbar, grenade, satchel, tripmine, snarks, all 65–90° off —
+    /// keeps the third-person grip as authored.
+    static func worldLayout(boneNames: [String], restPose: [float4x4],
+                            points: [SIMD3<Float>]) -> WorldLayout? {
+        guard let hand = boneNames.firstIndex(where: { $0.hasSuffix(" R Hand") }),
+              hand < restPose.count, points.count >= 3 else { return nil }
+        let toHand = restPose[hand].inverse
+        let local = points.map { xyz(toHand * SIMD4($0, 1)) }
+        let mean = local.reduce(.zero, +) / Float(local.count)
+        var cov = simd_float3x3()
+        for p in local { let d = p - mean; cov += simd_float3x3(columns: (d * d.x, d * d.y, d * d.z)) }
+        var axis = SIMD3<Float>(1, 0, 0)
+        for _ in 0..<64 {
+            let next = cov * axis
+            guard simd_length(next) > 1e-9 else { break }
+            axis = simd_normalize(next)
+        }
+        if axis.x < 0 { axis = -axis }
+        let aimed = acosf(min(1, axis.x)) * 180 / .pi <= aimedHoldLimitDeg
+        let turn = aimed ? float4x4(simd_quatf(from: axis, to: SIMD3(1, 0, 0))) : matrix_identity_float4x4
+        let palette = restPose.map { turn * toHand * $0 }
+        let aligned = local.map { xyz(turn * SIMD4($0, 1)) }
+        return WorldLayout(palette: palette,
+                           grip: Grip(bone: hand, fixup: matrix_identity_float4x4, isLeft: false,
+                                      fingerPrefix: nil),
+                           hold: aimed ? .aimed : .held,
+                           muzzle: aimed ? muzzle(attachment: nil, idlePalette: palette, gunPoints: aligned) : nil)
+    }
+
     // MARK: - The grip's fingers
 
     /// Each finger bone of the gripping hand, as a rotation relative to the

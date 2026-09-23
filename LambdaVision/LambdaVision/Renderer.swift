@@ -293,6 +293,9 @@ actor Renderer {
     nonisolated(unsafe) static var hevHUDEnabled = true
     /// The holographic aim point (Settings > Input > Aim reticle).
     nonisolated(unsafe) static var aimReticle: HEVHUD.Reticle = .dot
+    /// Hold the weapon's world (p_) model instead of its viewmodel
+    /// (Settings > Input > Weapon model).
+    nonisolated(unsafe) static var weaponWorldModel = false
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -583,9 +586,9 @@ actor Renderer {
     /// Taken from the idle pose, like the barrel, so recoil does not move
     /// where the next shot starts.
     private func muzzlePoint(_ hand: HandSample) -> SIMD3<Float>? {
-        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.grip,
-              pass.hold == .aimed, let muzzle = pass.muzzle, !pass.idlePalette.isEmpty else { return nil }
-        let local = ViewmodelGrip.muzzleInHand(muzzle, grip: grip, idlePalette: pass.idlePalette,
+        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.heldGrip,
+              pass.heldHold == .aimed, let muzzle = pass.heldMuzzle, !pass.heldIdlePalette.isEmpty else { return nil }
+        let local = ViewmodelGrip.muzzleInHand(muzzle, grip: grip, idlePalette: pass.heldIdlePalette,
                                                handIsLeft: Renderer.dominantHandIsLeft)
         let p = trackedHandFrame(hand) * SIMD4<Float>(local, 1)
         return SIMD3(p.x, p.y, p.z)
@@ -606,9 +609,9 @@ actor Renderer {
     /// Where the drawn gun's barrel points, in the Apple world, for this
     /// tracked hand — nil with no external weapon or no grip to read it from.
     private func barrelDirection(_ hand: HandSample) -> SIMD3<Float>? {
-        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.grip,
-              !pass.idlePalette.isEmpty else { return nil }
-        let local = ViewmodelGrip.barrel(grip: grip, hold: pass.hold, idlePalette: pass.idlePalette,
+        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.heldGrip,
+              !pass.heldIdlePalette.isEmpty else { return nil }
+        let local = ViewmodelGrip.barrel(grip: grip, hold: pass.heldHold, idlePalette: pass.heldIdlePalette,
                                          handIsLeft: Renderer.dominantHandIsLeft)
         let r = AvatarRig.handRotation(forward: studioDirection(hand.worldForward),
                                        back: studioDirection(hand.worldUp))
@@ -2094,6 +2097,7 @@ actor Renderer {
             weaponPass = WeaponPass(device: device, layerRenderer: layerRenderer,
                                     maxBuffersInFlight: maxBuffersInFlight)
         }
+        weaponPass.preferWorldModel = Renderer.weaponWorldModel
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
@@ -2376,8 +2380,9 @@ actor Renderer {
                 handWorld.columns.2 = SIMD4<Float>(fwd, 0)
                 handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
 
-                if let grip = weaponPass.grip {
-                    // Hold the viewmodel in a Bip01 hand frame — the avatar's
+                if let grip = weaponPass.heldGrip {
+                    // Hold the viewmodel (or the world model, laid out the
+                    // same way — see ViewmodelGrip.worldLayout) in a Bip01 hand frame — the avatar's
                     // posed hand when the body is drawn (so the gun stays in
                     // the visible hand even where the arm cannot quite reach
                     // the tracked one), else the tracked hand itself. A gun
@@ -2389,9 +2394,9 @@ actor Renderer {
                     let bodyHand = left ? body?.leftHand : body?.rightHand
                     let handFrame = bodyHand ?? trackedHandFrame(hand)
                     model = studioToWorld * ViewmodelGrip.modelMatrix(hand: handFrame, grip: grip,
-                                                                      hold: weaponPass.hold,
-                                                                      palette: weaponPass.palette,
-                                                                      idlePalette: weaponPass.idlePalette,
+                                                                      hold: weaponPass.heldHold,
+                                                                      palette: weaponPass.heldPalette,
+                                                                      idlePalette: weaponPass.heldIdlePalette,
                                                                       handIsLeft: left)
                 } else {
                     // No hand to hold it by (the hivehand): the old tuned
@@ -2408,12 +2413,22 @@ actor Renderer {
                 // angle: the reload-hold ring floats above the weapon; the
                 // radial weapon menu draws five sector wedges around the
                 // point where the 🤌 engaged, the armed one highlighted.
+                // A world model has no reload animation, so while one is
+                // held the same ring then follows the reload itself (the
+                // viewmodel's reload sequence, still played underneath), in
+                // HEV white so it reads apart from the gesture's amber.
                 if reloadRingProgress > 0 {
                     arcs.append(WeaponPass.Arc(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
                                                right: headRight, up: headUp,
                                                innerR: 0.022, outerR: 0.030,
                                                color: SIMD4(1.0, 0.78, 0.25, 1),  // HL amber
                                                startTurns: 0, sweepTurns: reloadRingProgress))
+                } else if weaponPass.showsWorldModel, let reload = weaponPass.reloadProgress, reload > 0 {
+                    arcs.append(WeaponPass.Arc(center: hand.worldGrip + SIMD3<Float>(0, 0.13, 0),
+                                               right: headRight, up: headUp,
+                                               innerR: 0.022, outerR: 0.030,
+                                               color: SIMD4(0.85, 0.92, 1.0, 1),
+                                               startTurns: 0, sweepTurns: reload))
                 }
                 if let mAnchor = weaponMenuAnchor {
                     let gap: Float = 0.012   // turns of separation between sectors

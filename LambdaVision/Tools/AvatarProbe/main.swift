@@ -652,10 +652,9 @@ do {
         runViewmodelChecks(rig: rig, gordon: gordon, modelsDir: hd, dumpDir: dump.map { $0 + "/hd" })
     }
     if let dump { print("wrote grip_*.tri to \(dump) (render with render_tri.py)") }
-    let shellDump = CommandLine.arguments.contains("--shells") ? FileManager.default.currentDirectoryPath : nil
-    runShellChecks(modelsDir: models, dumpDir: shellDump)
+    runWorldModelChecks(rig: rig, gordon: gordon, modelsDir: models, dumpDir: dump)
     if FileManager.default.fileExists(atPath: hd) {
-        runShellChecks(modelsDir: hd, dumpDir: shellDump.map { $0 + "/hd" })
+        runWorldModelChecks(rig: rig, gordon: gordon, modelsDir: hd, dumpDir: dump.map { $0 + "/hd" })
     }
 }
 

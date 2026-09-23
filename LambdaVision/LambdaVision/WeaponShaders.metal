@@ -71,7 +71,6 @@ vertex WeaponInOut weaponVertexShader(WeaponVertex in [[stage_in]],
 }
 
 fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
-                                     bool frontFacing [[front_facing]],
                                      constant WeaponUniforms & u [[ buffer(BufferIndexUniforms) ]],
                                      texture2d<float> tex [[ texture(TextureIndexColor) ]])
 {
@@ -93,12 +92,6 @@ fragment float4 weaponFragmentShader(WeaponInOut in [[stage_in]],
     // the near plane or a collar a centimetre from the lens.
     if (u.renderFlags.z > 0.0 && distance(in.worldPos, u.eyePos[in.eye].xyz) < u.renderFlags.z)
         discard_fragment();
-
-    // Interior (renderFlags.w, the sign of the outside winding): a gun face
-    // seen from behind is the inside of a one-sided model or of a cut, and
-    // is shaded as unlit metal in shadow so it reads as solid, not as a hole.
-    if (u.renderFlags.w != 0.0 && frontFacing != (u.renderFlags.w > 0.0))
-        return float4(c.rgb * u.ambient.rgb * 0.3, 1.0);
 
     float3 n = normalize(in.normal);
     float ndl = max(dot(n, normalize(u.lightDir.xyz)), 0.0);

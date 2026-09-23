@@ -54,6 +54,15 @@ enum AimReticle: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which model of the weapon is held: the first-person viewmodel, animated
+/// but modelled only for the side the old camera saw, or the third-person
+/// world model, whole but rigid (reloads then show as the ring alone).
+enum WeaponModelStyle: String, CaseIterable, Identifiable {
+    case viewmodel, world
+    var id: String { rawValue }
+    var label: String { self == .viewmodel ? "Viewmodel" : "World model" }
+}
+
 /// Which way arm-swing walking goes (RAVEArmSwingDirection, as a setting).
 enum ArmSwingDirection: String, CaseIterable, Identifiable {
     case head, hands
@@ -199,6 +208,12 @@ final class GameSettings {
                  Renderer.aimReticle = aimReticle.style }
     }
 
+    /// Hold the weapon's viewmodel or its world model (WeaponPass).
+    var weaponModel: WeaponModelStyle = AppSettingsStore.weaponModel {
+        didSet { AppSettingsStore.weaponModel = weaponModel
+                 Renderer.weaponWorldModel = (weaponModel == .world) }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -220,6 +235,7 @@ final class GameSettings {
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style
+        Renderer.weaponWorldModel = (weaponModel == .world)
         applyHEVHUD()
     }
 

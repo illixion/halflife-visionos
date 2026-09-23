@@ -29,7 +29,7 @@ index 7cfc3d7..995c9fe 100644
  	wrect_t rc;
  
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..2654ad4 100644
+index 3670546..a94a21e 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
 @@ -17,12 +17,39 @@
@@ -73,7 +73,7 @@ index 3670546..2654ad4 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +524,330 @@ void Beams( void )
+@@ -497,15 +524,331 @@ void Beams( void )
  }
  #endif
  
@@ -229,9 +229,10 @@ index 3670546..2654ad4 100644
 +		}
 +		// And the same weapon's third-person p_ model: seen from every side,
 +		// so it is whole where the viewmodel was never modelled (the side
-+		// facing away from the old camera, the M4's stock). The platform fits
-+		// it onto the viewmodel's gun and fills the viewmodel's holes from it
-+		// (ViewmodelShell). Nothing draws a local player's p_ model in first
++		// facing away from the old camera, the M4's stock), though one rigid
++		// mesh with no animation. The platform draws it in the hand instead
++		// of the viewmodel when the player picks world models. Nothing draws
++		// a local player's p_ model in first
 +		// person, so ask for its data rather than trusting it is cached.
 +		cl_entity_t *player = gEngfuncs.GetLocalPlayer();
 +		model_t *pm = ( player && player->curstate.weaponmodel )
@@ -721,7 +722,7 @@ index 9aecaf7..43f18c8 100644
  	m_flTime = flTime;
  	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..d468299 100644
+index 3b3187d..2639dde 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
 @@ -82,7 +82,82 @@ extern Vector   dead_viewangles;
@@ -782,8 +783,8 @@ index 3b3187d..d468299 100644
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_framerate = 1.0f;
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_time = 0.0f;
 +// The same weapon's third-person (p_) model header, published alongside:
-+// whole where the viewmodel is open, and the platform's source for filling it
-+// (ViewmodelShell). NULL when there is none.
++// whole where the viewmodel is open, and what the platform draws in the hand
++// when the player picks world models. NULL when there is none.
 +extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_world_hdr = 0;
 +// World light sampled at the view origin (R_LightPoint via the triangle API),
 +// normalised 0..1, published each frame for the external weapon renderer to

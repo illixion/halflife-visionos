@@ -20,8 +20,6 @@ struct ProbeModel {
     var attachments: [(bone: Int, org: SIMD3<Float>)]
     /// (texture, three vertices as (bone-local position, bone))
     var triangles: [(texture: Int, v: [(SIMD3<Float>, Int)])]
-    /// Bone-local vertex normals, per triangle, parallel to `triangles`.
-    var normals: [[SIMD3<Float>]]
 
     static func fromBodySlot() -> ProbeModel {
         var mesh = lambda_weapon_mesh_t()
@@ -45,7 +43,6 @@ struct ProbeModel {
             return withUnsafeBytes(of: &e.name) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
         }
         var tris: [(texture: Int, v: [(SIMD3<Float>, Int)])] = []
-        var norms: [[SIMD3<Float>]] = []
         for s in 0..<Int(mesh.submesh_count) {
             let sm = mesh.submeshes![s]
             var i = 0
@@ -55,10 +52,6 @@ struct ProbeModel {
                     return (SIMD3(v.pos.0, v.pos.1, v.pos.2), Int(v.bone))
                 }
                 tris.append((Int(sm.texture), vs))
-                norms.append((0..<3).map { k in
-                    let v = mesh.vertices![Int(mesh.indices![Int(sm.index_offset) + i + k])]
-                    return SIMD3(v.normal.0, v.normal.1, v.normal.2)
-                })
                 i += 3
             }
         }
@@ -68,7 +61,7 @@ struct ProbeModel {
         }
         return ProbeModel(boneNames: names, parents: parents, textureNames: textures,
                           restPose: rest, handBone: Int(mesh.hand_bone_index), attachments: attachments,
-                          triangles: tris, normals: norms)
+                          triangles: tris)
     }
 }
 

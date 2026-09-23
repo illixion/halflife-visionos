@@ -84,6 +84,16 @@ typedef struct {
     float   org[3];
 } lambda_weapon_attachment_t;
 
+// A sequence's label and length, so the platform can tell what is playing —
+// the reload ring follows a reload sequence's frame when the weapon is drawn
+// as its world model, which has no animation of its own.
+#define LAMBDA_WEAPON_MAX_SEQUENCES 32
+typedef struct {
+    char    label[32];
+    int32_t numframes;
+    float   fps;
+} lambda_weapon_sequence_t;
+
 // Immutable view of one baked model. All pointers are owned by the module and
 // remain valid only while the lock is held.
 typedef struct {
@@ -113,6 +123,8 @@ typedef struct {
 
     uint32_t attachment_count;
     lambda_weapon_attachment_t attachments[LAMBDA_WEAPON_MAX_ATTACHMENTS];
+    uint32_t sequence_count;
+    lambda_weapon_sequence_t sequences[LAMBDA_WEAPON_MAX_SEQUENCES];
 
     // Model-space bounding box of the geometry in the bind pose (sanity/log).
     float bbmin[3];
@@ -172,10 +184,13 @@ uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out);
 
 // The same weapon's third-person (p_) model, baked from the header the client
 // publishes beside the viewmodel's (g_vr_weapon_world_hdr). Whole where the
-// viewmodel was never modelled, it is what the platform fills the
-// viewmodel's holes from (ViewmodelShell). Same lock rules as the weapon
-// slot; the pose is its rest pose. Generation 0 = nothing baked.
+// viewmodel was never modelled, but one rigid mesh: the platform draws it in
+// the hand instead of the viewmodel when the player picks world models. Same
+// lock rules as the weapon slot; the pose is its rest pose. Generation 0 =
+// nothing baked; lambda_weapon_world_active says whether the current weapon
+// published one this frame (the bake itself outlives a weapon that has none).
 uint32_t lambda_weapon_world_generation(void);
+int      lambda_weapon_world_active(void);
 uint32_t lambda_weapon_world_lock(lambda_weapon_mesh_t *out);
 void     lambda_weapon_world_unlock(void);
 uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out);

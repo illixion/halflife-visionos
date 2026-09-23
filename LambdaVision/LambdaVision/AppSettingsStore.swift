@@ -94,6 +94,7 @@ enum AppSettingsStore {
     private static let avatarLegsKey          = "lambdavision.settings.avatarLegs"
     private static let hevHUDKey              = "lambdavision.settings.hevHUD"
     private static let aimReticleKey          = "lambdavision.settings.aimReticle"
+    private static let weaponModelKey         = "lambdavision.settings.weaponModel"
 
     static var dominantHand: DominantHand {
         get {
@@ -110,6 +111,14 @@ enum AppSettingsStore {
             return v
         }
         set { defaults.set(newValue.rawValue, forKey: aimReticleKey) }
+    }
+    static var weaponModel: WeaponModelStyle {
+        get {
+            guard let raw = defaults.string(forKey: weaponModelKey),
+                  let v = WeaponModelStyle(rawValue: raw) else { return .viewmodel }
+            return v
+        }
+        set { defaults.set(newValue.rawValue, forKey: weaponModelKey) }
     }
     static var fireAimMode: FireAimMode {
         get {

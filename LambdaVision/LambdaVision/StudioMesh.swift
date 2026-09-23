@@ -17,7 +17,7 @@
 import Metal
 import simd
 
-nonisolated final class StudioMesh: @unchecked Sendable {
+final class StudioMesh {
     /// A run of triangles sharing one texture. `flags` are the studio
     /// STUDIO_NF_* bits of that texture, which the shader reads per draw.
     struct Submesh {
@@ -144,62 +144,6 @@ nonisolated final class StudioMesh: @unchecked Sendable {
         self.generation = generation
     }
 
-    /// An RGBA8 texture copied out of a snapshot, for building a mesh after
-    /// the snapshot's lock is released.
-    struct TextureCopy: Sendable {
-        var width: Int
-        var height: Int
-        var flags: UInt32
-        var rgba: [UInt8]
-    }
-
-    /// A mesh assembled outside the extractor (ViewmodelShell's hull):
-    /// already-flat vertices, their submeshes and their textures. No bone
-    /// table of its own — it is skinned by another model's palette.
-    init?(device: MTLDevice, vertices flat: [lambda_weapon_vertex_t], submeshes subs: [Submesh],
-          textures copies: [TextureCopy], generation: UInt32, label: String) {
-        guard !flat.isEmpty,
-              let vbuf = device.makeBuffer(bytes: flat,
-                                           length: flat.count * MemoryLayout<lambda_weapon_vertex_t>.stride,
-                                           options: .storageModeShared) else { return nil }
-        vbuf.label = "\(label)Vertices"
-        var texs: [MTLTexture] = []
-        for (t, c) in copies.enumerated() {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
-                                                              width: c.width, height: c.height, mipmapped: false)
-            td.usage = .shaderRead
-            guard c.rgba.count >= c.width * c.height * 4, let tex = device.makeTexture(descriptor: td) else { return nil }
-            tex.label = "\(label)Texture\(t)"
-            c.rgba.withUnsafeBytes {
-                tex.replace(region: MTLRegionMake2D(0, 0, c.width, c.height), mipmapLevel: 0,
-                            withBytes: $0.baseAddress!, bytesPerRow: c.width * 4)
-            }
-            texs.append(tex)
-        }
-        self.vertexBuffer = vbuf
-        self.vertexCount = flat.count
-        self.submeshes = subs
-        self.textures = texs
-        self.textureNames = []
-        self.boneNames = []
-        self.boneParents = []
-        self.handBoneIndex = -1
-        self.bbmin = .zero
-        self.bbmax = .zero
-        self.generation = generation
-    }
-
-    /// Copies of a locked snapshot's textures.
-    static func textureCopies(of mesh: lambda_weapon_mesh_t) -> [TextureCopy] {
-        guard let texPtr = mesh.textures else { return [] }
-        return (0..<Int(mesh.texture_count)).map { t in
-            let tx = texPtr[t]
-            let n = Int(tx.width) * Int(tx.height) * 4
-            let rgba = tx.rgba.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
-            return TextureCopy(width: Int(tx.width), height: Int(tx.height), flags: tx.flags, rgba: rgba)
-        }
-    }
-
     /// The texture and bone names of a locked snapshot — what a cut is
     /// decided from, before anything is uploaded.
     static func textureNames(of mesh: lambda_weapon_mesh_t) -> [String] {
@@ -257,6 +201,21 @@ nonisolated final class StudioMesh: @unchecked Sendable {
             let a = raw.bindMemory(to: lambda_weapon_attachment_t.self)
             return (0..<min(Int(mesh.attachment_count), a.count)).map {
                 (Int(a[$0].bone), SIMD3(a[$0].org.0, a[$0].org.1, a[$0].org.2))
+            }
+        }
+    }
+
+    /// The mesh's sequences as (label, frame count), in sequence order.
+    static func sequences(of mesh: lambda_weapon_mesh_t) -> [(label: String, frames: Int)] {
+        var copy = mesh.sequences
+        return withUnsafeBytes(of: &copy) { raw in
+            let q = raw.bindMemory(to: lambda_weapon_sequence_t.self)
+            return (0..<min(Int(mesh.sequence_count), q.count)).map { i in
+                var e = q[i]
+                let label = withUnsafePointer(to: &e.label) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: 32) { String(cString: $0) }
+                }
+                return (label, Int(e.numframes))
             }
         }
     }

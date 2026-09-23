@@ -246,6 +246,8 @@ typedef struct {
     int   hand_bone_index;
     uint32_t acount;
     lambda_weapon_attachment_t attachments[LAMBDA_WEAPON_MAX_ATTACHMENTS];
+    uint32_t qcount;
+    lambda_weapon_sequence_t sequences[LAMBDA_WEAPON_MAX_SEQUENCES];
     float bbmin[3], bbmax[3];
     int   modelindex;
     uint32_t generation;
@@ -360,6 +362,7 @@ static void snapshot_reset(snapshot_t *s) {
     s->texbytes = 0;
     s->hand_bone_index = -1;
     s->acount = 0;
+    s->qcount = 0;
     s->bbmin[0] = s->bbmin[1] = s->bbmin[2] =  1e30f;
     s->bbmax[0] = s->bbmax[1] = s->bbmax[2] = -1e30f;
 }
@@ -806,6 +809,15 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
         memcpy(a->org, pa[i].org, sizeof(a->org));
     }
 
+    const mstudioseqdesc_t *psd = (const mstudioseqdesc_t *)(base + hdr->seqindex);
+    for (int i = 0; i < hdr->numseq && s->qcount < LAMBDA_WEAPON_MAX_SEQUENCES; i++) {
+        lambda_weapon_sequence_t *q = &s->sequences[s->qcount++];
+        memcpy(q->label, psd[i].label, sizeof(q->label));
+        q->label[sizeof(q->label) - 1] = '\0';
+        q->numframes = psd[i].numframes;
+        q->fps = psd[i].fps;
+    }
+
     const int16_t *pskinref = (const int16_t *)(base + hdr->skinindex);
     const mstudiotexture_t *ptex = (const mstudiotexture_t *)(base + hdr->textureindex);
     const mstudiobodyparts_t *bp = (const mstudiobodyparts_t *)(base + hdr->bodypartindex);
@@ -881,9 +893,12 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
 }
 
 // Bakes the published p_ model when it changes. Cheap otherwise.
+static int g_world_active;
+
 static void extract_world_model(void) {
     model_slot_t *slot = &g_world;
     void *hdrp = g_vr_weapon_world_hdr;
+    g_world_active = (hdrp != NULL);
     if (!hdrp) return;
     const studiohdr_t *hdr = (const studiohdr_t *)hdrp;
     // The pointer alone is not an identity: a map change frees the model
@@ -970,6 +985,8 @@ static uint32_t slot_lock(model_slot_t *slot, lambda_weapon_mesh_t *out) {
     out->hand_bone_index = s->hand_bone_index;
     out->attachment_count = s->acount;
     memcpy(out->attachments, s->attachments, sizeof(out->attachments));
+    out->sequence_count = s->qcount;
+    memcpy(out->sequences, s->sequences, sizeof(out->sequences));
     memcpy(out->bbmin, s->bbmin, sizeof(out->bbmin));
     memcpy(out->bbmax, s->bbmax, sizeof(out->bbmax));
     out->modelindex = s->modelindex;
@@ -1012,6 +1029,7 @@ uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out) {
 }
 
 uint32_t lambda_weapon_world_generation(void) { return g_world.last_valid ? g_world.generation : 0; }
+int      lambda_weapon_world_active(void) { return g_world_active && g_world.last_valid; }
 uint32_t lambda_weapon_world_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_world, out); }
 void     lambda_weapon_world_unlock(void) { pthread_mutex_unlock(&g_world.mtx); }
 uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out) { return slot_copy_pose(&g_world, out); }

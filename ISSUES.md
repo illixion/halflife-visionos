@@ -248,10 +248,14 @@ instead of deleting them.
   opaque red texture. A true second narrow-FOV engine view would cost a third
   world render per frame.
 - **Viewmodels are open on the far side.** Valve built v_ models for a fixed
-  camera, so the faces away from it (the gun's right side) were never
-  modelled; in the hand they show as holes. Candidates: fill from the
-  matching p_ model, mirror the near side, or a GoldSrc model pack authored
-  for all-round viewing.
+  camera, so the faces away from it (the gun's right side, the M4's stock)
+  were never modelled. Mitigated, not solved: Settings > Weapon model > World
+  model holds the whole p_ model instead (rigid, so a reload shows only as the
+  ring; the egon has no hand-held p_ model and keeps its viewmodel). Tried and
+  dropped: fitting the p_ model onto the viewmodel as a hull (ICP + per-
+  triangle cuts) — the two are different shapes on several guns and the 357
+  landed badly off. Real fix is custom all-round weapon models; WeaponPass
+  already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
 
