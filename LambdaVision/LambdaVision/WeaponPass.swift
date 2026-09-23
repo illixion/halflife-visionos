@@ -28,6 +28,8 @@
 
 import Metal
 import CompositorServices
+import QuartzCore
+import os
 import simd
 
 final class WeaponPass {
@@ -99,6 +101,19 @@ final class WeaponPass {
     private var world: ViewmodelGrip.WorldLayout?
     private var uploadedWorldGeneration: UInt32 = 0
 
+    // Valve's toe-in on the viewmodel, taken out by turning it about the
+    // hand's up axis (ViewmodelAlignment): fitted off the render thread
+    // against the world model — tens to a couple of hundred ms — and cached
+    // per model pair, so switching back to a weapon is instant. 0 until the
+    // fit lands, and for a weapon with no world model to fit against.
+    private(set) var yawCorrection: Float = 0
+    private var gunCorners: [SIMD3<Float>] = []     // viewmodel gun, idle, grip at origin
+    private var worldCorners: [SIMD3<Float>] = []   // world model in its layout
+    private var alignKey: String?
+    private var alignCache: [String: Float] = [:]
+    private let alignResult = OSAllocatedUnfairLock<(key: String, yaw: Float)?>(initialState: nil)
+    private static let alignQueue = DispatchQueue(label: "WeaponAlignment", qos: .utility)
+
     /// Draw the world model when the weapon has one. Set by the caller.
     var preferWorldModel = false
     /// Whether the world model is what is drawn and held this frame.
@@ -131,6 +146,7 @@ final class WeaponPass {
     var heldPalette: [float4x4] { showsWorldModel ? world?.palette ?? [] : palette }
     var heldIdlePalette: [float4x4] { showsWorldModel ? world?.palette ?? [] : idlePalette }
     var heldMuzzle: SIMD3<Float>? { showsWorldModel ? world?.muzzle : muzzle }
+    var heldYawCorrection: Float { showsWorldModel ? 0 : yawCorrection }
 
     /// How far through a reload the viewmodel is, 0…1, or nil when it is not
     /// playing one. The world model cannot show a reload, so the ring does.
@@ -267,6 +283,7 @@ final class WeaponPass {
     func update() {
         uploadIfNeeded()
         uploadWorldIfNeeded()
+        updateAlignment()
         refreshPose()
     }
 
@@ -317,9 +334,15 @@ final class WeaponPass {
                                        pose: idle, extractorChoice: uploaded.handBoneIndex,
                                        geometry: geometry)
         self.hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: idle) } ?? .held
+        let gunPoints = StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) }
         self.muzzle = ViewmodelGrip.muzzle(
-            attachment: StudioMesh.attachments(of: raw).first, idlePalette: idle,
-            gunPoints: StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) })
+            attachment: StudioMesh.attachments(of: raw).first, idlePalette: idle, gunPoints: gunPoints)
+        if let grip, hold == .aimed, grip.bone < idle.count {
+            let g = SIMD3(idle[grip.bone].columns.3.x, idle[grip.bone].columns.3.y, idle[grip.bone].columns.3.z)
+            self.gunCorners = gunPoints.map { $0 - g }
+        } else {
+            self.gunCorners = []
+        }
         self.reloadSequences = [:]
         for (i, q) in StudioMesh.sequences(of: raw).enumerated() where q.label.lowercased().contains("reload") {
             reloadSequences[i] = q.frames
@@ -342,12 +365,47 @@ final class WeaponPass {
         var rest = lambda_weapon_pose_t()
         guard locked == gen, lambda_weapon_world_copy_pose(&rest) == gen else { return }
         let restPose = StudioMesh.palette(from: &rest)
+        let points = StudioMesh.posedPoints(of: raw, palette: restPose) { _, _, _, _ in true }
         let layout = ViewmodelGrip.worldLayout(
-            boneNames: StudioMesh.boneNames(of: raw), restPose: restPose,
-            points: StudioMesh.posedPoints(of: raw, palette: restPose) { _, _, _, _ in true })
+            boneNames: StudioMesh.boneNames(of: raw), restPose: restPose, points: points)
+        worldCorners = layout.map { l in
+            l.hold == .aimed ? StudioMesh.posedPoints(of: raw, palette: l.palette) { _, _, _, _ in true } : []
+        } ?? []
         worldMesh = layout == nil ? nil : StudioMesh(device: device, mesh: raw, generation: gen, label: "WeaponWorld")
         world = layout
         AppLog.render.line("[WeaponPass] world model gen=\(gen) verts=\(worldMesh?.vertexCount ?? 0) hold=\(layout.map { "\($0.hold)" } ?? "none (no right hand)") muzzle=\(layout?.muzzle.map { "\($0)" } ?? "none")")
+    }
+
+    /// Start a toe-in fit when the viewmodel or its world model changes, and
+    /// pick up a finished one.
+    private func updateAlignment() {
+        if let done = alignResult.withLock({ r -> (key: String, yaw: Float)? in defer { r = nil }; return r }) {
+            alignCache[done.key] = done.yaw
+            if done.key == alignKey { yawCorrection = done.yaw }
+        }
+        guard !gunCorners.isEmpty, !worldCorners.isEmpty, lambda_weapon_world_active() != 0,
+              let mesh, let worldMesh else {
+            alignKey = nil
+            yawCorrection = 0
+            return
+        }
+        // Keyed by content, not generation: a weapon switched back to is
+        // re-baked under a new generation but fits the same.
+        let key = "\(mesh.vertexCount)|\(gunCorners.count)|\(worldMesh.vertexCount)|\(worldCorners.count)"
+        guard key != alignKey else { return }
+        alignKey = key
+        if let cached = alignCache[key] { yawCorrection = cached; return }
+        yawCorrection = 0
+        let gun = gunCorners, world = worldCorners, result = alignResult
+        Self.alignQueue.async {
+            let t0 = CACurrentMediaTime()
+            let yaw = ViewmodelAlignment.yawCorrection(gun: gun, world: world)
+            result.withLock { $0 = (key, yaw) }
+            let ms = Int((CACurrentMediaTime() - t0) * 1000)
+            Task { @MainActor in
+                AppLog.render.line(String(format: "[WeaponPass] toe-in correction %+.1f° in %d ms", yaw * 180 / .pi, ms))
+            }
+        }
     }
 
     /// Allocate/resize the weapon depth to match the drawable colour slice.

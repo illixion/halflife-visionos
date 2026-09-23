@@ -170,6 +170,15 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
             var axis = SIMD3<Float>(1, 0, 0)
             for _ in 0..<64 { axis = simd_normalize(cov * axis) }
             if axis.x < 0 { axis = -axis }
+            // Rear-to-front: centroids of the rearmost and frontmost 1.5 units.
+            let xs = pts.map(\.x)
+            if let lo = xs.min(), let hi = xs.max() {
+                let r = pts.filter { $0.x < lo + 1.5 }, f = pts.filter { $0.x > hi - 1.5 }
+                let d = simd_normalize(f.reduce(.zero, +) / Float(f.count) - r.reduce(.zero, +) / Float(r.count))
+                print(String(format: "      rear→front (%.2f %.2f %.2f) yaw %.1f° pitch %.1f°; PCA yaw %.1f° pitch %.1f°; length %.1f",
+                             d.x, d.y, d.z, atan2f(d.y, d.x) * 180 / .pi, asinf(d.z) * 180 / .pi,
+                             atan2f(axis.y, axis.x) * 180 / .pi, asinf(axis.z) * 180 / .pi, hi - lo))
+            }
             let gp = PoseSolver.translation(of: grip.frame(in: vm.restPose))
             var line = String(format: "      PCA axis (%.2f %.2f %.2f) %.1f° from +X; grip at (%.1f %.1f %.1f)",
                               axis.x, axis.y, axis.z, acosf(min(1, axis.x)) * 180 / .pi, gp.x, gp.y, gp.z)

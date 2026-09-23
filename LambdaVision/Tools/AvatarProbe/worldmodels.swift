@@ -54,6 +54,54 @@ func runWorldModelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, 
         }
         if heldItems.contains(stem), layout.hold != .held { die("\(file) is held but was aimed") }
 
+        // The viewmodel's gun fitted onto this world model: Valve's toe-in,
+        // which the app takes out (ViewmodelAlignment).
+        let vPath = modelsDir + "/v_" + stem + ".mdl"
+        if layout.hold == .aimed, FileManager.default.fileExists(atPath: vPath),
+           vPath.withCString({ lambda_body_load($0, 0) }) != 0 {
+            let vm = ProbeModel.fromBodySlot()
+            let isHand = ViewmodelGrip.handTriangleFilter(textureNames: vm.textureNames, boneNames: vm.boneNames)
+            let geometry = ViewmodelGrip.boneGeometry(
+                boneCount: vm.boneNames.count, textureNames: vm.textureNames,
+                vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+            if let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
+                                             extractorChoice: vm.handBone, geometry: geometry),
+               ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose) == .aimed {
+                let g = PoseSolver.translation(of: vm.restPose[grip.bone])
+                let gun = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
+                    .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 - g } }
+                let world = m.triangles.flatMap { $0.v.map { (p, b) in (layout.palette[min(b, layout.palette.count - 1)] * SIMD4(p, 1)).xyz3 } }
+                let t0 = Date()
+                if let r = ViewmodelAlignment.fit(gun: gun, world: world) {
+                    let yaw = ViewmodelAlignment.accepted(r) ? r.yaw * 180 / .pi : 0
+                    print(String(format: "      viewmodel onto it: %.1f° off, covers %.0f%%, residual %.2f in %.0f ms → toe-in correction %+.1f°",
+                                 r.degrees, r.coverage * 100, r.residual, Date().timeIntervalSince(t0) * 1000, yaw))
+                    // Valve toes guns in to the left; a correction the other
+                    // way, or a large one, means the fit found a wrong pose.
+                    if yaw > 3 || yaw < -8 { die("\(file): toe-in correction \(yaw)° is implausible") }
+                    if stem == "crossbow", yaw > -4 { die("\(file): the crossbow's toe-in was not found") }
+                    if let dumpDir {
+                        // The viewmodel held with the correction, beside the aim ray.
+                        let model = ViewmodelGrip.modelMatrix(hand: hand, grip: grip, hold: .aimed, palette: vm.restPose,
+                                                              idlePalette: vm.restPose, handIsLeft: false,
+                                                              yawCorrection: yaw * .pi / 180)
+                        var lines = triLines(vm, palette: vm.restPose, transform: model, label: "gun") { tex, b in
+                            !isHand(tex, b[0], b[1], b[2])
+                        }
+                        let origin = PoseSolver.translation(of: hand)
+                        let dir = simd_normalize((hand * SIMD4<Float>(1, 0, 0, 0)).xyz3)
+                        let side = simd_normalize(simd_cross(dir, SIMD3<Float>(0, 0, 1))) * 0.15
+                        lines.append("ray" + [origin - side, origin + side, origin + dir * 40]
+                            .map { String(format: "|%.3f %.3f %.3f", $0.x, $0.y, $0.z) }.joined())
+                        try? lines.joined(separator: "\n").write(toFile: "\(dumpDir)/aligned_v_\(stem).tri",
+                                                                 atomically: true, encoding: .utf8)
+                    }
+                } else {
+                    print("      viewmodel onto it: no fit")
+                }
+            }
+        }
+
         guard let dumpDir else { continue }
         let model = ViewmodelGrip.modelMatrix(hand: hand, grip: layout.grip, hold: layout.hold,
                                               palette: layout.palette, idlePalette: layout.palette,

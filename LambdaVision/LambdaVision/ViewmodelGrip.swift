@@ -228,8 +228,12 @@ enum ViewmodelGrip {
     /// bone only says where: its idle position lands on the hand, and its
     /// motion since idle is taken back out, so recoil, the pump and the
     /// magazine animate around a hand that does not move.
+    ///
+    /// `yawCorrection` (radians, aimed only) turns the gun about the hand's
+    /// up axis to take out Valve's toe-in (ViewmodelAlignment).
     static func modelMatrix(hand: float4x4, grip: Grip, hold: Hold, palette: [float4x4],
-                            idlePalette: [float4x4], handIsLeft: Bool) -> float4x4 {
+                            idlePalette: [float4x4], handIsLeft: Bool,
+                            yawCorrection: Float = 0) -> float4x4 {
         let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
         switch hold {
         case .held:
@@ -238,7 +242,7 @@ enum ViewmodelGrip {
             let idle = bone(grip.bone, in: idlePalette)
             var toGrip = matrix_identity_float4x4
             toGrip.columns.3 = SIMD4(-xyz(idle.columns.3), 1)
-            return hand * flip * toGrip * idle * bone(grip.bone, in: palette).inverse
+            return hand * flip * yaw(yawCorrection) * toGrip * idle * bone(grip.bone, in: palette).inverse
         }
     }
 
@@ -283,10 +287,16 @@ enum ViewmodelGrip {
     /// The muzzle in the holding hand's frame, for an aimed gun: where shots
     /// leave from, fixed per model (the idle pose, like the barrel).
     static func muzzleInHand(_ muzzle: SIMD3<Float>, grip: Grip, idlePalette: [float4x4],
-                             handIsLeft: Bool) -> SIMD3<Float> {
+                             handIsLeft: Bool, yawCorrection: Float = 0) -> SIMD3<Float> {
         let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
         let g = xyz(bone(grip.bone, in: idlePalette).columns.3)
-        return xyz(flip * SIMD4(muzzle - g, 0))
+        return xyz(flip * yaw(yawCorrection) * SIMD4(muzzle - g, 0))
+    }
+
+    /// A turn about the hand's up (+Z, the thumb side). Commutes with
+    /// `mirror`, so a left hand takes the same correction.
+    private static func yaw(_ radians: Float) -> float4x4 {
+        radians == 0 ? matrix_identity_float4x4 : float4x4(simd_quatf(angle: radians, axis: SIMD3(0, 0, 1)))
     }
 
     private static func bone(_ i: Int, in palette: [float4x4]) -> float4x4 {

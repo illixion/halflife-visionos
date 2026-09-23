@@ -589,7 +589,8 @@ actor Renderer {
         guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.heldGrip,
               pass.heldHold == .aimed, let muzzle = pass.heldMuzzle, !pass.heldIdlePalette.isEmpty else { return nil }
         let local = ViewmodelGrip.muzzleInHand(muzzle, grip: grip, idlePalette: pass.heldIdlePalette,
-                                               handIsLeft: Renderer.dominantHandIsLeft)
+                                               handIsLeft: Renderer.dominantHandIsLeft,
+                                               yawCorrection: pass.heldYawCorrection)
         let p = trackedHandFrame(hand) * SIMD4<Float>(local, 1)
         return SIMD3(p.x, p.y, p.z)
     }
@@ -2397,7 +2398,8 @@ actor Renderer {
                                                                       hold: weaponPass.heldHold,
                                                                       palette: weaponPass.heldPalette,
                                                                       idlePalette: weaponPass.heldIdlePalette,
-                                                                      handIsLeft: left)
+                                                                      handIsLeft: left,
+                                                                      yawCorrection: weaponPass.heldYawCorrection)
                 } else {
                     // No hand to hold it by (the hivehand): the old tuned
                     // placement of the viewmodel origin at the hand.
