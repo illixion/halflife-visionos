@@ -186,6 +186,11 @@ struct ImmersiveSpaceContent: CompositorContent {
             KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
         }
+        // Hide the palm-up Home indicator: the HEV holograms and the hand
+        // gestures all live on the hands. On a CompositorLayer this has to be
+        // the content-level preference — the scene-level one alone hid it
+        // for the first palm-up only (found in Oneiros's Metal host).
+        .persistentSystemOverlays(.hidden)
     }
 }
 
@@ -251,5 +256,6 @@ struct LambdaVisionApp: App {
         // occludes any weapon model drawn "in" the hand. Hide it; ArmPass
         // draws a wireframe skeleton in its place (see Renderer.swift).
         .upperLimbVisibility(.hidden)
+        .persistentSystemOverlays(.hidden)
     }
 }
