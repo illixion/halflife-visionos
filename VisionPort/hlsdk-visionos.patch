@@ -721,6 +721,94 @@ index 9aecaf7..43f18c8 100644
  	m_fOldTime = m_flTime;	// save time of previous redraw
  	m_flTime = flTime;
  	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
+diff --git a/cl_dll/input.cpp b/cl_dll/input.cpp
+index d11abf5..59757c1 100644
+--- a/cl_dll/input.cpp
++++ b/cl_dll/input.cpp
+@@ -870,6 +870,10 @@ void DLLEXPORT CL_CreateMove( float frametime, struct usercmd_s *cmd, int active
+ 	// set button and flag bits
+ 	//
+ 	cmd->buttons = CL_ButtonBits( 1 );
++	// VR: the analog stick's directions (input_xash3d.cpp IN_Move).
++	extern int g_vr_stick_buttons;
++	if( active )
++		cmd->buttons |= g_vr_stick_buttons;
+ 
+ #if USE_VGUI
+ 	// If they're in a modal dialog, ignore the attack button.
+diff --git a/cl_dll/input_xash3d.cpp b/cl_dll/input_xash3d.cpp
+index fb70d6b..54e2c5e 100644
+--- a/cl_dll/input_xash3d.cpp
++++ b/cl_dll/input_xash3d.cpp
+@@ -4,6 +4,7 @@
+ #include "kbutton.h"
+ #include "keydefs.h"
+ #include "input_mouse.h"
++#include "const.h"
+ extern cvar_t		*sensitivity;
+ extern cvar_t		*in_joystick;
+ 
+@@ -46,6 +47,10 @@ cvar_t	*cl_laddermode;
+ int CL_IsDead( void );
+ extern Vector dead_viewangles;
+ 
++// Movement directions the analog stick is pushed past, as usercmd button
++// bits; CL_CreateMove ORs them in (see IN_Move).
++int g_vr_stick_buttons = 0;
++
+ /*
+ ===========
+ IN_GetMouseSensitivity
+@@ -220,19 +225,41 @@ void FWGSInput::IN_Move( float frametime, usercmd_t *cmd )
+ 	}
+ 
+ 	dead_viewangles = viewangles; // keep them actual
++	g_vr_stick_buttons = 0;
+ 	if( ac_movecount )
+ 	{
+-		IN_ToggleButtons( ac_forwardmove / ac_movecount, ac_sidemove / ac_movecount );
++		// VR: the headset's analog movers (gamepad stick, pinch joystick,
++		// arm swinging) arrive here while the keyboard may be held too.
++		// Stock replaced the keys' move with the stick's whenever the stick
++		// was off centre, and IN_ToggleButtons released held movement keys
++		// when the stick came back — so a stick barely off centre (a
++		// swinging arm settling) dropped WASD to a crawl. Add the two
++		// instead, capped at maxspeed, and report the stick's directions
++		// as button bits (ladders read IN_FORWARD) without touching the
++		// keys' own state. Neither alone moves differently from stock.
++		float fwd = ac_forwardmove / ac_movecount, side = ac_sidemove / ac_movecount;
++		float stickfwd = fwd * cl_forwardspeed->value, stickside = side * cl_sidespeed->value;
++		if( in_speed.state & 1 )
++		{
++			stickfwd *= cl_movespeedkey->value;
++			stickside *= cl_movespeedkey->value;
++		}
++		cmd->forwardmove += stickfwd;
++		cmd->sidemove += stickside;
+ 
+-		if( ac_forwardmove )
+-			cmd->forwardmove = ac_forwardmove * cl_forwardspeed->value / ac_movecount;
+-		if( ac_sidemove )
+-			cmd->sidemove  = ac_sidemove * cl_sidespeed->value / ac_movecount;
+-		if( ( in_speed.state & 1 ) && ( ac_sidemove || ac_forwardmove ) )
++		float spd = gEngfuncs.GetClientMaxspeed();
++		float fmov = sqrt( cmd->forwardmove * cmd->forwardmove + cmd->sidemove * cmd->sidemove + cmd->upmove * cmd->upmove );
++		if( ( stickfwd || stickside ) && spd != 0.0f && fmov > spd )
+ 		{
+-			cmd->forwardmove *= cl_movespeedkey->value;
+-			cmd->sidemove *= cl_movespeedkey->value;
++			cmd->forwardmove *= spd / fmov;
++			cmd->sidemove *= spd / fmov;
++			cmd->upmove *= spd / fmov;
+ 		}
++
++		if( fwd > 0.7f ) g_vr_stick_buttons |= IN_FORWARD;
++		if( fwd < -0.7f ) g_vr_stick_buttons |= IN_BACK;
++		if( side > 0.9f ) g_vr_stick_buttons |= IN_MOVERIGHT;
++		if( side < -0.9f ) g_vr_stick_buttons |= IN_MOVELEFT;
+ 	}
+ 
+ 	ac_sidemove = ac_forwardmove = rel_pitch = rel_yaw = 0;
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
 index 3b3187d..2639dde 100644
 --- a/cl_dll/view.cpp
