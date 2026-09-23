@@ -29,10 +29,10 @@ index 7cfc3d7..995c9fe 100644
  	wrect_t rc;
  
 diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
-index 3670546..0c0feb0 100644
+index 3670546..2654ad4 100644
 --- a/cl_dll/entity.cpp
 +++ b/cl_dll/entity.cpp
-@@ -17,12 +17,37 @@
+@@ -17,12 +17,39 @@
  #include "r_efx.h"
  #include "event_api.h"
  #include "pm_defs.h"
@@ -42,6 +42,8 @@ index 3670546..0c0feb0 100644
 +#include "com_model.h"
 +#include "studio.h"
 +#include "triangleapi.h" // pTriAPI->LightAtPoint for the weapon light probe
++#include "r_studioint.h" // IEngineStudio.Mod_Extradata for the p_ hull
++extern engine_studio_api_t IEngineStudio;
  
  void Game_AddObjects( void );
  
@@ -71,7 +73,7 @@ index 3670546..0c0feb0 100644
  
  int g_iAlive = 1;
  
-@@ -497,15 +522,317 @@ void Beams( void )
+@@ -497,15 +524,330 @@ void Beams( void )
  }
  #endif
  
@@ -190,7 +192,9 @@ index 3670546..0c0feb0 100644
 +	extern float g_vr_weapon_animtime;
 +	extern float g_vr_weapon_framerate;
 +	extern float g_vr_weapon_time;
++	extern void *g_vr_weapon_world_hdr;
 +	g_vr_weapon_hdr = NULL; // reset each frame; republished below in external mode
++	g_vr_weapon_world_hdr = NULL;
 +
 +	static cvar_t *vr_weapon_external = NULL;
 +	if( !vr_weapon_external )
@@ -223,6 +227,17 @@ index 3670546..0c0feb0 100644
 +			g_vr_weapon_framerate  = view->curstate.framerate;
 +			g_vr_weapon_time       = gEngfuncs.GetClientTime();
 +		}
++		// And the same weapon's third-person p_ model: seen from every side,
++		// so it is whole where the viewmodel was never modelled (the side
++		// facing away from the old camera, the M4's stock). The platform fits
++		// it onto the viewmodel's gun and fills the viewmodel's holes from it
++		// (ViewmodelShell). Nothing draws a local player's p_ model in first
++		// person, so ask for its data rather than trusting it is cached.
++		cl_entity_t *player = gEngfuncs.GetLocalPlayer();
++		model_t *pm = ( player && player->curstate.weaponmodel )
++			? gEngfuncs.pfnGetModelByIndex( player->curstate.weaponmodel ) : NULL;
++		if( pm && pm->type == mod_studio )
++			g_vr_weapon_world_hdr = IEngineStudio.Mod_Extradata( pm );
 +		// Sample the world light at the eye (R_LightPoint via the tri API,
 +		// 0..255) and publish it normalised for the external weapon shader.
 +		{
@@ -706,10 +721,10 @@ index 9aecaf7..43f18c8 100644
  	m_flTime = flTime;
  	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
 diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
-index 3b3187d..8ef3a16 100644
+index 3b3187d..d468299 100644
 --- a/cl_dll/view.cpp
 +++ b/cl_dll/view.cpp
-@@ -82,7 +82,78 @@ extern Vector   dead_viewangles;
+@@ -82,7 +82,82 @@ extern Vector   dead_viewangles;
  #define CAM_MODE_FOCUS		2
  
  vec3_t v_origin, v_angles, v_cl_angles, v_sim_org, v_lastAngles;
@@ -766,6 +781,10 @@ index 3b3187d..8ef3a16 100644
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_animtime = 0.0f;
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_framerate = 1.0f;
 +extern "C" __attribute__((visibility("default"))) float g_vr_weapon_time = 0.0f;
++// The same weapon's third-person (p_) model header, published alongside:
++// whole where the viewmodel is open, and the platform's source for filling it
++// (ViewmodelShell). NULL when there is none.
++extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_world_hdr = 0;
 +// World light sampled at the view origin (R_LightPoint via the triangle API),
 +// normalised 0..1, published each frame for the external weapon renderer to
 +// shade the gun to match the room.
@@ -789,7 +808,7 @@ index 3b3187d..8ef3a16 100644
  float v_cameraRelaxAngle = 5.0f;
  float v_cameraFocusAngle = 35.0f;
  int v_cameraMode = CAM_MODE_FOCUS;
-@@ -777,6 +848,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+@@ -777,6 +852,14 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
  		VectorCopy( view->angles, view->latched.prevangles );
  	}
  
@@ -804,7 +823,7 @@ index 3b3187d..8ef3a16 100644
  	lasttime = pparams->time;
  
  	v_origin = pparams->vieworg;
-@@ -1533,6 +1612,89 @@ void V_CalcSpectatorRefdef( struct ref_params_s * pparams )
+@@ -1533,6 +1616,89 @@ void V_CalcSpectatorRefdef( struct ref_params_s * pparams )
  	VectorCopy( v_origin, pparams->vieworg );
  }
  
@@ -894,7 +913,7 @@ index 3b3187d..8ef3a16 100644
  void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
  {
  	// intermission / finale rendering
-@@ -1547,6 +1709,8 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+@@ -1547,6 +1713,8 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
  	else if( !pparams->paused )
  	{
  		V_CalcNormalRefdef( pparams );

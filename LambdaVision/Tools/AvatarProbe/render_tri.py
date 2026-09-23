@@ -4,14 +4,17 @@
     render_tri.py grip_v_9mmhandgun.tri [out.png]
 
 Each line is "label|x y z|x y z|x y z" in GoldSrc space (X forward, Y left,
-Z up). Labels pick the colour: body (skin), gun (grey), ray (red), cut (dim
-red), anything else white. Pure Python and `sips`, no dependencies, so it runs
+Z up). Labels pick the colour: body (skin), gun (grey), shell (orange), ray
+(red), cut (dim red), anything else white. The back of a gun or shell face is
+purple, so a hole in a one-sided model shows as a purple patch. Pure Python and `sips`, no dependencies, so it runs
 on any Mac the probe does. Slow on big dumps; fine for one arm and a gun.
 """
 import math, subprocess, sys
 
 COLOURS = {"body": (214, 170, 120), "gun": (200, 200, 205), "ray": (235, 60, 50),
-           "cut": (120, 40, 40), "floor": (70, 90, 70)}
+           "cut": (120, 40, 40), "floor": (70, 90, 70),
+           "shell": (230, 150, 60)}
+INTERIOR = {"gun": (90, 30, 90), "shell": (90, 30, 90)}
 
 def main():
     src = sys.argv[1]
@@ -42,6 +45,11 @@ def main():
             n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
             ln = math.sqrt(sum(x * x for x in n)) or 1
             shade = 0.35 + 0.65 * abs(V(n)[2] / ln)
+            # GoldSrc fronts wind clockwise: the outward normal is -n. A gun
+            # face turned away shows its back, drawn as the weapon pass
+            # shades it — dark interior — so holes read as holes.
+            if label in INTERIOR and V(n)[2] > 0:
+                col = INTERIOR[label]
             px = bytes(int(x * shade) for x in col)
             den = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
             if abs(den) < 1e-9:

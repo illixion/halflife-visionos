@@ -170,6 +170,16 @@ uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out);
 // generation, 0 before the first bake.
 uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out);
 
+// The same weapon's third-person (p_) model, baked from the header the client
+// publishes beside the viewmodel's (g_vr_weapon_world_hdr). Whole where the
+// viewmodel was never modelled, it is what the platform fills the
+// viewmodel's holes from (ViewmodelShell). Same lock rules as the weapon
+// slot; the pose is its rest pose. Generation 0 = nothing baked.
+uint32_t lambda_weapon_world_generation(void);
+uint32_t lambda_weapon_world_lock(lambda_weapon_mesh_t *out);
+void     lambda_weapon_world_unlock(void);
+uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out);
+
 // --- player body -----------------------------------------------------------
 //
 // The first-person avatar. Unlike the weapon, no engine entity publishes it,
@@ -187,6 +197,11 @@ uint32_t lambda_body_generation(void);
 uint32_t lambda_body_lock(lambda_weapon_mesh_t *out);
 void     lambda_body_unlock(void);
 uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out);
+// The body slot's model posed at any sequence and frame, and a sequence's
+// label and length — for the Mac probe, which loads viewmodels into this
+// slot to check them mid-animation. Return 0 for a bad index.
+int      lambda_body_sequence(int seq, char name[32], int *numframes);
+uint32_t lambda_body_pose_at(int seq, float frame, lambda_weapon_pose_t *out);
 
 // Where the player's feet are, published by the client each normal refdef
 // (cl_dll/view.cpp g_vr_body_state) for the avatar's legs. Plain floats read

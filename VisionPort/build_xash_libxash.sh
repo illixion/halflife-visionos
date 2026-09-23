@@ -201,6 +201,8 @@ printf '_g_vr_muzzle_offset_cl\n_g_vr_aim_hit\n' >> "$HLSDK_CL_EXPORTS"
 # skinned weapon mesh and pose its bones for the external (visionOS) renderer.
 printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLSDK_CL_EXPORTS"
 printf '_g_vr_weapon_sequence\n_g_vr_weapon_frame\n_g_vr_weapon_animtime\n_g_vr_weapon_framerate\n_g_vr_weapon_time\n' >> "$HLSDK_CL_EXPORTS"
+# The weapon's p_ model header, which the platform fills the viewmodel's holes from.
+printf '_g_vr_weapon_world_hdr\n' >> "$HLSDK_CL_EXPORTS"
 # World light sampled at the eye, read by Lambda_WeaponModel.c to shade the gun.
 printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
 # Player floor/onground/velocity (view.cpp), read by Lambda_WeaponModel.c for

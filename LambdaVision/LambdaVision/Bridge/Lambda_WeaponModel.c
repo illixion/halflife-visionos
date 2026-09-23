@@ -279,6 +279,10 @@ static model_slot_t g_weapon = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
                                  .last_modelindex = -1, .last_body = -1 };
 static model_slot_t g_body   = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
                                  .last_modelindex = -1, .last_body = -1 };
+// The weapon's third-person (p_) model, baked from the header the client
+// publishes beside the viewmodel's; only its rest pose is ever needed.
+static model_slot_t g_world  = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
+                                 .last_modelindex = -1, .last_body = -1 };
 
 // The slot mutexes are RECURSIVE. lambda_*_lock hands out interior pointers
 // and returns still holding the lock, so a caller that reasonably reads the
@@ -291,6 +295,7 @@ static void slot_mutexes_init(void) {
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&g_weapon.mtx, &attr);
     pthread_mutex_init(&g_body.mtx, &attr);
+    pthread_mutex_init(&g_world.mtx, &attr);
     pthread_mutexattr_destroy(&attr);
 }
 static void slot_lock_mutex(model_slot_t *slot) {
@@ -323,6 +328,7 @@ extern float g_vr_weapon_frame;
 extern float g_vr_weapon_animtime;
 extern float g_vr_weapon_framerate;
 extern float g_vr_weapon_time;
+extern void *g_vr_weapon_world_hdr;
 
 // --- dynamic-array helpers -------------------------------------------------
 static uint32_t push_vertex(snapshot_t *s, const lambda_weapon_vertex_t *v) {
@@ -874,7 +880,30 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     return 1;
 }
 
+// Bakes the published p_ model when it changes. Cheap otherwise.
+static void extract_world_model(void) {
+    model_slot_t *slot = &g_world;
+    void *hdrp = g_vr_weapon_world_hdr;
+    if (!hdrp) return;
+    const studiohdr_t *hdr = (const studiohdr_t *)hdrp;
+    // The pointer alone is not an identity: a map change frees the model
+    // cache, and the next model can land at the same address.
+    static char last_name[64];
+    static int32_t last_length;
+    if (hdrp == slot->last_hdr && hdr->length == last_length &&
+        strncmp(hdr->name, last_name, sizeof(last_name)) == 0) return;
+    slot->last_hdr = hdrp;
+    last_length = hdr->length;
+    memcpy(last_name, hdr->name, sizeof(last_name));
+    if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
+        slot->last_valid = 0;
+        return;
+    }
+    slot->last_valid = bake_model(slot, (const uint8_t *)hdrp, hdr, -1, 0, NULL);
+}
+
 void lambda_weapon_extract(void) {
+    extract_world_model();
     model_slot_t *slot = &g_weapon;
     void *hdrp = g_vr_weapon_hdr;
     int   modelindex = g_vr_weapon_modelindex;
@@ -982,6 +1011,11 @@ uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out) {
     return out->generation;
 }
 
+uint32_t lambda_weapon_world_generation(void) { return g_world.last_valid ? g_world.generation : 0; }
+uint32_t lambda_weapon_world_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_world, out); }
+void     lambda_weapon_world_unlock(void) { pthread_mutex_unlock(&g_world.mtx); }
+uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out) { return slot_copy_pose(&g_world, out); }
+
 // --- player body -----------------------------------------------------------
 //
 // The avatar is not an engine entity, so nothing publishes it: we read the
@@ -1037,6 +1071,29 @@ uint32_t lambda_body_generation(void) { return g_body.generation; }
 uint32_t lambda_body_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_body, out); }
 
 void lambda_body_unlock(void) { pthread_mutex_unlock(&g_body.mtx); }
+
+int lambda_body_sequence(int seq, char name[32], int *numframes) {
+    const studiohdr_t *hdr = (const studiohdr_t *)g_body.owned;
+    if (!hdr || seq < 0 || seq >= hdr->numseq) return 0;
+    const mstudioseqdesc_t *sd = (const mstudioseqdesc_t *)((const uint8_t *)hdr + hdr->seqindex) + seq;
+    memcpy(name, sd->label, 32);
+    name[31] = '\0';
+    *numframes = sd->numframes;
+    return 1;
+}
+
+uint32_t lambda_body_pose_at(int seq, float frame, lambda_weapon_pose_t *out) {
+    const studiohdr_t *hdr = (const studiohdr_t *)g_body.owned;
+    if (!hdr || seq < 0 || seq >= hdr->numseq) return 0;
+    matrix3x4 bones[LAMBDA_WEAPON_MAX_BONES];
+    if (!compute_pose_bones((const uint8_t *)hdr, hdr, seq, frame, bones)) return 0;
+    out->generation = g_body.generation;
+    out->bone_count = (uint32_t)hdr->numbones;
+    out->sequence = seq;
+    out->frame = frame;
+    memcpy(out->bones, bones, sizeof(matrix3x4) * (size_t)hdr->numbones);
+    return out->generation;
+}
 
 uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out) {
     return slot_copy_pose(&g_body, out);

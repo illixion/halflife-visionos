@@ -71,7 +71,9 @@ typedef struct
     simd_float4     eyePos[2];
     simd_float4     eyeRight[2];
     // x = masked alpha test (STUDIO_NF_MASKED), y = chrome (STUDIO_NF_CHROME),
-    // z = near clip: discard fragments closer than this to the eye, metres (0 = off).
+    // z = near clip: discard fragments closer than this to the eye, metres (0 = off),
+    // w = interior shading: 0 = off, else the sign of the outside winding
+    // (+1 clockwise as GoldSrc authors it, -1 under a mirroring transform).
     simd_float4     renderFlags;
 } WeaponUniforms;
 
