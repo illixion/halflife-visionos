@@ -3182,7 +3182,7 @@ index 05a130f..4779935 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..ce56dca 100644
+index 0568486..2a954e5 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3225,12 +3225,23 @@ index 0568486..ce56dca 100644
  	else
  	{
  		GL_FrustumInitProj( &RI.frustum, 0.0f, R_GetFarClip(), RI.rvp.fov_x, RI.rvp.fov_y ); // NOTE: we ignore nearplane here (mirrors only)
-@@ -390,6 +411,16 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
+@@ -390,6 +411,27 @@ static void R_SetupProjectionMatrix( matrix4x4 m )
  		return;
  	}
  
 +	if( cl_stereo_proj_override_active )
 +	{
++		// RI.farClip is a plain field, reset to 0 every frame (see below)
++		// and otherwise only assigned past this early return. Left at 0
++		// it isn't just cosmetic: MakeSkyVec() (gl_warp.c) builds the
++		// skybox quads as farclip/2 out from the view origin, so a zero
++		// far clip collapses every sky vertex onto the camera and the
++		// skybox draws with zero area — invisible, letting whatever's
++		// behind (clear color) show through as flat gray. R_SetupFrustum
++		// already calls R_GetFarClip() independently for culling in this
++		// same branch, so this keeps RI.farClip consistent with that.
++		RI.farClip = R_GetFarClip();
++
 +		// Source matrix is column-major float[16]; xash matrix4x4 is
 +		// row-major [r][c]. Transpose during copy.
 +		for( int r = 0; r < 4; r++ )
@@ -3242,7 +3253,7 @@ index 0568486..ce56dca 100644
  	RI.farClip = R_GetFarClip();
  
  	zNear = 4.0f;
-@@ -1087,6 +1118,56 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -1087,6 +1129,56 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3299,7 +3310,7 @@ index 0568486..ce56dca 100644
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1118,6 +1199,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1118,6 +1210,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  
  	tr.realframecount++; // right called after viewmodel events
  	R_RenderScene();
@@ -3310,6 +3321,45 @@ index 0568486..ce56dca 100644
  
  	return;
  }
+diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
+index 038abd4..6509d98 100644
+--- a/ref/gl/gl_context.c
++++ b/ref/gl/gl_context.c
+@@ -351,6 +351,15 @@ static void GAME_EXPORT R_SetupSky( int *skyboxTextures )
+ 
+ 	for( i = 0; i < SKYBOX_MAX_SIDES; i++ )
+ 		tr.skyboxTextures[i] = skyboxTextures[i];
++
++	// R_UnloadSkybox() above just cleared this on the shared world_static_t
++	// (tr.world aliases the engine's world_t via PARM_GET_WORLD_PTR), which
++	// undid the SetBits() the engine had just done in R_SetupSky() before
++	// calling us. Without this, FWORLD_CUSTOM_SKYBOX reads false even
++	// though tr.skyboxTextures[] is fully populated, so R_AddSkyBoxSurface
++	// takes the legacy FWORLD_SKYSPHERE cloud-poly branch instead — drawing
++	// with whatever texture unit happened to be bound, i.e. a flat gray sky.
++	SetBits( tr.world->flags, FWORLD_CUSTOM_SKYBOX );
+ }
+ 
+ static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int offset_x, int offset_y, float scale_x, float scale_y )
+diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c
+index cfa7835..32bcb26 100644
+--- a/ref/gl/gl_warp.c
++++ b/ref/gl/gl_warp.c
+@@ -348,6 +348,14 @@ void R_DrawSkyBox( void )
+ 	pglDisable( GL_BLEND );
+ 	pglDisable( GL_ALPHA_TEST );
+ 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
++	// on real fixed-function GL, REPLACE ignores vertex color, so this was
++	// never needed; the visionOS GLES compat shim has no TexEnv support and
++	// always multiplies by the current color (see gl2_shim.c), so without
++	// resetting it here the skybox gets tinted by whatever color a prior
++	// draw call (lightmaps, decals) left behind — this is what produced the
++	// flat/dark-gray sky. Every other GL_REPLACE call site in gl_rsurf.c
++	// already resets color the same way.
++	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+ 
+ 	for( int i = 0; i < SKYBOX_MAX_SIDES; i++ )
+ 	{
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
 index df6f012..6959ddd 100644
 --- a/ref/gl/gl_rsurf.c
