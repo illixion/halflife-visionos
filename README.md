@@ -141,16 +141,33 @@ manual invocation, if you'd rather run SteamCMD yourself:
 
 This grabs ~507 MB across 5 depots:
 
-| Depot | Manifest                | Size   | Contents                         |
-|-------|-------------------------|--------|----------------------------------|
-| 1     | 5928322771446233610     | 430 MB | Main `valve/` (BSPs, WADs, dlls) |
-| 3     | 8096513071444961518     | 0.9 MB | Shared launcher bits             |
-| 71    | 9183617604528345869     | 15 MB  | Multi-platform binaries          |
-| 96    | 8007990985538868417     | 8 MB   | macOS-specific runtime           |
-| 9     | 5920416249792874591     | 53 MB  | Misc shared content              |
+| Depot | Manifest                | Size   | Contents                             |
+|-------|-------------------------|--------|----------------------------------------|
+| 1     | 5928322771446233610     | 430 MB | Main `valve/` (BSPs, WADs, dlls)     |
+| 3     | 8096513071444961518     | 0.9 MB | Shared launcher bits                 |
+| 71    | 9183617604528345869     | 15 MB  | Half-Life base content                |
+| 96    | 8007990985538868417     | 8 MB   | **HD pack** (`valve_hd/`, see below) |
+| 9     | 5920416249792874591     | 53 MB  | macOS runtime                         |
 
 (Build ID **5433873**, captured 2026-05-10. Valve does occasionally re-mint
-the legacy build; manifests may shift.)
+the legacy build; manifests may shift. Depot contents cross-checked against
+[SteamDB](https://steamdb.info/app/70/depots/) 2026-09-24 — depot 96 is the
+official Gearbox-made "Half-Life High Definition" pack, not a platform
+runtime as an earlier version of this table mislabeled it.)
+
+`+app_update 70` pulls all 5 depots for your OS unconditionally — there is
+no separate opt-in step for the HD pack. It lands at
+`HalfLifeAssets/valve_hd/` alongside `HalfLifeAssets/valve/`; both are
+gamedirs `fetch-assets.sh`/`.ps1` fetch and validate in the same run.
+
+**HD pack case-sensitivity gotcha:** the depot ships
+`valve_hd/models/Hgrunt03.mdl` with a capital H, but the engine requests
+`hgrunt03.mdl` (lowercase) — invisible on Windows/steamcmd's usual
+case-insensitive volumes, but a missing-model crash on a case-sensitive
+filesystem (visionOS APFS, Linux ext4). `fetch-assets.sh` renames it to
+lowercase automatically after download; if a similar
+`models/<Capitalized>.mdl` missing-file error shows up for some other HD
+model, it's the same class of bug — rename it lowercase.
 
 The folder we care about is `HalfLifeAssets/valve/`. Assets reach the
 device out of band: after installing the app once, run
@@ -163,6 +180,13 @@ deleting the app from the headset first — that wipes the data container,
 so `Documents/GameData` is empty again and the app shows an on-screen
 warning to re-run `push-assets.sh`. The engine prefers `Documents/GameData`
 as `-rodir` when `valve/liblist.gam` is present there.
+
+`push-assets.sh` also mounts `valve_hd/` for you: if it's present and
+`valve/vfs.cfg` doesn't already exist, it pushes a `vfs.cfg` containing
+`fs_mount_hd "1"` — `FS_LoadGameInfo` execs that before mounting gamedirs,
+so HD models are active from the first map load with no manual engine
+config. In-game, `K` sends `impulse 101` (give-all) so you can pull every
+weapon and inspect its HD viewmodel immediately.
 
 For a self-contained app (assets baked into the bundle — e.g. handing a
 build to someone), build with `BUNDLE_HL_ASSETS=1` set (re-enables the

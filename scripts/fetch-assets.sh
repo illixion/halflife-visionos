@@ -53,5 +53,18 @@ echo "    steamcmd will prompt for your Steam password / Steam Guard code."
     exit 1
 }
 
+# Depot 96 (the official Gearbox "Half-Life High Definition" pack) ships as
+# HalfLifeAssets/valve_hd/ alongside valve/ — no separate fetch step needed,
+# app_update 70 already pulled it. But its depot ships
+# models/Hgrunt03.mdl with a capital H while the engine requests the
+# lowercase name; harmless on Windows/steamcmd's usual case-insensitive
+# volumes, a missing-model crash on a case-sensitive one (visionOS APFS,
+# Linux ext4). Normalize it here so nobody has to hit that crash first.
+HD_HGRUNT="HalfLifeAssets/valve_hd/models/Hgrunt03.mdl"
+if [[ -f "$HD_HGRUNT" ]]; then
+    mv "$HD_HGRUNT" "$(dirname "$HD_HGRUNT")/hgrunt03.mdl"
+    echo "==> Renamed valve_hd/models/Hgrunt03.mdl -> hgrunt03.mdl (case-sensitive filesystem fix)"
+fi
+
 echo ""
 echo "Done. Next: install the app once, then run ./scripts/push-assets.sh to copy assets to the headset."
