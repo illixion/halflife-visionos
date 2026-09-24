@@ -12,6 +12,8 @@ GitHub-only distribution. No App Store target. Bring your own Half-Life copy.
 
 See [PLAN.md](PLAN.md) for architecture, phase plan, and risks.
 
+![In-game screenshot](images/ingame.jpg)
+
 ## Status
 
 Playable end-to-end on AVP: engine rendering (foveated, 120 FPS stable),
