@@ -100,7 +100,11 @@ nonisolated final class HEVHUD: @unchecked Sendable {
 
     /// The renderer once the atlas exists; nil until then (or if Metal
     /// refused the pipeline, logged once).
+    /// `trackingFormat` is the drawable's tracking-areas format (`.invalid`
+    /// without one): the palm debug panel's buttons draw through this
+    /// renderer's target pass.
     func ensureRenderer(device: MTLDevice, colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat,
+                        trackingFormat: MTLPixelFormat = .invalid,
                         viewCount: Int, slots: Int) -> RAVEHoloRenderer? {
         if let renderer { return renderer }
         guard !rendererFailed, let font = Self.fontLock.withLock({ $0 }) else { return nil }
@@ -108,7 +112,8 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             renderer = try RAVEHoloRenderer(device: device,
                                             configuration: .init(colorFormat: colorFormat, depthFormat: depthFormat,
                                                                  maxViewCount: viewCount, slots: slots,
-                                                                 depthTest: false),
+                                                                 depthTest: false,
+                                                                 trackingFormat: trackingFormat),
                                             font: font)
         } catch {
             rendererFailed = true

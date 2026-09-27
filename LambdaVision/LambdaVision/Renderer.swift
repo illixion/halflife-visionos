@@ -176,6 +176,8 @@ actor Renderer {
     // The HEV suit's holographic readouts (HEVHUD), drawn inside the weapon
     // pass. Its renderer appears once the glyph atlas finishes building.
     private let hevHUD = HEVHUD()
+    // Developer mode's palm readout, drawn into the HEV holograms' scene.
+    private let palmDebug = PalmDebugPanel()
 
     // First-person body: the rig is built once from the body slot after the
     // engine loads gordon.mdl; the mesh is uploaded once per bake (and again
@@ -318,6 +320,9 @@ actor Renderer {
     nonisolated(unsafe) static var hevHUDEnabled = true
     /// The holographic aim point (Settings > Input > Aim reticle).
     nonisolated(unsafe) static var aimReticle: HEVHUD.Reticle = .dot
+    /// Developer mode (Settings > Advanced): the palm debug panel
+    /// (PalmDebugPanel) over the off hand while its palm faces the eyes.
+    nonisolated(unsafe) static var debugPanelEnabled = false
     /// Hold the weapon's world (p_) model instead of its viewmodel
     /// (Settings > Input > Weapon model).
     nonisolated(unsafe) static var weaponWorldModel = false
@@ -869,6 +874,15 @@ actor Renderer {
         // for either hand held out front.
         return HEVHUD.Arm(wrist: wrist, elbow: worldPos(.forearmArm), forward: fwd, back: back,
                           inward: left ? across : -across)
+    }
+
+    /// The palm debug panel's hand as a RAVE sample (thumb-derived palm
+    /// normal), Apple world.
+    private func debugPanelHand(left: Bool) -> RAVEHandSample? {
+        guard handTracking.state == .running,
+              let hand = left ? handTracking.latestAnchors.leftHand : handTracking.latestAnchors.rightHand,
+              hand.isTracked else { return nil }
+        return RAVEHandSample(hand)
     }
 
     /// Flat [pos.xyz, color.rgba] x N array (world space, metres) for every
@@ -2319,9 +2333,13 @@ actor Renderer {
         // vitals over the off-hand forearm.
         var hudScene: RAVEHoloScene? = nil
         var hudRenderer: RAVEHoloRenderer? = nil
-        if Renderer.hevHUDEnabled || Renderer.aimReticle != .off, let holo = hevHUD.ensureRenderer(
+        // The palm debug panel's pinchable buttons (tracking areas) this frame.
+        var debugTargets: [UInt64: UInt32] = [:]
+        if Renderer.hevHUDEnabled || Renderer.aimReticle != .off || Renderer.debugPanelEnabled,
+           let holo = hevHUD.ensureRenderer(
             device: device, colorFormat: layerRenderer.configuration.colorFormat,
             depthFormat: layerRenderer.configuration.depthFormat,
+            trackingFormat: layerRenderer.configuration.trackingAreasFormat,
             viewCount: drawable.views.count, slots: maxBuffersInFlight) {
             var hud = lambda_hud_state_t()
             lambda_hud_state(&hud)
@@ -2335,8 +2353,19 @@ actor Renderer {
                                     head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
                                     ambient: weaponActive ? Self.eyeLightLuma() : nil,
                                     time: drawable.frameTiming.presentationTime.timeInterval)
+            if Renderer.debugPanelEnabled,
+               let panel = palmDebug.panel(offHand: debugPanelHand(left: !left),
+                                           head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
+                                           joystickHeld: joystickVisible, font: holo.font) {
+                if hudScene == nil { hudScene = RAVEHoloScene() }
+                hudScene?.panels.append(panel)
+                if let scene = hudScene, drawable.trackingAreasTextures.first != nil {
+                    debugTargets = RAVEHoloCompositor.registerTargets(of: scene, on: drawable)
+                }
+            }
             if hudScene != nil { hudRenderer = holo }
         }
+        if !Renderer.debugPanelEnabled { palmDebug.reset() }
         let supplementalPassActive = weaponActive || joystickVisible || body != nil || hudScene != nil
         if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
@@ -2406,6 +2435,9 @@ actor Renderer {
                                                                      body: body?.mesh))
         }
         if let hudRenderer { residencySet.addAllocations(hudRenderer.allocations) }
+        if !debugTargets.isEmpty, let tracking = drawable.trackingAreasTextures.first {
+            residencySet.addAllocation(tracking)
+        }
         residencySet.addAllocations(loadSnapshot.residentResources(slot: uniformBufferIndex))
         if !armVertices.isEmpty {
             residencySet.addAllocations(armPass.residentResources(uniformBufferIndex: uniformBufferIndex))
@@ -2731,6 +2763,34 @@ actor Renderer {
                                                                   .truncatingRemainder(dividingBy: 1000)))
                                       }
                                   } })
+            }
+        }
+
+        // The palm debug panel's buttons into the tracking-areas texture: its
+        // own single-sample pass (the colour pass can be MSAA), no depth —
+        // the holograms draw over everything.
+        if !debugTargets.isEmpty, let hudScene, let hudRenderer,
+           let tracking = drawable.trackingAreasTextures.first {
+            let t = MTL4RenderPassDescriptor()
+            t.colorAttachments[0].texture = tracking
+            t.colorAttachments[0].loadAction = .clear
+            t.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            t.colorAttachments[0].storeAction = .store
+            t.rasterizationRateMap = drawable.rasterizationRateMaps.first
+            if layerRenderer.configuration.layout == .layered { t.renderTargetArrayLength = drawable.views.count }
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: t) {
+                enc.label = "PalmDebugPanel.targets"
+                enc.setViewports(drawable.views.map { $0.textureMap.viewport })
+                if drawable.views.count > 1 {
+                    enc.setVertexAmplificationCount((0..<drawable.views.count).map {
+                        MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                          renderTargetArrayIndexOffset: UInt32($0))
+                    })
+                }
+                hudRenderer.encodeTargets(hudScene, renderValues: debugTargets, encoder: enc,
+                                          viewProjections: drawableTarget.viewProjections(drawable: drawable),
+                                          slot: uniformBufferIndex)
+                enc.endEncoding()
             }
         }
 

@@ -103,6 +103,7 @@ enum AppSettingsStore {
     private static let hevHUDKey              = "lambdavision.settings.hevHUD"
     private static let aimReticleKey          = "lambdavision.settings.aimReticle"
     private static let weaponModelKey         = "lambdavision.settings.weaponModel"
+    private static let developerModeKey       = "lambdavision.settings.developerMode"
 
     static var dominantHand: DominantHand {
         get {
@@ -179,5 +180,17 @@ enum AppSettingsStore {
     static var hevHUD: Bool {
         get { bool(hevHUDKey, true) }            // default: the holographic HEV HUD
         set { defaults.set(newValue, forKey: hevHUDKey) }
+    }
+    /// Default on in Debug builds, off in Release (Oneiros's rule); an
+    /// explicit choice is remembered either way.
+    static var developerMode: Bool {
+        get {
+            #if DEBUG
+            bool(developerModeKey, true)
+            #else
+            bool(developerModeKey, false)
+            #endif
+        }
+        set { defaults.set(newValue, forKey: developerModeKey) }
     }
 }

@@ -6,6 +6,7 @@
 //
 
 import RAVEConsole
+import RAVEHolo
 import ARKit
 import AVFAudio
 import CompositorServices
@@ -57,6 +58,12 @@ private enum PinchFire {
 // a held pinch would rapid-fire menu selections (one per frame).
 private enum MenuPinch {
     static var clicked = Set<SpatialEventCollection.Event.ID>()
+}
+
+// Pinches that landed on a palm debug panel button (a tracking area). They
+// act once, on the first .active, and never fire or click the menu.
+private enum PanelPinch {
+    static var pressed = Set<SpatialEventCollection.Event.ID>()
 }
 
 struct ImmersiveSpaceContent: CompositorContent {
@@ -138,6 +145,20 @@ struct ImmersiveSpaceContent: CompositorContent {
                 // window), and must NOT fire the weapon.
                 let menuActive = lambda_menu_active() != 0
                 for event in events {
+                    // A pinch on a palm debug panel button: the system routed
+                    // it to that tracking area, so it is the button's — not
+                    // the trigger's, not the menu's.
+                    if let control = PalmDebugPanel.Control(rawValue: event.trackingAreaIdentifier.rawValue) {
+                        if event.phase == .active {
+                            if PanelPinch.pressed.insert(event.id).inserted {
+                                PalmDebugPanel.interaction.recordPress(control.rawValue, at: CACurrentMediaTime())
+                                Task { @MainActor in appModel.gameSettings.performDebugPanelControl(control) }
+                            }
+                        } else {
+                            PanelPinch.pressed.remove(event.id)
+                        }
+                        continue
+                    }
                     switch event.phase {
                     case .active:
                         let dir = event.selectionRay.map {
@@ -212,6 +233,10 @@ extension ImmersiveSpaceContent: CompositorLayerConfiguration {
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
 
         configuration.supportsMTL4 = true
+
+        // Tracking areas: the palm debug panel's buttons get system gaze
+        // hover and pinches routed to them (RAVEHoloCompositor).
+        RAVEHoloCompositor.configureTrackingAreas(capabilities: capabilities, configuration: &configuration)
     }
 }
 

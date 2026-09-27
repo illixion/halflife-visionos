@@ -233,6 +233,13 @@ final class GameSettings {
                  Renderer.aimReticle = aimReticle.style }
     }
 
+    /// Developer mode: the palm debug panel (frame time and render toggles
+    /// over the off-hand palm while it faces you).
+    var developerMode: Bool = AppSettingsStore.developerMode {
+        didSet { AppSettingsStore.developerMode = developerMode
+                 Renderer.debugPanelEnabled = developerMode }
+    }
+
     /// Hold the weapon's viewmodel or its world model (WeaponPass).
     var weaponModel: WeaponModelStyle = AppSettingsStore.weaponModel {
         didSet { AppSettingsStore.weaponModel = weaponModel
@@ -263,7 +270,21 @@ final class GameSettings {
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style
         Renderer.weaponWorldModel = (weaponModel == .world)
+        Renderer.debugPanelEnabled = developerMode
         applyHEVHUD()
+    }
+
+    /// A pinch on one of the palm debug panel's buttons (main actor, from
+    /// the layer's spatial events). Goes through the settings so the choice
+    /// persists and the Settings window agrees.
+    func performDebugPanelControl(_ control: PalmDebugPanel.Control) {
+        switch control {
+        case .hevHUD: hevHUD.toggle()
+        case .reticle:
+            let all = AimReticle.allCases
+            aimReticle = all[(all.firstIndex(of: aimReticle).map { $0 + 1 } ?? 0) % all.count]
+        case .body: avatarBody.toggle()
+        }
     }
 
     /// A plain flag in the client and a render static, so it is safe before
