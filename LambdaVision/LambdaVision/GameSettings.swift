@@ -21,6 +21,7 @@
 //
 
 import Foundation
+import DebugTrace
 
 enum DominantHand: String, CaseIterable, Identifiable {
     case right, left
@@ -130,7 +131,7 @@ final class GameSettings {
     /// diagnostic, and a black screen on the next launch would look broken.
     var hdrTest: HDRTestPattern = .off {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
-                 AppLog.render.line("[HDR] test pattern \(hdrTest.label), thermal state \(ProcessInfo.processInfo.thermalState.label)") }
+                 AppLog.render.log("[HDR] test pattern \(hdrTest.label, privacy: .public), thermal state \(ProcessInfo.processInfo.thermalState.label, privacy: .public)") }
     }
     var gamma: Double = AppSettingsStore.gamma {
         didSet { AppSettingsStore.gamma = gamma; cvar("gamma", gamma) }

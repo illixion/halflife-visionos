@@ -30,6 +30,7 @@
 import PHASE
 import AVFAudio
 import simd
+import DebugTrace
 
 // @unchecked: all mutable state is confined to the serial control queue.
 nonisolated final class PhaseAudioEngine: @unchecked Sendable {
@@ -158,7 +159,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
         // Spatial pipeline: direct path only for now (no early reflections
         // or reverb — the game has no room geometry to feed PHASE).
         guard let pipeline = PHASESpatialPipeline(flags: [.directPathTransmission]) else {
-            AppLog.audio.line("[LambdaVision] PHASE: spatial pipeline init failed, stock sound only")
+            AppLog.audio.log("[LambdaVision] PHASE: spatial pipeline init failed, stock sound only")
             return
         }
         pipeline.entries[.directPathTransmission]?.sendLevel = 1.0
@@ -186,7 +187,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
         do {
             try engine.rootObject.addChild(listener)
         } catch {
-            AppLog.audio.line("[LambdaVision] PHASE: addChild(listener) failed (\(error)), stock sound only")
+            AppLog.audio.log("[LambdaVision] PHASE: addChild(listener) failed (\(error)), stock sound only")
             return
         }
 
@@ -199,7 +200,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
         do {
             try engine.start()
         } catch {
-            AppLog.audio.line("[LambdaVision] PHASE: engine start failed (\(error)), stock sound only")
+            AppLog.audio.log("[LambdaVision] PHASE: engine start failed (\(error)), stock sound only")
             return
         }
 
@@ -242,7 +243,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
             })
         lambda_spatial_set_callbacks(&cbs)
         running = true
-        AppLog.audio.line("[LambdaVision] PHASE spatial audio ready")
+        AppLog.audio.log("[LambdaVision] PHASE spatial audio ready")
     }
 
     private static func v3(_ p: UnsafePointer<Float>?) -> SIMD3<Float> {
@@ -325,7 +326,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
             soundAssets.insert(handle)
             return id
         } catch {
-            AppLog.audio.line("[LambdaVision] PHASE: registerSoundAsset(\(handle)) failed: \(error)")
+            AppLog.audio.log("[LambdaVision] PHASE: registerSoundAsset(\(handle, privacy: .public)) failed: \(error)")
             return nil
         }
     }
@@ -349,7 +350,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
             eventAssets.insert(id)
             return id
         } catch {
-            AppLog.audio.line("[LambdaVision] PHASE: registerSoundEventAsset(\(id)) failed: \(error)")
+            AppLog.audio.log("[LambdaVision] PHASE: registerSoundEventAsset(\(id, privacy: .public)) failed: \(error)")
             return nil
         }
     }
@@ -457,7 +458,7 @@ nonisolated final class PhaseAudioEngine: @unchecked Sendable {
         do {
             ev = try PHASESoundEvent(engine: engine, assetIdentifier: assetID, mixerParameters: mp)
         } catch {
-            AppLog.audio.line("[LambdaVision] PHASE: soundEvent(\(assetID)) create failed: \(error)")
+            AppLog.audio.log("[LambdaVision] PHASE: soundEvent(\(assetID, privacy: .public)) create failed: \(error)")
             return false
         }
         s.event = ev

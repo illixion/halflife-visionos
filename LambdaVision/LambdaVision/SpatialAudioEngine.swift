@@ -23,6 +23,7 @@
 
 import AVFAudio
 import simd
+import DebugTrace
 
 // @unchecked: all mutable state is confined to the serial control queue.
 nonisolated final class SpatialAudioEngine: @unchecked Sendable {
@@ -136,7 +137,7 @@ nonisolated final class SpatialAudioEngine: @unchecked Sendable {
         do {
             try engine.start()
         } catch {
-            AppLog.audio.line("[LambdaVision] spatial audio: engine start failed (\(error)), stock sound only")
+            AppLog.audio.log("[LambdaVision] spatial audio: engine start failed (\(error)), stock sound only")
             return
         }
 
@@ -180,7 +181,7 @@ nonisolated final class SpatialAudioEngine: @unchecked Sendable {
             })
         lambda_spatial_set_callbacks(&cbs)
         running = true
-        AppLog.audio.line("[LambdaVision] spatial audio: AVAudioEnvironmentNode ready (HRTF)")
+        AppLog.audio.log("[LambdaVision] spatial audio: AVAudioEnvironmentNode ready (HRTF)")
     }
 
     private static func v3(_ p: UnsafePointer<Float>?) -> SIMD3<Float> {
@@ -414,7 +415,7 @@ nonisolated final class SpatialAudioEngine: @unchecked Sendable {
                 return
             }
             guard let s = acquireSource() else {
-                AppLog.audio.line("[LambdaVision] spatial audio: source pool dry, dropping sound")
+                AppLog.audio.log("[LambdaVision] spatial audio: source pool dry, dropping sound")
                 return
             }
             let samples = Self.resample(sound.samples, from: sound.rate, pitch: Int(pitch))
@@ -476,7 +477,7 @@ nonisolated final class SpatialAudioEngine: @unchecked Sendable {
                 draining.append((old, old.deadline))
             }
             guard let s = acquireSource() else {
-                AppLog.audio.line("[LambdaVision] spatial audio: source pool dry, dropping sentence")
+                AppLog.audio.log("[LambdaVision] spatial audio: source pool dry, dropping sentence")
                 return
             }
             guard let buf = makeBuffer(stitched) else {

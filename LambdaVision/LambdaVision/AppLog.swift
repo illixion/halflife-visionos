@@ -3,48 +3,34 @@
 
  This app printed everything. `print()` goes to stdout, which the unified
  logging system never sees — so nothing it emitted could be read on device
- without a cable, and the in-app console would have shown an empty list forever.
- These are `os.Logger` categories instead: visible in Xcode and Console.app as
- before, and now also in the Console window.
+ without a cable. These are DebugTrace `DebugLogger` categories instead: each
+ line lands in DebugTrace's in-memory ring (the in-app console and debug traces
+ read it) and in the unified log, visible in Xcode and Console.app.
 
- `line` and `detail` take an already-interpolated `String` rather than being
- `Logger` passthroughs, because `OSLogMessage` is a compiler-special type that
- cannot travel through a wrapper function. The cost is losing os_log's lazy
- formatting; the benefit is that the ~35 former `print` call sites needed no
- rewriting of their interpolation. Both mark the payload `.public` — without it
- os_log redacts interpolated values and every line reads `<private>`.
+ Call them like `os.Logger`, marking each interpolation's privacy. Values are
+ os_log's defaults — numbers and bools public, anything else private — so
+ annotate technical strings (engine status, formats, model and bone names,
+ states) `.public`, and leave container paths and errors private. Keep
+ per-frame lines at `debug`, which is never built when nothing captures it.
  */
 
+import DebugTrace
 import Foundation
-import RAVEConsole
-import os
 
-enum AppLog {
+/// Nonisolated so any thread or actor can log: `DebugLogger` is `Sendable`.
+nonisolated enum AppLog {
     static let subsystem = Bundle.main.bundleIdentifier ?? "com.illixion.LambdaVision"
 
-    static let app = Logger(subsystem: subsystem, category: "App")
-    static let render = Logger(subsystem: subsystem, category: "Render")
-    static let input = Logger(subsystem: subsystem, category: "Input")
-    static let world = Logger(subsystem: subsystem, category: "World")
-    static let audio = Logger(subsystem: subsystem, category: "Audio")
-    static let perf = Logger(subsystem: subsystem, category: "Perf")
-}
+    static let app = DebugLogger(subsystem: subsystem, category: "App")
+    static let render = DebugLogger(subsystem: subsystem, category: "Render")
+    static let input = DebugLogger(subsystem: subsystem, category: "Input")
+    static let world = DebugLogger(subsystem: subsystem, category: "World")
+    static let audio = DebugLogger(subsystem: subsystem, category: "Audio")
+    static let perf = DebugLogger(subsystem: subsystem, category: "Perf")
 
-extension Logger {
-    /// A pre-formatted line at default level, unredacted in OSLogStore.
-    /// Only for messages with no sensitive content.
-    func line(_ message: String) {
-        self.log("\(message, privacy: .public)")
-    }
-
-    /// A verbose line that should reach the in-app console when one is open and
-    /// cost nothing when it is not.
-    ///
-    /// The unified log keeps `.debug` in a memory ring buffer only — OSLogStore
-    /// never returns it — so a plain `.debug` call is invisible in the console
-    /// however the level filter is set. Promoting to `.info` while a viewer is
-    /// registered is the way around that.
-    func detail(_ message: String) {
-        self.log(level: RAVELogStore.effectiveDebugLevel, "\(message, privacy: .public)")
+    /// Tells DebugTrace which subsystem is the app's own, for traces and the
+    /// in-app console. Called once at launch.
+    static func configureDebugTrace() {
+        DebugTrace.configure(.init(subsystems: [subsystem]))
     }
 }

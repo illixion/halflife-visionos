@@ -12,6 +12,7 @@ import AVFAudio
 import CompositorServices
 import GameController
 import SwiftUI
+import DebugTrace
 
 // Audio-session interruption recovery. visionOS interrupts the session on
 // events as mundane as closing the app's 2D window, and the matching
@@ -31,7 +32,7 @@ enum AudioSessionRecovery {
                 try? await Task.sleep(for: .seconds(1))
                 if Task.isCancelled { return }
                 if (try? AVAudioSession.sharedInstance().setActive(true)) != nil {
-                    AppLog.app.line("[LambdaVision] audio session reclaimed — restarting queue")
+                    AppLog.app.log("[LambdaVision] audio session reclaimed — restarting queue")
                     lambda_snd_activate(1)
                     return
                 }
@@ -79,7 +80,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                 appropriateFor: nil, create: true) {
                 let path = docs.appendingPathComponent("crash.log").path
                 path.withCString { lambda_set_crash_log_path($0) }
-                AppLog.app.line("[LambdaVision] crash log path: \(path)")
+                AppLog.app.log("[LambdaVision] crash log path: \(path, privacy: .private)")
             }
             // The engine's AudioQueue backend (snd_visionos.c) plays into
             // the app's audio session; without an explicitly activated
@@ -101,7 +102,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                 try session.setIntendedSpatialExperience(.bypassed)
                 try session.setActive(true)
             } catch {
-                AppLog.app.line("[LambdaVision] AVAudioSession activation failed: \(error)")
+                AppLog.app.log("[LambdaVision] AVAudioSession activation failed: \(error)")
             }
             // System interruptions (Siri, alerts, route changes) stop the
             // AudioQueue and nothing restarts it — the game goes silent
@@ -114,10 +115,10 @@ struct ImmersiveSpaceContent: CompositorContent {
                           let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
                     switch type {
                     case .began:
-                        AppLog.app.line("[LambdaVision] audio interruption began — pausing queue")
+                        AppLog.app.log("[LambdaVision] audio interruption began — pausing queue")
                         Task { @MainActor in AudioSessionRecovery.interruptionBegan() }
                     case .ended:
-                        AppLog.app.line("[LambdaVision] audio interruption ended — restarting queue")
+                        AppLog.app.log("[LambdaVision] audio interruption ended — restarting queue")
                         Task { @MainActor in AudioSessionRecovery.interruptionEnded() }
                     @unknown default:
                         break
@@ -128,7 +129,7 @@ struct ImmersiveSpaceContent: CompositorContent {
             NotificationCenter.default.addObserver(
                 forName: AVAudioSession.mediaServicesWereResetNotification,
                 object: nil, queue: .main) { _ in
-                    AppLog.app.line("[LambdaVision] media services reset — restarting audio")
+                    AppLog.app.log("[LambdaVision] media services reset — restarting audio")
                     let session = AVAudioSession.sharedInstance()
                     try? session.setCategory(.playback, options: [.mixWithOthers])
                     try? session.setActive(true)
@@ -244,6 +245,10 @@ extension ImmersiveSpaceContent: CompositorLayerConfiguration {
 struct LambdaVisionApp: App {
 
     @State private var appModel = AppModel()
+
+    init() {
+        AppLog.configureDebugTrace()
+    }
 
     var body: some Scene {
         // Single-instance launcher/settings window — we only ever want one

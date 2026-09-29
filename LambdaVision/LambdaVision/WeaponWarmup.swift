@@ -24,6 +24,7 @@
 import Foundation
 import os
 import simd
+import DebugTrace
 
 enum WeaponWarmup {
 
@@ -102,8 +103,7 @@ enum WeaponWarmup {
             }
         }
         if total > 0 { WeaponPrepCache.shared.save() }
-        AppLog.render.line(String(format: "[WeaponWarmup] %d weapons, %d fitted in %.2f s", seen, total,
-                                  Date().timeIntervalSince(t0)))
+        AppLog.render.log("[WeaponWarmup] \(seen) weapons, \(total) fitted in \(Date().timeIntervalSince(t0), format: .fixed(precision: 2)) s")
         return total
     }
 

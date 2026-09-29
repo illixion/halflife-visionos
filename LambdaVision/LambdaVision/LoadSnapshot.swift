@@ -20,6 +20,7 @@
 import CompositorServices
 import Metal
 import simd
+import DebugTrace
 
 final class LoadSnapshot {
     enum Phase {
@@ -279,7 +280,7 @@ final class LoadSnapshot {
                 out.append(Data(bytes: d.depth.contents() + eye * image, count: image))
                 try? out.write(to: dir.appendingPathComponent("snapshot-eye\(eye).bin"))
             }
-            AppLog.render.line("[LoadSnapshot] wrote debug dump to Caches/snapshot-eye0/1.bin")
+            AppLog.render.log("[LoadSnapshot] wrote debug dump to Caches/snapshot-eye0/1.bin")
         }
     }
 

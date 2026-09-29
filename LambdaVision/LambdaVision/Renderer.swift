@@ -14,6 +14,7 @@ import RAVEDiagnostics
 import RAVEHolo
 import RAVEInput
 import simd
+import DebugTrace
 
 // The 256 byte aligned size of our uniform structure
 nonisolated let alignedUniformsSize = (MemoryLayout<Uniforms>.size + 0xFF) & -0x100
@@ -71,7 +72,7 @@ enum FrameTimingStats {
             capacity: 512
         )
         profiler.onWindowClosed = { snapshot in
-            AppLog.perf.line("[FT] app(ms) " + snapshot.percentileLine(keys: order))
+            AppLog.perf.log("[FT] app(ms) \(snapshot.percentileLine(keys: order), privacy: .public)")
         }
         return profiler
     }()
@@ -724,7 +725,7 @@ actor Renderer {
                 avatarRig = try AvatarRig()
             } catch {
                 avatarRigFailed = true
-                AppLog.render.line("[Avatar] rig unavailable: \(error)")
+                AppLog.render.log("[Avatar] rig unavailable: \(error)")
             }
         }
         guard let rig = avatarRig else { return nil }
@@ -740,7 +741,7 @@ actor Renderer {
                                         hiddenBones: rig.hiddenBones(legs: legs))
                 avatarMeshLegs = legs
                 if let m = avatarMesh {
-                    AppLog.render.line("[Avatar] uploaded gen=\(gen) verts=\(m.vertexCount) submeshes=\(m.submeshes.count) textures=\(m.textures.count) legs=\(legs)")
+                    AppLog.render.log("[Avatar] uploaded gen=\(gen) verts=\(m.vertexCount) submeshes=\(m.submeshes.count) textures=\(m.textures.count) legs=\(legs, privacy: .public)")
                 }
             }
             lambda_body_unlock()
@@ -1179,7 +1180,7 @@ actor Renderer {
         pipelineDescriptor.fragmentFunction = try library?.makeFunction(
             name: fxaa ? "fragmentShaderFXAA" : "fragmentShader", constantValues: constants)
         if !fxaa {
-            AppLog.render.line("[LambdaVision] drawable colorFormat=\(format.rawValue) (\(format)) → composite dither srgb=\(srgb) lsb=\(lsb)")
+            AppLog.render.log("[LambdaVision] drawable colorFormat=\(format.rawValue) (\(format, privacy: .public)) → composite dither srgb=\(srgb) lsb=\(lsb)")
         }
         pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
         pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
@@ -1282,7 +1283,7 @@ actor Renderer {
         let workerRc = workerStatus.withUnsafeMutableBufferPointer { buf in
             lambda_gl_worker_setup(buf.baseAddress, Int32(buf.count))
         }
-        AppLog.render.line("[LambdaVision] gl-worker setup rc=\(workerRc): \(String(cString: workerStatus))")
+        AppLog.render.log("[LambdaVision] gl-worker setup rc=\(workerRc): \(String(cString: workerStatus), privacy: .public)")
 
         var devStatus = [CChar](repeating: 0, count: 384)
         let rc = devStatus.withUnsafeMutableBufferPointer { buf in
@@ -1309,8 +1310,7 @@ actor Renderer {
             w = rateMap.screenSize.width
             h = rateMap.screenSize.height
             let p0 = rateMap.physicalSize(layer: 0)
-            AppLog.render.line("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) "
-                  + "logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
+            AppLog.render.log("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
         }
         let logicalW = w
         let logicalH = h
@@ -1369,10 +1369,10 @@ actor Renderer {
                                               Int32(w), Int32(h), buf.baseAddress, Int32(buf.count))
             }
             if rc == 0 { chosen = tex; break }
-            AppLog.render.line("[LambdaVision] colorMap \(format) not renderable through ANGLE (rc=\(rc): \(String(cString: status))), falling back to 8-bit")
+            AppLog.render.log("[LambdaVision] colorMap \(format, privacy: .public) not renderable through ANGLE (rc=\(rc): \(String(cString: status), privacy: .public)), falling back to 8-bit")
         }
         let tex = chosen!
-        AppLog.render.line("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) \(tex.pixelFormat) via ANGLE")
+        AppLog.render.log("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) \(tex.pixelFormat, privacy: .public) via ANGLE")
         tex.label = "AngleColorMap"
         colorMap = tex
 
@@ -1487,12 +1487,12 @@ actor Renderer {
                     commandQueueResidencySet.addAllocations([fm, dm])
                     commandQueueResidencySet.commit()
                     #endif
-                    AppLog.render.line("[LambdaVision] FXAA + MetalFX spatial upscale \(w)x\(h) → \(logicalW)x\(logicalH)")
+                    AppLog.render.log("[LambdaVision] FXAA + MetalFX spatial upscale \(w)x\(h) → \(logicalW)x\(logicalH)")
                 }
             }
         }
         if displayMap == nil {
-            AppLog.render.line("[LambdaVision] MetalFX upscale inactive — displaying colorMap directly")
+            AppLog.render.log("[LambdaVision] MetalFX upscale inactive — displaying colorMap directly")
         }
     }
 
@@ -1529,14 +1529,14 @@ actor Renderer {
             // an uninstall/reinstall, which push-assets.sh's copy doesn't
             // survive. Don't bother calling into the engine — it will just
             // fail the same way — and tell the player how to fix it instead.
-            AppLog.render.line("[LambdaVision] GameData missing (checked Documents/GameData and the app bundle) — skipping engine init")
+            AppLog.render.log("[LambdaVision] GameData missing (checked Documents/GameData and the app bundle) — skipping engine init")
             Task { @MainActor [appModel] in
                 appModel.engineFailureMessage =
                     "Half-Life game data not found on this headset. From your Mac, run ./scripts/push-assets.sh (fetch it first with ./scripts/fetch-assets.sh if you haven't already), then relaunch."
             }
             return
         }
-        AppLog.render.line("[LambdaVision] rodir: \(rodir)")
+        AppLog.render.log("[LambdaVision] rodir: \(rodir, privacy: .private)")
         let extra = ["-dev", "2", "-console", "-noip", "-noenginemouse",
                      "-rodir", rodir, "-game", "valve",
                      "+map", "c0a0"] // tram ride (Black Mesa Inbound)
@@ -1558,7 +1558,7 @@ actor Renderer {
                 }
             }
         }
-        AppLog.render.line("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf))")
+        AppLog.render.log("[LambdaVision] Engine: rc=\(rc) \(String(cString: buf), privacy: .private)")
 
         // First-person avatar. Nothing in the engine publishes a player model
         // (you never see yourself in single-player), so load it straight off
@@ -1570,7 +1570,7 @@ actor Renderer {
         let bodyModel = rodir + "/valve/models/player/gordon/gordon.mdl"
         let bodyLoaded = bodyModel.withCString { lambda_body_load($0, 1) } != 0
         Renderer.avatarAvailable = bodyLoaded
-        AppLog.render.line("[LambdaVision] avatar model \(bodyLoaded ? "loaded" : "MISSING"): \(bodyModel)")
+        AppLog.render.log("[LambdaVision] avatar model \(bodyLoaded ? "loaded" : "MISSING", privacy: .public): \(bodyModel, privacy: .private)")
         if rc == 0 {
             // Engine + GL worker are now up, so cvar commands are safe to post.
             // Flush the archived Graphics/Audio/Input cvars and enable live pushes.
@@ -1785,8 +1785,7 @@ actor Renderer {
                 headBaselineYaw = nil
                 headBaselinePos = nil
                 Renderer.aimDiag.nRecenter += 1
-                AppLog.render.line("[LambdaVision] recenter: re-anchoring head baseline "
-                    + "(#\(Renderer.aimDiag.nRecenter))")
+                AppLog.render.log("[LambdaVision] recenter: re-anchoring head baseline (#\(Renderer.aimDiag.nRecenter))")
             }
 
             if headBaselineYaw == nil {
@@ -2144,10 +2143,9 @@ actor Renderer {
         if case .holding(let since) = loadSnapshot.phase {
             if lambda_engine_loading() == 0 && lambda_gl_worker_busy() == 0 {
                 loadSnapshot.release(now: ftEyesStart)
-                AppLog.render.line(String(format: "[LambdaVision] load held %.0f ms",
-                                          (ftEyesStart - since) * 1000))
+                AppLog.render.log("[LambdaVision] load held \((ftEyesStart - since) * 1000, format: .fixed(precision: 0)) ms")
             } else if ftEyesStart - since > LoadSnapshot.maxHoldSeconds {
-                AppLog.render.line("[LambdaVision] load still running after \(Int(LoadSnapshot.maxHoldSeconds)) s — waiting on the engine again")
+                AppLog.render.log("[LambdaVision] load still running after \(Int(LoadSnapshot.maxHoldSeconds)) s — waiting on the engine again")
                 loadSnapshot.drop()
                 snapshotRearmBlocked = true
             } else {
@@ -2227,7 +2225,7 @@ actor Renderer {
                 }
             }
             if rc != 0 {
-                AppLog.render.line("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
+                AppLog.render.log("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
             }
         }
 
@@ -2804,7 +2802,7 @@ actor Renderer {
     func renderLoop() {
         while true {
             if layerRenderer.state == .invalidated {
-                AppLog.render.line("Layer is invalidated")
+                AppLog.render.log("Layer is invalidated")
                 // Persist binds/cvars while the engine is still up (visionOS
                 // may kill us without a clean Host_Shutdown).
                 _ = "host_writeconfig".withCString { lambda_gl_worker_cmd($0) }

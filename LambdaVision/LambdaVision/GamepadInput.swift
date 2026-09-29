@@ -16,12 +16,13 @@
 
 import GameController
 import RAVEInput
+import DebugTrace
 
 nonisolated final class GamepadInput {
     nonisolated(unsafe) static let shared = GamepadInput()
 
     private let source = RAVEGamepadSource { controller in
-        AppLog.input.line("[LambdaVision] gamepad connected: \(controller.vendorName ?? "unknown")")
+        AppLog.input.log("[LambdaVision] gamepad connected: \(controller.vendorName ?? "unknown", privacy: .public)")
     }
 
     // Rising/falling edge state, keyed by command name.

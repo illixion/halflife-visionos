@@ -30,6 +30,7 @@ import Metal
 import CompositorServices
 import QuartzCore
 import simd
+import DebugTrace
 
 final class WeaponPass {
     /// UI arc drawn at the tail of the weapon pass: a world-anchored arc
@@ -378,7 +379,7 @@ final class WeaponPass {
         self.handBone = matrix_identity_float4x4
         self.uploadedGeneration = gen
 
-        AppLog.render.line("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none") hold=\(hold) muzzle=\(muzzle.map { "\($0)" } ?? "none")")
+        AppLog.render.log("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none", privacy: .public) hold=\(hold, privacy: .public) muzzle=\(muzzle.map { "\($0)" } ?? "none", privacy: .public)")
     }
 
     /// If a new world model was baked, upload it and lay it out in its hand.
@@ -397,7 +398,7 @@ final class WeaponPass {
         worldKey = WeaponWarmup.key(of: raw)
         worldMesh = layout == nil ? nil : StudioMesh(device: device, mesh: raw, generation: gen, label: "WeaponWorld")
         world = layout
-        AppLog.render.line("[WeaponPass] world model gen=\(gen) verts=\(worldMesh?.vertexCount ?? 0) hold=\(layout.map { "\($0.hold)" } ?? "none (no right hand)") muzzle=\(layout?.muzzle.map { "\($0)" } ?? "none")")
+        AppLog.render.log("[WeaponPass] world model gen=\(gen) verts=\(worldMesh?.vertexCount ?? 0) hold=\(layout.map { "\($0.hold)" } ?? "none (no right hand)", privacy: .public) muzzle=\(layout?.muzzle.map { "\($0)" } ?? "none", privacy: .public)")
     }
 
     /// Look up the toe-in when the viewmodel or its world model changes;
@@ -426,7 +427,7 @@ final class WeaponPass {
             WeaponPrepCache.shared.save()
             let ms = Int((CACurrentMediaTime() - t0) * 1000)
             Task { @MainActor in
-                AppLog.render.line(String(format: "[WeaponPass] toe-in %+.1f° fitted on first sight in %d ms (not warmed up)", yaw * 180 / .pi, ms))
+                AppLog.render.log("[WeaponPass] toe-in \(String(format: "%+.1f", yaw * 180 / .pi), privacy: .public)° fitted on first sight in \(ms) ms (not warmed up)")
             }
         }
     }

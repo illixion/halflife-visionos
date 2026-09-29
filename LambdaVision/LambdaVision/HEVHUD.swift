@@ -32,6 +32,7 @@ import Metal
 import RAVEHolo
 import os
 import simd
+import DebugTrace
 
 nonisolated final class HEVHUD: @unchecked Sendable {
     /// One arm as the HUD anchors to it, Apple world metres.
@@ -70,7 +71,7 @@ nonisolated final class HEVHUD: @unchecked Sendable {
             let font = RAVEHoloFont()
             fontLock.withLock { $0 = font }
             Task { @MainActor in
-                AppLog.render.line("[HEVHUD] glyph atlas \(font.width)×\(font.height), font \(font.fontName)")
+                AppLog.render.log("[HEVHUD] glyph atlas \(font.width)×\(font.height), font \(font.fontName, privacy: .public)")
             }
         }
     }()
@@ -118,7 +119,7 @@ nonisolated final class HEVHUD: @unchecked Sendable {
         } catch {
             rendererFailed = true
             let message = "\(error)"
-            Task { @MainActor in AppLog.render.line("[HEVHUD] renderer failed: \(message)") }
+            Task { @MainActor in AppLog.render.log("[HEVHUD] renderer failed: \(message)") }
         }
         return renderer
     }
