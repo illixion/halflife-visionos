@@ -13,6 +13,7 @@
 		AA12000000000000000000C3 /* RAVEHolo in Frameworks */ = {isa = PBXBuildFile; productRef = AA12000000000000000000C2 /* RAVEHolo */; };
 		AA09000000000000000000F3 /* RAVEConsole in Frameworks */ = {isa = PBXBuildFile; productRef = AA09000000000000000000F2 /* RAVEConsole */; };
 		AA13000000000000000000D3 /* DebugTrace in Frameworks */ = {isa = PBXBuildFile; productRef = AA13000000000000000000D2 /* DebugTrace */; };
+		BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */ = {isa = PBXBuildFile; productRef = FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,6 +69,7 @@
 				AA09000000000000000000F3 /* RAVEConsole in Frameworks */,
 				AA12000000000000000000C3 /* RAVEHolo in Frameworks */,
 				AA13000000000000000000D3 /* DebugTrace in Frameworks */,
+				BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -137,6 +139,7 @@
 				AA11000000000000000000B2 /* RAVERig */,
 				AA12000000000000000000C2 /* RAVEHolo */,
 				AA13000000000000000000D2 /* DebugTrace */,
+				FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */,
 			);
 			productName = LambdaVision;
 			productReference = 1DB96E8A2FB0522300F1ADA2 /* LambdaVision.app */;
@@ -651,6 +654,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA13000000000000000000D1 /* XCLocalSwiftPackageReference "../../DebugTrace" */;
 			productName = DebugTrace;
+		};
+		FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA13000000000000000000D1 /* XCLocalSwiftPackageReference "../../DebugTrace" */;
+			productName = DebugTraceServer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
