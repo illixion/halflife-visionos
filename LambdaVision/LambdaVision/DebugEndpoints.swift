@@ -154,11 +154,10 @@ enum LambdaDebugServer {
     static let checkInterval: Duration = .seconds(5)
 
     private static func makeServer(ports range: ClosedRange<UInt16>) -> DebugTraceServer {
-        // .custom: DebugTrace's default alert needs a frontmost UIKit window,
-        // which the immersive space lacks (DebugApprovalWindow).
-        DebugTraceServer(configuration: .init(
-            ports: range,
-            approval: .custom { await DebugApprovalCenter.shared.ask($0) }))
+        // The default `.ask` prompts in DebugTraceUI's DebugApprovalWindow
+        // (LambdaVisionApp): over the immersive space there is no UIKit window
+        // for a system alert.
+        DebugTraceServer(configuration: .init(ports: range))
     }
 
     private static func start(reason: String) {

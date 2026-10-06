@@ -13,6 +13,7 @@ import CompositorServices
 import GameController
 import SwiftUI
 import DebugTrace
+import DebugTraceUI
 
 // Audio-session interruption recovery. visionOS interrupts the session on
 // events as mundane as closing the app's 2D window, and the matching
@@ -293,7 +294,7 @@ struct LambdaVisionApp: App {
         Window("Lambda VisionPro", id: "main") {
             ContentView()
                 .environment(appModel)
-                .capturesDebugApprovalActions()
+                .debugApprovalPrompts()
                 // Route gamepad input to the app instead of system focus
                 // navigation — without this, polled GCController values
                 // freeze after a stick release (a known GCController quirk).
@@ -312,7 +313,7 @@ struct LambdaVisionApp: App {
         Window("Console", id: "console") {
             RAVEConsoleScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
-                .capturesDebugApprovalActions()
+                .debugApprovalPrompts()
         }
         .defaultLaunchBehavior(.suppressed)
 
@@ -321,18 +322,14 @@ struct LambdaVisionApp: App {
         Window("Performance", id: "performance") {
             PerformanceHUDScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
-                .capturesDebugApprovalActions()
+                .debugApprovalPrompts()
         }
         .defaultLaunchBehavior(.suppressed)
 
-        // DebugTrace's "Allow debug access?" prompt, opened by the server's
-        // approval handler (DebugApprovalWindow): over the immersive space
-        // there is no UIKit window for DebugTrace's own alert.
-        Window("Debug Access", id: DebugApprovalCenter.windowID) {
-            DebugApprovalView()
-        }
-        .windowResizability(.contentSize)
-        .defaultLaunchBehavior(.suppressed)
+        // DebugTrace's "Allow debug access?" prompt, which the server opens
+        // itself: over the immersive space there is no UIKit window for a
+        // system alert.
+        DebugApprovalWindow()
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
