@@ -4348,3 +4348,40 @@ int lambda_gl_worker_tick_async_after(void *mtl_shared_event, unsigned long long
     pthread_mutex_unlock(&g_w_api_mtx);
     return posted;
 }
+
+// ---- Debug server reads (DebugEndpoints) ----------------------------------
+// The leading fields of the engine's ref_globals_t (engine/ref_api.h): the
+// renderer's view of the frame, a data symbol of libxash. Only this prefix is
+// read; the layout is the public ref API's and has been stable across fwgs.
+struct lambda_ref_globals_prefix {
+    int   developer;
+    int   width, height;
+    int   window_mode;
+    int   wideScreen;
+    float vieworg[3];
+    float viewangles[3];
+};
+extern struct lambda_ref_globals_prefix refState;
+
+int lambda_debug_view(float origin_out[3], float angles_out[3]) {
+    if (!g_engine_inited) return 0;
+    for (int i = 0; i < 3; i++) {
+        origin_out[i] = refState.vieworg[i];
+        angles_out[i] = refState.viewangles[i];
+    }
+    return 1;
+}
+
+int lambda_debug_cvar(const char *name, char *out, int cap) {
+    extern void *Cvar_FindVar(const char *name);
+    extern const char *Cvar_VariableString(const char *name);
+    if (cap > 0) out[0] = 0;
+    if (!g_engine_inited || !name || cap <= 0 || !Cvar_FindVar(name)) return 0;
+    snprintf(out, (size_t)cap, "%s", Cvar_VariableString(name));
+    return 1;
+}
+
+int lambda_debug_in_game(void) {
+    extern int CL_IsInGame(void);
+    return g_engine_inited ? CL_IsInGame() : 0;
+}

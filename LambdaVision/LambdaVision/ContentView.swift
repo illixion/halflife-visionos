@@ -16,6 +16,7 @@ struct ContentView: View {
 
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
+    @Environment(\.openImmersiveSpace) private var openImmersiveSpace
 
     @State private var showSettings = false
     @State private var showImporter = false
@@ -134,7 +135,16 @@ struct ContentView: View {
             .onAppear { runSmokeTests() }
             // Library scan + weapon warm-up; rerun the warm-up when the
             // selection or the installed games change before the game starts.
-            .task { await appModel.prepare() }
+            .task {
+                // The debug API (DebugEndpoints); this window owns the
+                // immersive-space actions its `immersive` command drives.
+                DebugEndpoints.register(appModel: appModel,
+                                        openImmersive: { [openImmersiveSpace, appModel] in
+                                            await openImmersiveSpace(id: appModel.immersiveSpaceID) == .opened
+                                        },
+                                        dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() })
+                await appModel.prepare()
+            }
             .onChange(of: appModel.library.selectionVersion) { Task { await appModel.warmUp() } }
             .onChange(of: appModel.library.scanVersion) { Task { await appModel.warmUp() } }
             // Zips (AirDrop'd or in Files) and unpacked folders.

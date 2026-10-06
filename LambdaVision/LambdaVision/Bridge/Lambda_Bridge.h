@@ -524,6 +524,21 @@ int lambda_gl_smoke_test(char *status_out, int status_cap);
 int lambda_gl_worker_probe_target(void *mtl_texture, int width, int height,
                                   char *status_out, int status_cap);
 
+// ---- Debug server reads (DebugEndpoints) ----
+// Read from the main thread while the GL worker runs: values can be a frame
+// stale or torn, which is fine for a debug readout. All are no-ops (return
+// 0 / empty) before the engine has initialised.
+
+// The camera the engine last rendered (refState.vieworg / viewangles): the
+// last eye's view origin in world units and pitch/yaw/roll in degrees.
+// Returns 1 when the engine is up, 0 otherwise.
+int lambda_debug_view(float origin_out[3], float angles_out[3]);
+// A cvar's value as a string. Returns 1 if the cvar exists, 0 if not (or
+// before init); out gets "" then.
+int lambda_debug_cvar(const char *name, char *out, int cap);
+// 1 while a map is loaded and the client is in it (CL_IsInGame).
+int lambda_debug_in_game(void);
+
 #ifdef __cplusplus
 }
 #endif
