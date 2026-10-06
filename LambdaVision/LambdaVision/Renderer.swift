@@ -2317,7 +2317,8 @@ actor Renderer {
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
         var gripFingers: [String: simd_quatf]? = nil
-        if weaponActive, let grip = weaponPass.grip, !weaponPass.palette.isEmpty {
+        let flatViewmodel = weaponPass.drawsFlat && !weaponPass.showsWorldModel
+        if weaponActive, !flatViewmodel, let grip = weaponPass.grip, !weaponPass.palette.isEmpty {
             gripFingers = ViewmodelGrip.fingerPose(boneNames: weaponPass.boneNames,
                                                    palette: weaponPass.palette, grip: grip,
                                                    handIsLeft: Renderer.dominantHandIsLeft)
@@ -2329,7 +2330,8 @@ actor Renderer {
         // hand and sleeve are cut, and the gun alone goes into the avatar's
         // hand. Without a grip there is nothing to pin the gun by, so the
         // viewmodel keeps its hands.
-        weaponPass.hideHands = body != nil && weaponPass.grip != nil
+        // A viewmodel drawn flat (WeaponPass.drawsFlat) keeps its own hands.
+        weaponPass.hideHands = body != nil && weaponPass.grip != nil && !flatViewmodel
 
         // HEV holograms: ammo by the gun hand (only while a weapon is out),
         // vitals over the off-hand forearm.
@@ -2641,7 +2643,13 @@ actor Renderer {
                 handWorld.columns.2 = SIMD4<Float>(fwd, 0)
                 handWorld.columns.3 = SIMD4<Float>(hand.worldGrip, 1)
 
-                if let grip = weaponPass.heldGrip {
+                if flatViewmodel {
+                    // A viewmodel the hand can't hold (a mod's, with no grip
+                    // the rules can read): the stock flat way, locked to the
+                    // head as it was authored in view space, rather than a
+                    // gun floating off the palm.
+                    model = anchorM * studioToWorld
+                } else if let grip = weaponPass.heldGrip {
                     // Hold the viewmodel (or the world model, laid out the
                     // same way — see ViewmodelGrip.worldLayout) in a Bip01 hand frame — the avatar's
                     // posed hand when the body is drawn (so the gun stays in

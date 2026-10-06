@@ -137,6 +137,9 @@ final class WeaponPass {
     /// The muzzle in idle model space (GoldSrc units), nil when the model
     /// has neither an attachment nor gun geometry to find one from.
     private(set) var muzzle: SIMD3<Float>?
+    /// The viewmodel can't be held by the hand (ViewmodelGrip.canAnchorInHand):
+    /// draw it the stock flat way, locked to the head, with its own hands.
+    private(set) var drawsFlat = false
 
     // Bone table of the uploaded model and the index of its grip hand bone
     // ("Bip01 R Hand"; -1 when the model has none — then handBone stays
@@ -371,6 +374,8 @@ final class WeaponPass {
             attachment: StudioMesh.attachments(of: raw).first, idlePalette: idle, gunPoints: gunPoints)
         self.gunCorners = WeaponWarmup.viewmodelCorners(raw, idle: idle)
         self.viewmodelKey = WeaponWarmup.key(of: raw)
+        self.drawsFlat = !ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: idle,
+                                                        gunVertexCount: gunOnly?.vertexCount ?? 0)
         self.reloadSequences = [:]
         for (i, q) in StudioMesh.sequences(of: raw).enumerated() where q.label.lowercased().contains("reload") {
             reloadSequences[i] = q.frames
@@ -379,7 +384,7 @@ final class WeaponPass {
         self.handBone = matrix_identity_float4x4
         self.uploadedGeneration = gen
 
-        AppLog.render.log("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none", privacy: .public) hold=\(hold, privacy: .public) muzzle=\(muzzle.map { "\($0)" } ?? "none", privacy: .public)")
+        AppLog.render.log("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none", privacy: .public) hold=\(hold, privacy: .public) muzzle=\(muzzle.map { "\($0)" } ?? "none", privacy: .public)\(drawsFlat ? " → flat viewmodel (can't anchor in the hand)" : "", privacy: .public)")
     }
 
     /// If a new world model was baked, upload it and lay it out in its hand.

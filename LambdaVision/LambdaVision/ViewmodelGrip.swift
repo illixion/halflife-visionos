@@ -33,10 +33,17 @@ enum ViewmodelGrip {
     /// `GLOVED_sleeve`, `xbow_sleeve`, `HAND_ForeArm1`, the MP5's `PLAYER_*`
     /// set, and the HD pack's `gordon_glove` / `gordon_sleeve`), and no gun
     /// texture uses those words.
+    ///
+    /// The expansions' hands are named by whole texture name instead: Opposing
+    /// Force's `hand` / `skin` / `fatigues`, its HD pack's `soldier_hand`, and
+    /// Blue Shift's `barney_hand` (its `sleeve` already matches). Never a
+    /// substring — `handle` and `v_9mmhandgun`'s textures are gun.
     static func isHandTexture(_ name: String) -> Bool {
         let n = name.lowercased()
+        let stem = n.split(separator: ".").first.map(String.init) ?? n
         return n.hasPrefix("player_")
             || ["glove", "sleeve", "forearm", "cuff", "handpak", "knuckle"].contains { n.contains($0) }
+            || ["hand", "skin", "fatigues"].contains(stem) || stem.hasSuffix("_hand")
     }
 
     /// Whether a bone belongs to an arm: clavicle, upper arm, forearm, hand
@@ -199,6 +206,24 @@ enum ViewmodelGrip {
         z = simd_normalize(z) * (isLeft ? -1 : 1)
         let y = simd_cross(z, x)
         return float4x4(columns: (SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(origin, 1)))
+    }
+
+    // MARK: - Whether the hand can hold it at all
+
+    /// Whether a viewmodel can be anchored in the hand, or has to be drawn
+    /// the stock flat way (locked to the head, as authored in view space).
+    ///
+    /// Deliberately narrow, so Half-Life's own weapons keep their hold:
+    /// every stock and HD v_ model has a grip, an idle pose and gun geometry
+    /// left after the hand cut (the probe checks all three). What fails is a
+    /// mod's viewmodel the grip rules can't read: no hand bone, no finger
+    /// chains and no bare root to wear (`grip == nil` — the old fallback
+    /// pinned its origin to the palm, which floats the gun anywhere), no
+    /// idle pose to place it from, or a hand cut that leaves nothing of the
+    /// gun while the body's hands would replace the viewmodel's.
+    static func canAnchorInHand(grip: Grip?, idlePalette: [float4x4], gunVertexCount: Int) -> Bool {
+        guard let grip, !idlePalette.isEmpty, grip.bone < idlePalette.count else { return false }
+        return gunVertexCount > 0
     }
 
     // MARK: - Placing the gun
