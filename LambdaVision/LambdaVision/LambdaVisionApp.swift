@@ -262,6 +262,8 @@ struct LambdaVisionApp: App {
                 // navigation — without this, polled GCController values
                 // freeze after a stick release (a known GCController quirk).
                 .handlesGameControllerEvents(matching: .gamepad)
+                // "Open in LambdaVision" (AirDrop, Files, Share): a game zip.
+                .onOpenURL { url in appModel.library.open(url) }
         }
 
         // In-app log viewer. This app renders through CompositorServices and

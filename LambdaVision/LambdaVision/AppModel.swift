@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import GameLibrary
 
 /// Maintains app-wide state
 @MainActor
@@ -40,14 +41,36 @@ class AppModel {
     var isPreparing = true
     var preparationProgress = (done: 0, total: 0)
 
-    /// Runs the warm-up once. Called when the main window first appears.
+    /// The installed games and imports (GameLibraryStore).
+    let library = GameLibraryStore()
+
+    /// At launch: rescan the library (normalizing what changed), then warm
+    /// up the selected game. Called when the main window first appears.
     func prepare() async {
-        guard isPreparing else { return }
-        if let dir = GameData.directory {
-            await WeaponWarmup.run(gameDirectory: dir) { [weak self] done, total in
+        await library.refresh()
+        await warmUp()
+    }
+
+    // The game + library scan the warm-up last ran for; it reruns when the
+    // selection or the installed files change before the game starts.
+    private var warmedFor: String?
+    private var warming = false
+
+    /// Runs the warm-up for the selected game unless it already has. Not
+    /// once the engine runs: the game can't change until the next launch.
+    func warmUp() async {
+        guard !warming else { return }   // the running loop picks up changes
+        warming = true
+        defer { warming = false; isPreparing = false }
+        while GameData.runningGame == nil, let dir = GameData.directory, let game = library.selectedGame {
+            let key = game.gamedir + "#\(library.scanVersion)"
+            if key == warmedFor { break }
+            isPreparing = true
+            preparationProgress = (0, 0)
+            await WeaponWarmup.run(gameDirectory: dir, game: game) { [weak self] done, total in
                 self?.preparationProgress = (done, total)
             }
+            warmedFor = key
         }
-        isPreparing = false
     }
 }

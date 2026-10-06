@@ -31,6 +31,7 @@ import CompositorServices
 import QuartzCore
 import simd
 import DebugTrace
+import GameLibrary
 
 final class WeaponPass {
     /// UI arc drawn at the tail of the weapon pass: a world-anchored arc
@@ -414,7 +415,8 @@ final class WeaponPass {
             yawCorrection = 0
             return
         }
-        let key = viewmodelKey + "|" + worldKey
+        let key = WeaponWarmup.prepKey(gamedir: GameData.runningGame?.gamedir ?? "valve",
+                                       viewmodel: viewmodelKey, world: worldKey)
         if key == alignKey { return }
         if let yaw = WeaponPrepCache.shared.yaw(for: key) {
             alignKey = key

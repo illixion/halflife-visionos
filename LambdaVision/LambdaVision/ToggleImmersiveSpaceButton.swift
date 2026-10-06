@@ -56,9 +56,10 @@ struct ToggleImmersiveSpaceButton: View {
                 Text(appModel.immersiveSpaceState == .open ? "Hide Immersive Space" : "Show Immersive Space")
             }
         }
-        // Wait for the warm-up (AppModel.prepare) before the game starts.
-        .disabled(appModel.immersiveSpaceState == .inTransition || appModel.isPreparing)
-        .task { await appModel.prepare() }
+        // Wait for the warm-up (AppModel.prepare, run by ContentView) and
+        // any import before the game starts.
+        .disabled(appModel.immersiveSpaceState == .inTransition || appModel.isPreparing
+                  || appModel.library.isImporting)
         .animation(.none, value: 0)
         .fontWeight(.semibold)
     }

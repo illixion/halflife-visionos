@@ -13,8 +13,8 @@
 //  model under the game's model directories is baked from disk exactly as
 //  the weapon slots will bake it, the pairs are fitted in parallel, and the
 //  results are kept in `WeaponPrepCache` under a key both sides compute from
-//  the baked mesh. The cache is written to disk, so a later launch only bakes
-//  (milliseconds) and fits nothing it has seen before.
+//  the gamedir and the baked mesh. The cache is written to disk, so a later
+//  launch only bakes (milliseconds) and fits nothing it has seen before.
 //
 //  A weapon the warm-up did not see (another mod's models, a bodygroup other
 //  than the default) still works: the weapon pass fits it in the background
@@ -25,6 +25,7 @@ import Foundation
 import os
 import simd
 import DebugTrace
+import GameLibrary
 
 enum WeaponWarmup {
 
@@ -33,6 +34,12 @@ enum WeaponWarmup {
     /// warm-up baked it.
     static func key(of mesh: lambda_weapon_mesh_t) -> String {
         "\(mesh.vertex_count).\(mesh.index_count).\(mesh.bone_count)"
+    }
+
+    /// The cache key of a viewmodel + world model pair, per gamedir: a mod's
+    /// gun can share a stock gun's mesh shape and still sit differently.
+    static func prepKey(gamedir: String, viewmodel: String, world: String) -> String {
+        gamedir.lowercased() + "/" + viewmodel + "|" + world
     }
 
     /// The viewmodel's gun as triangle corners in its idle model space — the
@@ -62,25 +69,29 @@ enum WeaponWarmup {
         return (layout, StudioMesh.posedPoints(of: raw, palette: layout.palette) { _, _, _, _ in true })
     }
 
-    /// Bakes every v_/p_ pair under the game's model directories and fits
-    /// the ones the cache does not already hold. `progress` gets (done,
-    /// total) on the main actor. Returns how many pairs were fitted fresh.
+    /// Bakes every v_/p_ pair under the game's model directories (its
+    /// content chain, GameData.modelDirectories) and fits the ones the cache
+    /// does not already hold. A v_ model pairs with the p_ model of the same
+    /// name, matched case-insensitively, from its own dir or any later one
+    /// in the chain. `progress` gets (done, total) on the main actor.
+    /// Returns how many pairs were fitted fresh.
     @discardableResult
-    static func run(gameDirectory: String, progress: @escaping (Int, Int) -> Void) async -> Int {
+    static func run(gameDirectory: String, game: GameEntry, progress: @escaping (Int, Int) -> Void) async -> Int {
         let t0 = Date()
         var jobs: [(key: String, gun: [SIMD3<Float>], world: [SIMD3<Float>])] = []
         var seen = 0
-        for dir in GameData.modelDirectories(in: gameDirectory) {
+        let dirs = GameData.modelDirectories(for: game, in: gameDirectory)
+        for (i, dir) in dirs.enumerated() {
             let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
-            for v in files where v.hasPrefix("v_") && v.hasSuffix(".mdl") {
+            for v in files where v.lowercased().hasPrefix("v_") && v.lowercased().hasSuffix(".mdl") {
                 let p = "p_" + v.dropFirst(2)
-                guard files.contains(p),
+                guard let pPath = PathResolver.shared.firstMatch(p, in: Array(dirs[i...])),
                       let viewmodel = bake(dir + "/" + v, corners: { viewmodelCorners($0, idle: $1) }),
                       !viewmodel.corners.isEmpty,
-                      let world = bake(dir + "/" + p, corners: { worldLayout($0, restPose: $1).corners }),
+                      let world = bake(pPath, corners: { worldLayout($0, restPose: $1).corners }),
                       !world.corners.isEmpty else { continue }
                 seen += 1
-                let key = viewmodel.key + "|" + world.key
+                let key = prepKey(gamedir: game.gamedir, viewmodel: viewmodel.key, world: world.key)
                 if WeaponPrepCache.shared.yaw(for: key) == nil {
                     jobs.append((key, viewmodel.corners, world.corners))
                 }
@@ -103,7 +114,7 @@ enum WeaponWarmup {
             }
         }
         if total > 0 { WeaponPrepCache.shared.save() }
-        AppLog.render.log("[WeaponWarmup] \(seen) weapons, \(total) fitted in \(Date().timeIntervalSince(t0), format: .fixed(precision: 2)) s")
+        AppLog.render.log("[WeaponWarmup] \(dirs.count) model dirs, \(seen) weapons, \(total) fitted in \(Date().timeIntervalSince(t0), format: .fixed(precision: 2)) s")
         return total
     }
 
@@ -130,7 +141,7 @@ nonisolated final class WeaponPrepCache: Sendable {
     static let shared = WeaponPrepCache()
 
     /// Bump whenever the fit or its inputs change, to drop stale results.
-    private static let version = 1
+    private static let version = 2   // 2: keys carry the gamedir
     private let yaws = OSAllocatedUnfairLock<[String: Float]>(initialState: [:])
     private let url: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
         .appendingPathComponent("weapon-prep-v\(version).json")
