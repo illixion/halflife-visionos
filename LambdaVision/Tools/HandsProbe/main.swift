@@ -1,5 +1,5 @@
 // Drives the app's hand-gesture logic on the Mac: WeaponWheel.swift,
-// JumpSequencer.swift and HUDIcon.swift are compiled verbatim (build.sh), so
+// JumpSequencer.swift, ThumbGestures.swift and HUDIcon.swift are compiled verbatim (build.sh), so
 // what passes here is what the app runs. Exits non-zero on the first failure.
 
 import Foundation
@@ -188,6 +188,187 @@ do {
     _ = s.update(jump: true, intent: 0, groundSpeed: 0, hasModule: false, now: 0.05, tuning: JumpSequencer.Tuning())
     check(s.kind == .longJump, "latched at the start")
     print("long jump timing: ok")
+}
+
+// MARK: Thumb gestures (reload vs alt-fire)
+
+// A synthetic right hand in a finger gun, metres, in the hand's own frame:
+// +z along the fingers, -x toward the thumb (the index sits on top in a gun
+// grip), -y out of the palm (the curled fingers fold that way). Joint
+// positions follow the ARKit names; the thumb tip is the only joint that
+// moves between poses (and the index tip, for the fist).
+struct FingerGun {
+    var wrist = SIMD3<Float>(0, 0, 0)
+    var idxK = SIMD3<Float>(-0.025, 0, 0.090)
+    var idxTip = SIMD3<Float>(-0.025, 0, 0.175)          // extended
+    var midK = SIMD3<Float>(-0.005, 0, 0.095)
+    var midPIP = SIMD3<Float>(-0.005, -0.045, 0.095)     // proximal phalanx folds palmward
+    var midDIP = SIMD3<Float>(-0.005, -0.045, 0.070)     // middle phalanx back toward the wrist
+    var thumbTip = SIMD3<Float>(-0.080, -0.010, 0.070)   // cocked up above the index
+
+    static let rest = SIMD3<Float>(-0.080, -0.010, 0.070)
+    static let reloadCurl = SIMD3<Float>(-0.035, -0.012, 0.080)  // down onto the index base
+    static let middleSide = SIMD3<Float>(-0.028, -0.042, 0.088)  // on the middle finger by the PIP
+
+    func input(radialOffset: Float = 0.008) -> ThumbGestures.Input {
+        let palm = simd_distance(midK, wrist)
+        let c = ThumbContact.measure(thumbTip: thumbTip, knuckle: midK, intermediateBase: midPIP,
+                                     intermediateTip: midDIP, towardIndex: idxK, radialOffset: radialOffset)
+        return ThumbGestures.Input(indexExt: simd_distance(idxTip, idxK) / palm,
+                                   thumbExt: simd_distance(thumbTip, idxK) / palm,
+                                   contact: c.distance, along: c.along,
+                                   thumbToIndexTip: simd_distance(thumbTip, idxTip))
+    }
+}
+
+do {
+    let dt = 1.0 / 90
+    let tune = ThumbGestures.Tuning()
+    // Contact geometry.
+    let (d0, s0) = ThumbContact.segment(SIMD3(1, 1, 0), .zero, SIMD3(2, 0, 0))
+    check(abs(d0 - 1) < 1e-5 && abs(s0 - 0.5) < 1e-5, "segment distance")
+    var hand = FingerGun()
+    let rest = hand.input()
+    check(rest.thumbExt > tune.thumbCurlOff, "rest: thumb reads extended (\(rest.thumbExt))")
+    check(rest.indexExt > tune.indexExtended, "rest: index extended (\(rest.indexExt))")
+    hand.thumbTip = FingerGun.reloadCurl
+    let curl = hand.input()
+    check(curl.thumbExt < tune.thumbCurlOn, "reload curl reads curled (\(curl.thumbExt))")
+    check(curl.along < tune.minAlong || curl.contact > tune.contactOff,
+          "reload curl is off the middle finger's contact zone (d \(curl.contact) along \(curl.along))")
+    hand.thumbTip = FingerGun.middleSide
+    let side = hand.input()
+    check(side.contact < tune.contactOn && side.along >= tune.minAlong,
+          "thumb on the middle finger's side is contact (d \(side.contact) along \(side.along))")
+    check(side.thumbExt < tune.thumbCurlOn, "…and also reads as a reload curl, so the veto matters")
+    check(side.thumbToIndexTip > tune.pinchGuard, "…and is clear of the index tip")
+    // The radial side, not the centre line: the same tip on the far (little
+    // finger) side of the middle finger is farther than on the thumb side.
+    let farSide = ThumbContact.measure(thumbTip: SIMD3(0.024, -0.042, 0.088), knuckle: hand.midK,
+                                       intermediateBase: hand.midPIP, intermediateTip: hand.midDIP,
+                                       towardIndex: hand.idxK, radialOffset: 0.008)
+    check(farSide.distance > tune.contactOff, "the middle finger's far side doesn't count")
+
+    // Drive a timeline of thumb positions; record what fired.
+    struct Run { var alt = false, reload = false, maxRing: Float = 0, altFrames = 0, states: Set<String> = [] }
+    func drive(_ g: inout ThumbGestures, _ frames: [ThumbGestures.Input?], t0: inout Double,
+               tuning: ThumbGestures.Tuning = tune) -> Run {
+        var r = Run()
+        for f in frames {
+            g.update(f, now: t0, tuning: tuning)
+            t0 += dt
+            r.alt = r.alt || g.altFire
+            r.reload = r.reload || g.reload
+            r.maxRing = max(r.maxRing, g.reloadRing)
+            if g.altFire { r.altFrames += 1 }
+            r.states.insert(g.altState.rawValue)
+        }
+        return r
+    }
+    func at(_ p: SIMD3<Float>, index: SIMD3<Float>? = nil) -> ThumbGestures.Input {
+        var h = FingerGun(); h.thumbTip = p
+        if let i = index { h.idxTip = i }
+        return h.input()
+    }
+    func path(_ a: SIMD3<Float>, _ b: SIMD3<Float>, seconds: Double) -> [ThumbGestures.Input?] {
+        let n = max(1, Int(seconds / dt))
+        return (0...n).map { at(a + (b - a) * Float($0) / Float(n)) }
+    }
+    func hold(_ p: SIMD3<Float>, _ seconds: Double) -> [ThumbGestures.Input?] {
+        Array(repeating: at(p), count: Int(seconds / dt))
+    }
+
+    // 1. Reload held well past its time: reload fires once, alt-fire never.
+    var g = ThumbGestures(); var t = 0.0
+    var r = drive(&g, hold(FingerGun.rest, 0.1) + path(FingerGun.rest, FingerGun.reloadCurl, seconds: 0.12)
+                  + hold(FingerGun.reloadCurl, 1.2), t0: &t)
+    check(r.reload && !r.alt, "a reload curl reloads and never alt-fires")
+    // 2. Then sliding onto the middle finger without lifting the thumb: locked.
+    r = drive(&g, path(FingerGun.reloadCurl, FingerGun.middleSide, seconds: 0.1) + hold(FingerGun.middleSide, 0.5), t0: &t)
+    check(!r.alt && r.states.contains("locked (reload)"), "after a reload, alt-fire waits for the thumb to lift")
+    // …and once the thumb lifts, contact presses it.
+    r = drive(&g, path(FingerGun.middleSide, FingerGun.rest, seconds: 0.1) + hold(FingerGun.rest, 0.1), t0: &t)
+    check(!g.reload && !g.altFire, "lifting the thumb releases reload")
+    r = drive(&g, path(FingerGun.rest, FingerGun.middleSide, seconds: 0.12) + hold(FingerGun.middleSide, 0.3), t0: &t)
+    check(r.alt && g.altFire && !r.reload, "thumb to the middle finger presses alt-fire")
+
+    // 3. Alt-fire held longer than a reload hold: no reload, ring stays empty.
+    g = ThumbGestures(); t = 0
+    r = drive(&g, hold(FingerGun.rest, 0.1) + path(FingerGun.rest, FingerGun.middleSide, seconds: 0.15), t0: &t)
+    let ringOnTheWay = r.maxRing
+    r = drive(&g, hold(FingerGun.middleSide, 1.5), t0: &t)
+    check(g.altFire && !r.reload && r.maxRing == 0, "a held alt-fire never fills the reload ring")
+    check(ringOnTheWay < 0.5, "passing through the curl shows at most a flicker of ring (\(ringOnTheWay))")
+    // Released by sliding back to a curl: alt-fire lets go, reload stays locked.
+    r = drive(&g, path(FingerGun.middleSide, FingerGun.reloadCurl, seconds: 0.1) + hold(FingerGun.reloadCurl, 1.2), t0: &t)
+    check(!g.altFire && !r.reload && g.reloadLocked, "after alt-fire, a curl doesn't reload until the thumb lifts")
+    r = drive(&g, hold(FingerGun.rest, 0.1) + hold(FingerGun.reloadCurl, 1.0), t0: &t)
+    check(r.reload, "after lifting, reload works again")
+
+    // 4. Ambiguous: a reload hold that has visibly run, then contact → neither.
+    g = ThumbGestures(); t = 0
+    r = drive(&g, hold(FingerGun.rest, 0.1) + hold(FingerGun.reloadCurl, 0.45)
+              + path(FingerGun.reloadCurl, FingerGun.middleSide, seconds: 0.05) + hold(FingerGun.middleSide, 0.8), t0: &t)
+    check(!r.alt && !r.reload && r.states.contains("ambiguous"), "late slide onto the middle finger: neither")
+    check(g.reloadRing == 0, "ambiguous: the ring is gone")
+
+    // 5. Press and hold timing: a one-frame touch doesn't press; a tap does,
+    //    and lasts at least minHoldSeconds.
+    g = ThumbGestures(); t = 0
+    r = drive(&g, hold(FingerGun.rest, 0.1) + [at(FingerGun.middleSide)] + hold(FingerGun.rest, 0.2), t0: &t)
+    check(!r.alt, "a one-frame touch is noise")
+    r = drive(&g, hold(FingerGun.middleSide, tune.settleSeconds + 2 * dt) + hold(FingerGun.rest, 0.3), t0: &t)
+    check(r.alt && !g.altFire, "a tap presses and releases")
+    check(Double(r.altFrames) * dt >= tune.minHoldSeconds - 1e-9, "a tap is held at least minHoldSeconds")
+
+    // 6. Jitter inside the hysteresis band and a one-frame dropout keep it held.
+    g = ThumbGestures(); t = 0
+    _ = drive(&g, hold(FingerGun.middleSide, 0.2), t0: &t)
+    check(g.altFire, "held")
+    var jitter: [ThumbGestures.Input?] = []
+    for i in 0..<60 {
+        var f = at(FingerGun.middleSide)
+        f.contact = (i % 2 == 0) ? tune.contactOn * 1.4 : tune.contactOn * 0.8
+        if i == 30 { f.contact = tune.contactOff * 1.5 }     // a single bad frame
+        jitter.append(f)
+    }
+    r = drive(&g, jitter, t0: &t)
+    check(g.altFire && r.altFrames == jitter.count, "jitter and a dropout don't release (gauss charge survives)")
+
+    // 7. Fire and alt-fire together: once held, a trigger pull keeps it.
+    let curled = SIMD3<Float>(-0.025, -0.030, 0.100)   // index tip folded in
+    r = drive(&g, Array(repeating: at(FingerGun.middleSide, index: curled), count: 30), t0: &t)
+    check(g.altFire && !r.reload, "both buttons down while the index fires")
+    // A fist (index curled first, thumb wrapped over the middle) never starts it.
+    g = ThumbGestures(); t = 0
+    r = drive(&g, Array(repeating: at(FingerGun.rest, index: curled), count: 10)
+              + Array(repeating: at(FingerGun.middleSide, index: curled), count: 90), t0: &t)
+    check(!r.alt && !r.reload && r.states.contains("index curled"), "a fist doesn't alt-fire")
+
+    // 8. Pinch guard: thumb near the index tip (movement pinch, 🤌) never alt-fires.
+    g = ThumbGestures(); t = 0
+    var pinch = at(FingerGun.middleSide); pinch.thumbToIndexTip = 0.02
+    r = drive(&g, Array(repeating: pinch, count: 60), t0: &t)
+    check(!r.alt && r.states.contains("pinch guard"), "a pinch doesn't alt-fire")
+
+    // 9. Lost hand / gestures off releases at once.
+    g = ThumbGestures(); t = 0
+    _ = drive(&g, hold(FingerGun.middleSide, 0.2), t0: &t)
+    _ = drive(&g, [nil], t0: &t)
+    check(!g.altFire && !g.reload, "nil input releases everything")
+
+    // 10. Setting off: the old reload, even with the thumb on the middle finger.
+    var off = tune; off.altFire = false
+    g = ThumbGestures(); t = 0
+    r = drive(&g, hold(FingerGun.rest, 0.1) + hold(FingerGun.middleSide, 1.0), t0: &t, tuning: off)
+    check(!r.alt && r.reload && g.altState == .off, "alt-fire off: reload behaves as before")
+
+    // 11. Sensitivity: scaling the distances down past the contact turns it off.
+    var tight = tune; tight.contactOn *= 0.5; tight.contactOff *= 0.5
+    g = ThumbGestures(); t = 0
+    r = drive(&g, hold(FingerGun.middleSide, 0.5), t0: &t, tuning: tight)
+    check(!r.alt, "low sensitivity needs firmer contact")
+    print("thumb gestures: ok")
 }
 
 // MARK: HUD icons from the real sprites
