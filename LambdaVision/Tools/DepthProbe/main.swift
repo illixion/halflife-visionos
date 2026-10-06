@@ -426,6 +426,11 @@ func sharpPlane(_ dump: Dump) -> SIMD4<Float> {
     return SIMD4(Float(best.0), best.1, 1, 0)
 }
 
+/// The resolve's per-sub-ray record of the last renderSharp (build.sh compiles
+/// the shaders with SSPR_DEBUG): the mirrored path length each sub-ray shows,
+/// and its confidence (0 where it shows nothing).
+var lastSharpDebug: MTLBuffer?
+
 /// The mirror target (one slice, shared for read-back), as the app makes it.
 func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture,
                  _ stencil: MTLTexture) -> MTLTexture {
@@ -439,6 +444,8 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
     d.storageMode = .shared
     let out = device.makeTexture(descriptor: d)!
     let keys = device.makeBuffer(bytes: [UInt32](repeating: .max, count: w * h * 2), length: w * h * 8)!
+    let debug = device.makeBuffer(length: w * h * 2 * 4 * 8, options: .storageModeShared)!
+    lastSharpDebug = debug
     let cb = queue.makeCommandBuffer()!
     let enc = cb.makeComputeCommandEncoder()!
     let pb = paramsBuffer(params)
@@ -466,9 +473,154 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
     enc.dispatchThreads(grid, threadsPerThreadgroup: group)
     enc.memoryBarrier(scope: .buffers)
     enc.setComputePipelineState(sharpResolve)
+    enc.setBuffer(debug, offset: 0, index: 5)
     enc.dispatchThreads(grid, threadsPerThreadgroup: group)
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let path = ProcessInfo.processInfo.environment["SSPR_KEYS"], !FileManager.default.fileExists(atPath: "\(path).\(w)x\(h).keys") {   // the key buffer, for offline digging
+        try? Data(bytes: keys.contents(), count: w * h * 4).write(to: URL(fileURLWithPath: "\(path).\(w)x\(h).keys"))
+        try? Data(bytes: debug.contents(), count: w * h * 32).write(to: URL(fileURLWithPath: "\(path).\(w)x\(h).dbg"))
+    }
     return out
+}
+
+/// "Transparent underside" (the headset, a table standing in the c1a2 flood):
+/// the mirror showing the room behind an object where the reflection must
+/// show the object's underside, which is never on screen. Ground truth is a
+/// fine trace of each sub-ray's reflected ray through the engine's depth,
+/// with every visible surface taken as a slab `thickness` units deep below
+/// it: the ray "meets a hidden underside" where it passes behind a surface
+/// with that surface less than `thickness` above it (climbing to it, the
+/// visible depth must stay continuous, so the region a table's edge hides
+/// behind it does not count). Of those sub-rays, the
+/// share (weighted by the mirror's confidence) whose shown surface (the
+/// resolve's SSPR_DEBUG record) is clearly farther along the ray than that
+/// hit is the leak. Rays that meet a visible surface first, or leave the
+/// frame, are not counted: the mirror may show them or fall to the probe.
+func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg: MTLBuffer,
+                thickness: Float = 4) -> (occluded: Int, share: Float, leak: Float, leakTable: Float, image: [UInt8]) {
+    let w = dump.width, h = dump.height
+    guard let stencil = dump.stencil else { return (0, 0, 0, 0, []) }
+    let (f, r, u) = dump.axes
+    let p = dump.projection
+    let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                  (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+    let p22 = p.columns.2.z, p32 = p.columns.3.z
+    let near = p32 / (p22 - 1), far = p32 / (p22 + 1)
+    let E = dump.origin, height = plane.y, waterCode = UInt8(Int(plane.x) + 16)
+    let rec = dbg.contents().bindMemory(to: SIMD2<Float>.self, capacity: mw * mh * 4)
+    func ray(_ uv: SIMD2<Float>) -> SIMD3<Float> {
+        simd_normalize(f + (-t.x + (t.x + t.y) * uv.x) * r + (-t.w + (t.z + t.w) * uv.y) * u)
+    }
+    func project(_ X: SIMD3<Float>) -> (SIMD2<Float>, Float)? {
+        let q = X - E, qz = simd_dot(q, f)
+        guard qz > 4 else { return nil }
+        let uv = SIMD2((simd_dot(q, r) / qz + t.x) / (t.x + t.y), (simd_dot(q, u) / qz + t.w) / (t.z + t.w))
+        guard uv.x >= 0, uv.x < 1, uv.y >= 0, uv.y < 1 else { return nil }
+        return (uv, qz)
+    }
+    func visible(_ uv: SIMD2<Float>) -> (z: Float, V: SIMD3<Float>) {
+        let i = min(Int(uv.y * Float(h)), h - 1) * w + min(Int(uv.x * Float(w)), w - 1)
+        let ndc = dump.depth[i] * 2 - 1
+        let z = 2 * near * far / ((far + near) - ndc * (far - near))
+        let d = ray(uv)
+        return (z, E + d * (z / simd_dot(d, f)))
+    }
+    var occluded = 0, water = 0
+    var leak: Float = 0, leakNear: Float = 0, occNear = 0
+    var image = [UInt8](repeating: 0, count: mw * mh * 4)
+    for gy in 0..<mh {
+        for gx in 0..<mw {
+            var texelLeak: Float = 0, texelOcc = false
+            for sj in 0..<2 { for si in 0..<2 {
+                let uv = SIMD2((Float(gx) + (Float(si) + 0.5) / 2) / Float(mw), (Float(gy) + (Float(sj) + 0.5) / 2) / Float(mh))
+                let si0 = min(Int(uv.y * Float(h)), h - 1) * w + min(Int(uv.x * Float(w)), w - 1)
+                guard stencil[si0] == waterCode else { continue }
+                var d = ray(uv)
+                if d.z > -1e-4 { d.z = -1e-4 }
+                let P = E + d * ((height - E.z) / d.z)
+                let rr = SIMD3(d.x, d.y, -d.z)
+                let base = simd_length(P - E)
+                water += 1
+                var s: Float = 0.5, hit: Float = -1
+                while s < 4000 {
+                    let X = P + rr * s
+                    guard let (xs, qz) = project(X) else { break }
+                    let (zv, V) = visible(xs)
+                    let tol = 0.5 + 0.005 * zv
+                    if V.z > height + 1 {
+                        if abs(qz - zv) <= tol { break }                       // a visible surface
+                        // under a surface: X behind it, and climbing from X
+                        // within `thickness` reaches a point in front of or
+                        // on it, the visible depth continuous across that
+                        // step (the same surface, not the room past its edge)
+                        if qz > zv + tol {
+                            var lastZ = zv, inside = false
+                            for j in 1...4 {
+                                guard let (ys, qy) = project(X + SIMD3(0, 0, thickness * Float(j) / 4)) else { break }
+                                let zy = visible(ys).z
+                                if abs(zy - lastZ) > 8 + 0.05 * zv { break }
+                                if qy <= zy + tol { inside = true; break }
+                                lastZ = zy
+                            }
+                            if inside { hit = base + s; break }
+                        }
+                    }
+                    s += max(0.5, 0.005 * (base + s))
+                }
+                guard hit > 0 else { continue }
+                occluded += 1; texelOcc = true
+                let k = (gy * mw + gx) * 4 + sj * 2 + si
+                let shown = rec[k]
+                let bad = shown.y > 0 && shown.x > hit * 1.05 + 8 ? shown.y : 0
+                leak += bad; texelLeak += bad
+                if hit - base < 120 { occNear += 1; leakNear += bad }
+            } }
+            // top-down: red = leak, dark blue = hidden underside handled
+            let o = ((mh - 1 - gy) * mw + gx) * 4
+            image[o] = UInt8(min(texelLeak / 4 * 255, 255)); image[o + 2] = texelOcc ? 90 : 0; image[o + 3] = 255
+        }
+    }
+    return (occluded, Float(occluded) / Float(max(water, 1)), leak / Float(max(occluded, 1)),
+            leakNear / Float(max(occNear, 1)), image)
+}
+
+/// Mac GPU time of the two mirror dispatches (SSPR_TIMING=1): per dispatch,
+/// the fastest of 10 command buffers of 50 dispatches each. Only the ratio between two
+/// versions carries over to the headset.
+func timeSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture, _ stencil: MTLTexture) -> (Double, Double) {
+    let div = params.sspr.0.w > 0.5 ? Int(params.sspr.0.w) : 4
+    let w = (color.width + div - 1) / div, h = (color.height + div - 1) / div
+    let d = MTLTextureDescriptor()
+    d.textureType = .type2DArray; d.pixelFormat = .rgba16Float; d.width = w; d.height = h
+    d.usage = [.shaderRead, .shaderWrite]
+    let out = device.makeTexture(descriptor: d)!
+    let keys = device.makeBuffer(length: w * h * 8)!
+    let debug = device.makeBuffer(length: w * h * 2 * 4 * 8)!
+    let pb = paramsBuffer(params)
+    let grid = MTLSize(width: w, height: h, depth: 1), group = MTLSize(width: 16, height: 8, depth: 1)
+    var tp: [Double] = [], tr: [Double] = []
+    memset(keys.contents(), 0xFF, w * h * 8)
+    for run in 0..<12 {
+        for (pipe, sink) in [(sharpProject, 0), (sharpResolve, 1)] {
+            let cb = queue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setBuffer(pb, offset: 0, index: BufferIndex.uniforms.rawValue)
+            enc.setBuffer(keys, offset: 0, index: 0)
+            enc.setBuffer(debug, offset: 0, index: 5)
+            enc.setTexture(color, index: 0); enc.setTexture(engineDepth, index: 1)
+            enc.setTexture(out, index: 2); enc.setTexture(stencil, index: 3)
+            enc.setComputePipelineState(pipe)
+            // 50 back to back (the projection's atomic min and the resolve
+            // are idempotent), so the GPU's clock ramp and the command
+            // buffer's overhead wash out
+            for _ in 0..<50 { enc.dispatchThreads(grid, threadsPerThreadgroup: group) }
+            enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000 / 50
+            if run < 2 { continue }
+            if sink == 0 { tp.append(ms) } else { tr.append(ms) }
+        }
+    }
+    return (tp.min()!, tr.min()!)
 }
 
 struct GlassView {
@@ -541,6 +693,18 @@ for path in args {
             t.getBytes(&px, bytesPerRow: t.width * 8, from: MTLRegionMake2D(0, 0, t.width, t.height), mipmapLevel: 0)
             sharpRead = (t.width, t.height, px, plane)
             print(String(format: "%@ sharp water: plane row %.0f at z %.1f", name, plane.x, plane.y))
+            if ProcessInfo.processInfo.environment["SSPR_TIMING"] == "1" {
+                let (tp, tr) = timeSharp(params, color, engineDepthTex, stencilTex)
+                print(String(format: "%@ sharp timing (Mac GPU): project %.3f ms, resolve %.3f ms", name, tp, tr))
+            }
+            if let dbg = lastSharpDebug {
+                let r = seeThrough(dump, plane, t.width, t.height, dbg)
+                print(String(format: "%@ see-through: %d sub-rays meet a hidden underside first (%.1f%% of the mirror's water); mirror shows something farther on %.2f%% of them (confidence-weighted), %.2f%% where the hit is within 120 units",
+                             name, r.occluded, r.share * 100, r.leak * 100, r.leakTable * 100))
+                // b2e7e18 at the c1a2 table (dumps 81–88): 6–18% (fails)
+                if r.occluded > 500 && r.leak > 0.03 { failures += 1 }
+                if let dir = pngDir { writePNG(r.image, t.width, t.height, "\(dir)/seethrough-\(name).png") }
+            }
         }
     }
     let plain = render(plainPipeline, w, h, params, textures)

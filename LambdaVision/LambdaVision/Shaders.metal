@@ -599,7 +599,11 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
                         depth2d_array<float> engineDepth [[ texture(1) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]]
+#ifdef SSPR_DEBUG
+                        , device float2 *dbg [[ buffer(5) ]]   // Tools/DepthProbe only: per sub-ray (path length shown, confidence)
+#endif
+                        )
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
@@ -608,6 +612,9 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         return;
     const uint base = uint(eye) * size.y * size.x;
     const uint i = base + gid.y * size.x + gid.x;
+#ifdef SSPR_DEBUG
+    for (int k = 0; k < SSPR_SUB_X * SSPR_SUB_Y; k++) dbg[i * SSPR_SUB_X * SSPR_SUB_Y + k] = 0.0;
+#endif
     // Candidate surfaces: this texel's key, the nearest key above and below
     // it within SSPR_FILL rows, and its left and right neighbours' (the
     // texel's footprint can straddle a boundary between surfaces). The
@@ -765,6 +772,14 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                             + colorMap.sample(s, bestSrc + float2( h.x,  h.y), eye).rgb;
             sum += box * 0.25h * half(c);
             conf += c;
+#ifdef SSPR_DEBUG
+            {
+                const float ndc = engineDepth.read(min(uint2(bestSrc * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                const float3 ds = glassViewRay(bestSrc, eye, p);
+                const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
+                dbg[i * SSPR_SUB_X * SSPR_SUB_Y + sj * SSPR_SUB_X + si] = float2(length(P - E) + length(A - P), c);
+            }
+#endif
         }
     }
     const float n = float(SSPR_SUB_X * SSPR_SUB_Y);
