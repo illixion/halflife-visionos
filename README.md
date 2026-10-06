@@ -328,6 +328,14 @@ look (the stock crosshair marks it), the body's arms stop following your
 hands and the hand gestures rest. *Hands*, *Keyboard + mouse* and *Gamepad*
 pin the mode instead. The launcher's Diagnostics shows the current mode.
 
+The HEV suit holograms move with the mode. In hands mode ammo floats beside
+the gun hand and health and suit over the off-hand forearm. With a keyboard,
+mouse or gamepad they become a Half-Life 2 style overlay: health and suit at
+the lower left of the view, ammo at the lower right. The overlay trails the
+head by a short, capped lag, so it reads as a hologram beside Gordon's head
+rather than a sticker on the lens. Settings → Keyboard, mouse & gamepad →
+*HEV holograms* switches back to *Attached to hands*.
+
 Every mode reaches stock full run speed; nothing changes the movement
 speeds. Keyboard and mouse binds are ordinary engine binds, set on first run
 and rebindable in the game's menu (Configuration → Controls). Settings also

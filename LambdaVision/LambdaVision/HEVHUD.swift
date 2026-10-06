@@ -5,7 +5,8 @@
 //  The HEV suit's holographic readouts, replacing the stock 2D HUD's health,
 //  suit, ammo and flashlight numbers (the client stands those down through
 //  lambda_hud_set_native; pain arrows, pickup history, text messages, the
-//  console and the menu stay stock). Nothing is pinned to the user's vision:
+//  console and the menu stay stock). In hands mode nothing is pinned to the
+//  user's vision:
 //
 //  - ammo floats beside the weapon, on the side of the gun hand toward the
 //    body, facing the eyes;
@@ -16,6 +17,13 @@
 //    traced by the client along the very ray the server fires (cl_dll/view.cpp
 //    V_PublishAimHit), sized to a fixed angle so it reads the same near or
 //    far; optionally with a faint beam from the muzzle.
+//
+//  With a keyboard, mouse or gamepad (InputMode) the hands are on the device,
+//  so by default the readouts become an overlay in Half-Life 2's corners:
+//  vitals low left, ammo low right, hung off a frame that trails the head
+//  with a short bounded lag (LazyViewFollower) rather than stamped onto the
+//  view. Switching modes crossfades the two placements, the overlay rising
+//  a little into place as it fades in.
 //
 //  Each panel sits on the line from its anchor toward the eyes, clear of the
 //  arm or gun it belongs to, so it is genuinely in front of them in stereo;
@@ -84,6 +92,11 @@ nonisolated final class HEVHUD: @unchecked Sendable {
     private var hurtAt: Double = -10
     private var armOpacity: Float = 0
     private var ammoOpacity: Float = 0
+    // The flat-mode overlay's own fades, so the two placements crossfade.
+    private var overlayVitalsOpacity: Float = 0
+    private var overlayAmmoOpacity: Float = 0
+    private var follower = LazyViewFollower(tuning: .init(timeConstant: HEVHUD.overlayTimeConstant,
+                                                          maxLag: HEVHUD.overlayMaxLagDeg * .pi / 180))
     private var lastTime: Double?
     /// Hologram brightness adapted to the room, eased like eye adaptation.
     private var adaptedBrightness: Float = 1
@@ -124,13 +137,19 @@ nonisolated final class HEVHUD: @unchecked Sendable {
         return renderer
     }
 
-    /// This frame's panels, or nil when nothing shows.
+    /// This frame's panels, or nil when nothing shows. `headRotation` is the
+    /// head's orientation (Apple world); `overlay` puts the readouts in the
+    /// view-following corners instead of on the hands.
     func scene(state s: lambda_hud_state_t, readouts: Bool, gunArm: Arm?, offArm: Arm?,
-               aim: Aim?, reticle: Reticle, head: SIMD3<Float>, ambient: Float?,
-               time: Double) -> RAVEHoloScene? {
+               aim: Aim?, reticle: Reticle, head: SIMD3<Float>, headRotation: simd_quatf,
+               overlay: Bool, ambient: Float?, time: Double) -> RAVEHoloScene? {
         guard let font = renderer?.font else { return nil }
-        let dt = Float(min(0.1, max(0, time - (lastTime ?? time))))
+        let gap = Float(max(0, time - (lastTime ?? time)))
+        let dt = min(0.1, gap)
         lastTime = time
+        // Kept current in every mode, so the overlay never swings in from a
+        // stale pose (a long gap snaps it).
+        let frame = follower.update(target: headRotation, dt: gap)
         // No probe this frame (it rides the external weapon): hold the level.
         if let ambient {
             adaptedBrightness = approach(adaptedBrightness, Self.brightness(forAmbient: ambient), rate: 2, dt: dt)
@@ -146,7 +165,7 @@ nonisolated final class HEVHUD: @unchecked Sendable {
         // Off-hand forearm: health / suit / flashlight, shown while the back
         // of the forearm faces the eyes.
         var armTarget: Float = 0
-        if !hideAll, (s.hide_flags & 8) == 0, let arm = offArm {
+        if !overlay, !hideAll, (s.hide_flags & 8) == 0, let arm = offArm {
             let toHead = simd_normalize(head - arm.wrist)
             armTarget = smoothstep(-0.05, 0.35, simd_dot(arm.back, toHead))
         }
@@ -162,13 +181,35 @@ nonisolated final class HEVHUD: @unchecked Sendable {
 
         // Gun hand: ammo, whenever the weapon carries any.
         let hasAmmo = s.ammo1 >= 0 || s.ammo2 >= 0
-        let ammoTarget: Float = (!hideAll && (s.hide_flags & 1) == 0 && hasAmmo && gunArm != nil) ? 1 : 0
+        let ammoTarget: Float = (!overlay && !hideAll && (s.hide_flags & 1) == 0 && hasAmmo && gunArm != nil) ? 1 : 0
         ammoOpacity = approach(ammoOpacity, ammoTarget, rate: 10, dt: dt)
         if ammoOpacity > 0.01, let arm = gunArm {
             let anchor = Self.towardEyes(arm.wrist + arm.inward * 0.06 + arm.forward * 0.03, head: head,
                                          by: Self.gunClearance)
             var panel = RAVEHoloPanel(transform: RAVEHoloPanel.facing(position: anchor, viewer: head),
                                       opacity: ammoOpacity, seed: 4.2)
+            ammo(&panel, state: s, font: font)
+            scene.panels.append(panel)
+        }
+
+        // Flat modes: the same readouts in the view-following corners.
+        overlayVitalsOpacity = approach(overlayVitalsOpacity,
+                                        overlay && !hideAll && (s.hide_flags & 8) == 0 ? 1 : 0,
+                                        rate: 8, dt: dt)
+        overlayAmmoOpacity = approach(overlayAmmoOpacity,
+                                      overlay && !hideAll && (s.hide_flags & 1) == 0 && hasAmmo ? 1 : 0,
+                                      rate: 8, dt: dt)
+        if overlayVitalsOpacity > 0.01 {
+            var panel = RAVEHoloPanel(transform: Self.overlayTransform(yawDeg: -Self.overlayYawDeg, head: head,
+                                                                      frame: frame, opacity: overlayVitalsOpacity),
+                                      opacity: overlayVitalsOpacity, seed: 1.7)
+            vitals(&panel, state: s, font: font, hurt: Float(max(0, 1 - (time - hurtAt) / 0.6)))
+            scene.panels.append(panel)
+        }
+        if overlayAmmoOpacity > 0.01 {
+            var panel = RAVEHoloPanel(transform: Self.overlayTransform(yawDeg: Self.overlayYawDeg, head: head,
+                                                                      frame: frame, opacity: overlayAmmoOpacity),
+                                      opacity: overlayAmmoOpacity, seed: 4.2)
             ammo(&panel, state: s, font: font)
             scene.panels.append(panel)
         }
@@ -228,6 +269,46 @@ nonisolated final class HEVHUD: @unchecked Sendable {
     /// Corner radius of each gauge segment (m): rounded like the panels.
     static let segmentCorner: Float = 0.0006
     static let gunClearance: Float = 0.05
+
+    // MARK: Flat-mode overlay
+
+    /// How far the overlay panels hang from the eyes (m). Near enough that
+    /// little in the world sits closer (they draw over everything, so a wall
+    /// nearer than this would contradict the stereo), far enough to focus
+    /// on comfortably.
+    static let overlayDistance: Float = 0.85
+    /// The panels are laid out for arm's length; this scales them up for
+    /// the overlay distance (the vitals come to ~8.5° wide).
+    static let overlayScale: Float = 1.6
+    /// Each panel's centre off the view centre (degrees): vitals this far
+    /// left, ammo this far right, both this far down. Inside the comfortable
+    /// glance range and clear of the crosshair, like Half-Life 2's corners.
+    static let overlayYawDeg: Float = 21
+    static let overlayPitchDeg: Float = -17
+    /// The follow's spring time constant (s): a still head is caught up in
+    /// about a third of a second; a steady turn at Ω trails by 2Ω·this.
+    static let overlayTimeConstant: Float = 0.07
+    /// The most the overlay may trail the head (degrees): a fast turn drags
+    /// the panels along at this lag instead of leaving them out of view.
+    static let overlayMaxLagDeg: Float = 8
+    /// How far below its place a panel starts as it fades in (degrees).
+    static let overlayRiseDeg: Float = 3
+
+    /// A corner panel `yawDeg` right of the follow frame's centre (negative
+    /// = left), facing the eyes and rolled with the frame.
+    private static func overlayTransform(yawDeg: Float, head: SIMD3<Float>, frame: simd_quatf,
+                                         opacity: Float) -> simd_float4x4 {
+        let yaw = yawDeg * .pi / 180
+        let pitch = (overlayPitchDeg - overlayRiseDeg * (1 - opacity)) * .pi / 180
+        // Apple head frame: -z ahead, +x right, +y up.
+        let local = SIMD3<Float>(sinf(yaw) * cosf(pitch), sinf(pitch), -cosf(yaw) * cosf(pitch))
+        let position = head + frame.act(local) * overlayDistance
+        var m = RAVEHoloPanel.facing(position: position, viewer: head, up: frame.act(SIMD3(0, 1, 0)))
+        m.columns.0 *= overlayScale
+        m.columns.1 *= overlayScale
+        m.columns.2 *= overlayScale
+        return m
+    }
 
     private static func towardEyes(_ point: SIMD3<Float>, head: SIMD3<Float>, by distance: Float) -> SIMD3<Float> {
         let d = head - point

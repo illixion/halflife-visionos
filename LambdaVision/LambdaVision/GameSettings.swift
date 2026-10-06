@@ -55,6 +55,13 @@ enum AimReticle: String, CaseIterable, Identifiable {
     }
 }
 
+/// Where the HEV holograms go with a keyboard, mouse or gamepad.
+enum FlatHUDPlacement: String, CaseIterable, Identifiable {
+    case followView, hands
+    var id: String { rawValue }
+    var label: String { self == .followView ? "Follow view (lazy)" : "Attached to hands" }
+}
+
 /// Which model of the weapon is held: the first-person viewmodel, animated
 /// but modelled only for the side the old camera saw, or the third-person
 /// world model, whole but rigid (reloads then show as the ring alone).
@@ -266,6 +273,13 @@ final class GameSettings {
                  Renderer.aimReticle = aimReticle.style }
     }
 
+    /// Outside hands mode: the HEV readouts in the lower corners of the view,
+    /// trailing the head a little, or left on the hands as in hands mode.
+    var flatHUDPlacement: FlatHUDPlacement = AppSettingsStore.flatHUDPlacement {
+        didSet { AppSettingsStore.flatHUDPlacement = flatHUDPlacement
+                 Renderer.flatHUDFollowsView = (flatHUDPlacement == .followView) }
+    }
+
     /// Developer mode: the palm debug panel (frame time and render toggles
     /// over the off-hand palm while it faces you) and the engine's verbose
     /// developer message stream (`developer 2`, off otherwise).
@@ -342,6 +356,7 @@ final class GameSettings {
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style
+        Renderer.flatHUDFollowsView = (flatHUDPlacement == .followView)
         Renderer.weaponWorldModel = (weaponModel == .world)
         Renderer.hideParkedParts = hideParkedParts
         Renderer.debugPanelEnabled = developerMode

@@ -263,4 +263,16 @@ enum AppSettingsStore {
         get { bool(lookPitchKey, false) }
         set { defaults.set(newValue, forKey: lookPitchKey) }
     }
+
+    // MARK: HEV holograms outside hands mode
+    private static let flatHUDPlacementKey = "lambdavision.settings.flatHUDPlacement"
+
+    static var flatHUDPlacement: FlatHUDPlacement {
+        get {
+            guard let raw = defaults.string(forKey: flatHUDPlacementKey),
+                  let v = FlatHUDPlacement(rawValue: raw) else { return .followView }
+            return v
+        }
+        set { defaults.set(newValue.rawValue, forKey: flatHUDPlacementKey) }
+    }
 }
