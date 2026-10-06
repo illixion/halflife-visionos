@@ -183,13 +183,26 @@ enum LambdaDebugServer {
         }
     }
 
-    /// Rebuilds a server whose listener no longer answers.
+    /// Relistens with the same server whose listener no longer answers. Same
+    /// instance, not a new one: approvals live on the server, so a fresh
+    /// instance asked "Allow debug access?" again right after a suspension,
+    /// when nobody could answer, and every request hung on it. DebugTrace now
+    /// also relistens on its own after a post-start failure; whichever runs
+    /// second finds the listener already up and does nothing.
     private static func restart(reason: String) {
         restarts += 1
         AppLog.app.error("[DebugServer] listener on port \(lastPort.map(String.init) ?? "?", privacy: .public) stopped answering (\(reason, privacy: .public)); restart #\(restarts)")
-        server?.stop()
-        server = nil
-        start(reason: "restart #\(restarts)")
+        guard let s = server else { start(reason: "restart #\(restarts)"); return }
+        s.stop()
+        Task { @MainActor in
+            do {
+                lastPort = try await s.start()
+                AppLog.app.log("[DebugServer] listening again on port \(lastPort.map(String.init) ?? "?", privacy: .public) (restart #\(restarts))")
+            } catch {
+                AppLog.app.error("[DebugServer] relisten failed: \(String(describing: error), privacy: .public); retrying in \(checkInterval.components.seconds) s")
+                if server === s { server = nil }
+            }
+        }
     }
 
     /// One health check now (also run when the app comes back to the
