@@ -486,6 +486,57 @@ mirror crisply in the flood, broken only into fine vertical streaks; turn the
 head: the mirror should not jump, and near the frame edge it should soften
 into the probe rather than cut off. Try ripples 0× and 3×, sharp on and off.
 
+### 3e. Sharp water, round 2: compute SSPR, mirror view, gMirror
+
+**Headset (9a94b5d, c1a2 capture spot, p50):** water off gComposite 3.6 /
+gpuQueue 4.6 / frame 9.9 ms; soft (probe) 4.3 / 5.3 / 11.2; sharp 9.7 /
+10.3 / 17.4 (~57 fps). The point splat cost ~5.4 ms, not the 0.5–1
+estimated, and the capture showed almost no mirror (a hint of the bench
+legs), unlike the Mac renders. The calmer ripple and the colour retune
+read well.
+
+**Replaced the splat with a compute SSPR** (`Shaders.metal` `ssprProject` /
+`ssprResolve`, `SharpWater.swift`): a fill of the key buffer and two
+dispatches over a 1/3-resolution grid (`Renderer.sharpWaterDivisor` 3) for
+both eyes. Project: each target texel's source point is mirrored and
+projected, and the texel it lands on keeps, by 32-bit atomic min, the key
+of the nearest one (12-bit log distance over the 10 + 10-bit source texel).
+Resolve: decode (or take the nearest of four neighbours to fill gaps),
+sample the engine image at the source, write premultiplied by the edge
+confidence. No rasteriser, no depth target, no overdraw. Same composite,
+same rules (occluder, underwater, mask, probe fallback).
+
+**Why the device mirror was empty: not found from the code.** The splat's
+geometry, conventions and data path match the Mac's, where DepthProbe runs
+the same shaders and shows a full mirror (the device-like view: the vent,
+wall and bench mirror clearly). Unverified suspects: point rasterisation
+with vertex amplification into a layered target on the device, or the
+mirror landing in place but reading as neutral under water's colour
+modulation (a mirrored wall about as bright as the room's light changes
+the water little; the Mac check uses a fixed room light). The splat is
+gone; the compute path shares only the data path. To tell on device:
+Settings → Diagnostics "Water mirror view" (debug API `waterMirrorView`):
+`onWater` shows the mirror where the water is (magenta = probe fill),
+`confidence` its weight, `whole` the target over the whole view (dim
+magenta = empty).
+
+**gMirror:** the mirror pass has its own counter-heap mark (`gMirror`, in
+the `[FT] gpu(ms)` line and `GET /perf`, with GPU pass timing on), so
+`gComposite` no longer includes it.
+
+**Verified offline** (c1a2, same three views as 3d): 0 pixels changed
+outside the mask, 0 underwater, 0 of 122 k under a fake occluder; final
+image between gazes 2.0/255; one mirrored point in both eyes' mirrors
+8.9/255 against a 5.8/255 sampling baseline. The mirror alone differs more
+between gazes (13/255) because it holds only what is on screen.
+
+**Expected cost:** ~0.4 M threads per eye per dispatch at 1/3 of a
+~2200 × 1750 engine image, each one depth read and some ALU (project) or
+one key read and a colour sample (resolve), plus a 3 MB fill: roughly
+0.2–0.4 ms for both eyes, on frames with horizontal water below an eye.
+`sharpWaterReflections` defaults off until `gMirror` confirms it. The
+composite's extra sharp-water samples stay in `gComposite`.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new

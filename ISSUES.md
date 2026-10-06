@@ -173,6 +173,12 @@ instead of deleting them.
   "Water ripples" 0–3×). "Sharp water reflections" mirrors each eye's own
   image in horizontal water (half-resolution scatter), the probe filling in
   what is off screen. Mac checks and cost in `docs/plans/modern-lighting.md` (3d).
+- **Sharp water, round 2: compute SSPR, default off, device check
+  pending.** The point splat measured 5.4 ms and showed almost no mirror on
+  the headset; replaced by a 1/3-resolution compute projection + resolve
+  (expected 0.2–0.4 ms, timed as `gMirror`). The empty device mirror is not
+  explained yet: Settings → Diagnostics "Water mirror view" shows what the
+  mirror holds. See `docs/plans/modern-lighting.md` (3e).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
