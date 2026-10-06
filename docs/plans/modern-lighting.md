@@ -771,6 +771,50 @@ ripple's share), and sharp on vs off (the mirror read and fallbacks). If
 the ripple dominates, the next step is evaluating it per mirror texel in
 the resolve rather than per drawable pixel.
 
+### 3l. Sharp water, round 9: the comb of rows
+
+**Device (aadfa42, c1a2 bench, p50):** fill 0.03 / project 0.40 / resolve 0.69
+ms, gComposite 4.70, gpuQueue 6.90 with sharp on and ripple 1×; gComposite
+4.35 with the ripple off, 4.61 / 4.28 with sharp off — so the ripple costs
+~0.35 ms of the composite and ~4.3 ms is its baseline. The prefilter
+regression is gone. Hatching still visible, now "following the ripple":
+a comb of tightly packed horizontal stripes in the mirror on the water in
+front of the sink cabinet's base, with ripple-shaped rings of falling
+confidence (`build/screenshots/hatch-device/` in the worktree).
+
+**Reproduced on the Mac** at the c1a2 bench (dump 51: from the side, the
+bench's face meeting the flood; dumps 61/62 looking down at it): the 2×
+composite shows wavy dark lines in a patch of the mirrored cabinet, and the
+mirror target's confidence has thin dark rows there. A new check measures
+it: the vertical second difference of the 2× composite over the water the
+mirror covers, sharp against soft with the ripple on, per 48-pixel tile;
+the worst tile may exceed soft by at most 2.0/255. aadfa42: +2.86 at dump
+51 (fails). Now: +1.25 (51), +0.28 (61), +0.48 (62), ≤ 0.7 elsewhere.
+
+**Causes and fixes:**
+
+- **The composite's hole search.** Where the mirror's coverage was under
+  half, the composite read a texel up and down and took the fuller one — a
+  leftover from the point splat. As the ripple's nudge moved the read across
+  a coverage edge, it switched hard between neighbours: thin wavy lines
+  that follow the ripple. The composite now takes one bilinear,
+  premultiplied read, so coverage fades smoothly into the probe. This alone
+  took the Mac's worst tile from +2.85 to +1.25.
+- **Gaps in the mirror rows.** A surface the eye barely sees (a face just
+  above the water, the underside an overhang hides) must cover more mirror
+  rows than it has source rows. The resolve now searches up to 8 rows up
+  and down for the nearest key (`SSPR_FILL`) as candidates, instead of one
+  texel each way, and the exact-ray check chooses between them.
+
+Stability, gaze (1.7/255), occluders, underwater and mask checks unchanged;
+the mirror agrees between eyes at 7.2/255 against a 3.7 baseline (was 5.1
+against 3.5; more texels are filled now, so more edge texels are compared).
+
+**Expected cost:** the vertical search adds up to 16 key reads per mirror
+texel, from cached buffer columns: ~0.1–0.2 ms on the resolve (≈ 0.8–0.9
+ms). The composite loses its two extra mirror reads on low-coverage pixels.
+Mirror total ≈ 1.2–1.3 ms, gpuQueue ≈ 6.9–7.0 ms as now.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new

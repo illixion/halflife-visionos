@@ -210,6 +210,12 @@ instead of deleting them.
   results offline). Expected mirror total ~1.3 ms; gComposite's rise traced
   to the band-limited ripple at drawable resolution, trimmed. See
   `docs/plans/modern-lighting.md` (3k).
+- **Sharp water, round 9: comb of rows fixed offline, device check
+  pending.** The composite's leftover texel-up/down hole search switched
+  hard as the ripple moved the read (the wavy lines); now one smooth read.
+  The resolve fills mirror gaps from up to 8 rows away. DepthProbe's new
+  per-tile comb check at 2× fails aadfa42. See
+  `docs/plans/modern-lighting.md` (3l).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
