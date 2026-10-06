@@ -326,13 +326,14 @@ are involved, and they're licensed separately:
   links the engine into a single binary rather than running it as a separate
   process, so the combined binary is a derivative work and GPLv3's copyleft
   applies to the whole thing.
-* **`hlsdk-portable`** (cloned by `VisionPort/setup.sh`, patched by
-  `VisionPort/hlsdk-visionos.patch`) — Valve's original **Half-Life 1 SDK
+* **`hlsdk-portable`** (cloned by `VisionPort/setup.sh`, extended by
+  the VR layer in `VisionPort/hlsdk-vr/`) — Valve's original **Half-Life 1 SDK
   LICENSE**, not GPL. It permits free copying, modification, and
   distribution of the SDK and your modifications, in source or object form,
   but only for free (no charge) and only distributed together with that
-  LICENSE file. `hlsdk-visionos.patch` is a derivative of Valve's SDK code
-  and is bound by those same terms, not GPLv3.
+  LICENSE file. `VisionPort/hlsdk-vr/` (the VR layer's sources and its hook
+  patch) is a derivative of Valve's SDK code and is bound by those same
+  terms, not GPLv3. So is any mod source `VisionPort/build_game.sh` builds.
 * **Half-Life game assets** (`HalfLifeAssets/`) — Valve's property, never
   redistributed here (gitignored; fetched by each user from their own Steam
   account via `scripts/fetch-assets.sh`). See
