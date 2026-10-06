@@ -215,7 +215,13 @@ public final class FileHashCache: @unchecked Sendable {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+        // Each chunk is autoreleased; without a pool per chunk a whole
+        // gamedir's worth of buffers stays alive until the caller's pool drains.
+        while autoreleasepool(invoking: {
+            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else { return false }
+            hasher.update(data: chunk)
+            return true
+        }) {}
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         lock.lock()
         records[path] = Record(size: s.size, mtime: s.mtime, sha256: digest)
@@ -223,7 +229,7 @@ public final class FileHashCache: @unchecked Sendable {
         return digest
     }
 
-    static func stat(_ path: String) -> (size: Int64, mtime: Double)? {
+    public static func stat(_ path: String) -> (size: Int64, mtime: Double)? {
         guard let a = try? FileManager.default.attributesOfItem(atPath: path),
               let size = (a[.size] as? NSNumber)?.int64Value else { return nil }
         let mtime = (a[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
