@@ -249,6 +249,13 @@ final class GameSettings {
                  Renderer.weaponWorldModel = (weaponModel == .world) }
     }
 
+    /// Hide the viewmodel parts Valve parks out of the flat view's shot
+    /// (spare magazines, shells) while they are out of it (WeaponPass).
+    var hideParkedParts: Bool = AppSettingsStore.hideParkedParts {
+        didSet { AppSettingsStore.hideParkedParts = hideParkedParts
+                 Renderer.hideParkedParts = hideParkedParts }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -273,6 +280,7 @@ final class GameSettings {
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style
         Renderer.weaponWorldModel = (weaponModel == .world)
+        Renderer.hideParkedParts = hideParkedParts
         Renderer.debugPanelEnabled = developerMode
         applyHEVHUD()
     }

@@ -653,14 +653,14 @@ static void bake_mesh(snapshot_t *s, const uint8_t *base, const mstudiomesh_t *m
 
 // ---------------------------------------------------------------------------
 // Optional OBJ dump for off-device verification. Written to the engine
-// basedir (cwd) whenever a new model is baked, posed at sequence 0 frame 0
+// basedir (cwd) whenever a new model is baked, posed in its rest pose
 // (the idle grip). Cheap, and only fires on model change while the external
 // weapon is active.
 // ---------------------------------------------------------------------------
 static void dump_obj(const snapshot_t *s, const matrix3x4 *bones, const char *path) {
     FILE *f = fopen(path, "w");
     if (!f) return;
-    fprintf(f, "# LambdaVision model dump (modelindex=%d, seq 0 frame 0)\n", s->modelindex);
+    fprintf(f, "# LambdaVision model dump (modelindex=%d, rest pose)\n", s->modelindex);
     for (uint32_t i = 0; i < s->vcount; i++) {
         float p[3];
         Matrix3x4_Transform(bones[s->vertices[i].bone], s->vertices[i].pos, p);
@@ -771,6 +771,23 @@ static int choose_grip_bone(const uint8_t *base, const studiohdr_t *hdr, int bod
     return right;
 }
 
+// The sequence the model rests in: the first whose name says idle, else 0.
+// Nearly every model starts with its idle, but not all — Opposing Force's
+// sniper rifle (v_m40a1) opens with "draw", whose frame 0 holds the rifle
+// lowered and turned away, which read as a gun pointing back along the arm.
+static int rest_sequence(const uint8_t *base, const studiohdr_t *hdr) {
+    const mstudioseqdesc_t *psd = (const mstudioseqdesc_t *)(base + hdr->seqindex);
+    for (int i = 0; i < hdr->numseq; i++) {
+        char lower[MAXSTUDIONAME];
+        int k;
+        for (k = 0; k < MAXSTUDIONAME - 1 && psd[i].label[k]; k++)
+            lower[k] = (psd[i].label[k] >= 'A' && psd[i].label[k] <= 'Z') ? psd[i].label[k] + 32 : psd[i].label[k];
+        lower[k] = '\0';
+        if (strstr(lower, "idle")) return i;
+    }
+    return 0;
+}
+
 // Bake `hdr` into `slot`'s back snapshot and publish it. Returns 1 on success.
 static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t *hdr,
                       int modelindex, int body, const char *dump_path) {
@@ -867,10 +884,12 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     }
 
     // Publish: bump generation and flip the active buffer under the lock.
-    // Seed the pose with sequence 0 / frame 0 so a reader that uploads this
-    // generation always finds a matching pose, even before the next tick.
+    // Seed the pose with the rest sequence's frame 0 (rest_sequence) so a
+    // reader that uploads this generation always finds a matching pose, even
+    // before the next tick; it is also the rest pose the grip is read from.
+    int rest_seq = hdr->numseq > 0 ? rest_sequence(base, hdr) : 0;
     matrix3x4 pose0[LAMBDA_WEAPON_MAX_BONES];
-    compute_pose_bones(base, hdr, 0, 0.0f, pose0);
+    compute_pose_bones(base, hdr, rest_seq, 0.0f, pose0);
 
     uint32_t gen = next_generation();
     slot_lock_mutex(slot);
@@ -879,7 +898,7 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     slot->active = back;
     slot->pose.generation = gen;
     slot->pose.bone_count = (uint32_t)hdr->numbones;
-    slot->pose.sequence = 0;
+    slot->pose.sequence = rest_seq;
     slot->pose.frame = 0.0f;
     memcpy(slot->pose.bones, pose0, sizeof(matrix3x4) * (size_t)hdr->numbones);
     slot->rest_pose = slot->pose;

@@ -328,6 +328,9 @@ actor Renderer {
     /// Hold the weapon's world (p_) model instead of its viewmodel
     /// (Settings > Input > Weapon model).
     nonisolated(unsafe) static var weaponWorldModel = false
+    /// Hide the loose parts the flat viewmodel keeps out of shot, while
+    /// they are (Settings > Input > Hide parked weapon parts).
+    nonisolated(unsafe) static var hideParkedParts = true
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -2332,6 +2335,7 @@ actor Renderer {
                                     maxBuffersInFlight: maxBuffersInFlight)
         }
         weaponPass.preferWorldModel = Renderer.weaponWorldModel
+        weaponPass.hideParkedParts = Renderer.hideParkedParts
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
