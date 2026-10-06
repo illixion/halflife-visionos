@@ -70,6 +70,16 @@ instead of deleting them.
   `selectionRay` with hand drift after the pinch starts (privacy: gaze is
   revealed at tap). Automatic fire tracks the pinch-start gaze, not the
   eyes. Acceptable for now; hand-anchored aim supersedes it.
+- **No flashlight toggle with hand tracking.** The flashlight is toggled by
+  `impulse 100`, sent only by the keyboard (F, a first-run bind in
+  `Lambda_Bridge.c`) and the gamepad (D-pad up, `GamepadInput.swift`). No
+  hand gesture sends it: the weapon wheel covers slot1–slot5 only and a poke
+  is `+use`, so a hand-tracking-only player can't turn it on and the
+  gun-mounted beam (see "Gun-mounted flashlight" under rendering) never
+  shows for them. Likely fix: a sixth weapon-wheel sector for `impulse 100`
+  (reuses the wheel's hysteresis and release-to-pick), or an off-hand
+  toggle gesture. The README Controls section also documents neither the
+  flashlight nor the keyboard and gamepad bindings.
 
 ## Open — rendering
 
