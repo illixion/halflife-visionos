@@ -107,6 +107,7 @@ struct KindBadge: View {
 /// Shown when no game is installed: how to get Half-Life onto the headset.
 struct GameOnboarding: View {
     let onImport: () -> Void
+    let onWiFi: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -119,11 +120,15 @@ struct GameOnboarding: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            Text("Zip the HalfLife folder (or just its valve and valve_hd folders) and AirDrop it to Vision Pro, choosing LambdaVision — or put it in Files and import it here. Opposing Force (app 50) and Blue Shift (app 130) import the same way.")
+            Text("The easiest way: choose Manage over Wi-Fi and open the address it shows on that computer, then drop the HalfLife folder onto the page. Or zip the folder (or just its valve and valve_hd folders) and AirDrop it to Vision Pro, choosing LambdaVision, or put it in Files and import it here. Opposing Force (app 50) and Blue Shift (app 130) work the same way.")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Import…", systemImage: "folder", action: onImport)
-                .buttonStyle(.borderedProminent)
+            HStack {
+                Button("Manage over Wi-Fi…", systemImage: "wifi", action: onWiFi)
+                    .buttonStyle(.borderedProminent)
+                Button("Import…", systemImage: "folder", action: onImport)
+                    .buttonStyle(.bordered)
+            }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)

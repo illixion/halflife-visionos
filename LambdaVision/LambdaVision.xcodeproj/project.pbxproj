@@ -15,6 +15,7 @@
 		AA13000000000000000000D3 /* DebugTrace in Frameworks */ = {isa = PBXBuildFile; productRef = AA13000000000000000000D2 /* DebugTrace */; };
 		BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */ = {isa = PBXBuildFile; productRef = FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */; };
 		AA14000000000000000000E3 /* GameLibrary in Frameworks */ = {isa = PBXBuildFile; productRef = AA14000000000000000000E2 /* GameLibrary */; };
+		AA15000000000000000000F3 /* GameLibraryServer in Frameworks */ = {isa = PBXBuildFile; productRef = AA15000000000000000000F2 /* GameLibraryServer */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -72,6 +73,7 @@
 				AA13000000000000000000D3 /* DebugTrace in Frameworks */,
 				BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */,
 				AA14000000000000000000E3 /* GameLibrary in Frameworks */,
+				AA15000000000000000000F3 /* GameLibraryServer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -143,6 +145,7 @@
 				AA13000000000000000000D2 /* DebugTrace */,
 				FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */,
 				AA14000000000000000000E2 /* GameLibrary */,
+				AA15000000000000000000F2 /* GameLibraryServer */,
 			);
 			productName = LambdaVision;
 			productReference = 1DB96E8A2FB0522300F1ADA2 /* LambdaVision.app */;
@@ -672,6 +675,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA14000000000000000000E1 /* XCLocalSwiftPackageReference "Packages/GameLibrary" */;
 			productName = GameLibrary;
+		};
+		AA15000000000000000000F2 /* GameLibraryServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA14000000000000000000E1 /* XCLocalSwiftPackageReference "Packages/GameLibrary" */;
+			productName = GameLibraryServer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

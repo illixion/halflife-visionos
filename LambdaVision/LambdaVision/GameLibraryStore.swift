@@ -46,6 +46,9 @@ final class GameLibraryStore {
     private(set) var importProgress: Double?
     private(set) var importLog: [ImportLogLine] = []
     private(set) var importError: String?
+    /// An import started over Wi-Fi is running (GameLibraryServer).
+    var externalImportRunning = false
+    private var refreshSoonTask: Task<Void, Never>?
 
     struct ImportLogLine: Identifiable, Hashable {
         let id = UUID()
@@ -108,6 +111,17 @@ final class GameLibraryStore {
         if let r = result.1 { log(refresh: r) }
     }
 
+    /// Rescans shortly, coalescing bursts (Wi-Fi imports and deletes).
+    func refreshSoon() {
+        refreshSoonTask?.cancel()
+        refreshSoonTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            PathResolver.shared.invalidate()
+            await refresh()
+        }
+    }
+
     private func log(refresh r: LibraryRefresh) {
         AppLog.app.log("[Library] \(r.scan.games.count) games, \(r.changed.count) changed, \(r.notes.count) normalize notes, \(r.scan.orphanOverlays.count) orphan overlays")
         for g in r.scan.games {
@@ -134,7 +148,7 @@ final class GameLibraryStore {
     /// belongs to the user, or sits in our Inbox, and the importer deletes
     /// its copy); a folder is read in place while access lasts.
     func importItem(_ url: URL) async {
-        guard !isImporting else {
+        guard !isImporting, !externalImportRunning else {
             importError = "An import is already running."
             return
         }

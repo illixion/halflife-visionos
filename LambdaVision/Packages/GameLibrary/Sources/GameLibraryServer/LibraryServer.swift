@@ -89,6 +89,12 @@ public final class LibraryServer: @unchecked Sendable {
         public var receivedBytes: Int64 = 0
         public var activeUploads = 0
         public var failedFiles = 0
+
+        public init(plannedFiles: Int = 0, plannedBytes: Int64 = 0, completedFiles: Int = 0,
+                    receivedBytes: Int64 = 0, activeUploads: Int = 0, failedFiles: Int = 0) {
+            self.plannedFiles = plannedFiles; self.plannedBytes = plannedBytes; self.completedFiles = completedFiles
+            self.receivedBytes = receivedBytes; self.activeUploads = activeUploads; self.failedFiles = failedFiles
+        }
     }
 
     public enum Event: Sendable {
