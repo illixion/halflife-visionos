@@ -73,6 +73,70 @@ func boneLocalPoints(_ model: ProbeModel) -> [[SIMD3<Float>]] {
 }
 
 /// Which bones are hidden in the rest pose as parked parts (ViewmodelGrip).
+func looseInRest(_ model: ProbeModel) -> [Bool] {
+    ViewmodelGrip.looseParts(points: boneLocalPoints(model), restPose: model.restPose, boneNames: model.boneNames)
+}
+
+/// The gun's vertices in idle, without hands or loose parts — what the app
+/// reads the muzzle from (ViewmodelGrip.muzzle).
+func shownGunPoints(_ vm: ProbeModel, loose: [Bool]) -> [SIMD3<Float>] {
+    let isHand = ViewmodelGrip.handTriangleFilter(textureNames: vm.textureNames, boneNames: vm.boneNames)
+    return vm.triangles.filter { t in
+        !isHand(t.texture, t.v[0].1, t.v[1].1, t.v[2].1) && !t.v.allSatisfy { $0.1 < loose.count && loose[$0.1] }
+    }.flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
+}
+
+/// How far an aimed gun's muzzle strays from where the aim reads it (the
+/// idle pose) while it plays its sequences in the hand: the worst angle of
+/// the muzzle's bone's idle +X, the worst muzzle displacement, and the
+/// sequence each happens in. The muzzle rides attachment 0's bone when it
+/// was read from it, else the gun's body. Draw and holster are skipped (the
+/// game holds no aim through them).
+func sequenceDrift(_ vm: ProbeModel, grip: ViewmodelGrip.Grip, muzzle: SIMD3<Float>, loose: [Bool])
+    -> (degrees: Float, degreesIn: String, units: Float, unitsIn: String, carrier: String) {
+    let n = vm.boneNames.count
+    let geometry = ViewmodelGrip.boneGeometry(
+        boneCount: n, textureNames: vm.textureNames,
+        vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+    let onAttachment = vm.attachments.first.map {
+        $0.bone < n && simd_distance((vm.restPose[$0.bone] * SIMD4($0.org, 1)).xyz3, muzzle) < 1e-4 } == true
+    let carrier = onAttachment ? vm.attachments[0].bone
+        : ViewmodelGrip.gunBody(geometry: geometry, loose: loose) ?? grip.bone
+    guard carrier < n else { return (0, "-", 0, "-", "-") }
+    let barrelLocal = (vm.restPose[carrier].inverse * SIMD4<Float>(1, 0, 0, 0)).xyz3
+    let muzzleLocal = (vm.restPose[carrier].inverse * SIMD4(muzzle, 1)).xyz3
+    let rest = ViewmodelGrip.modelMatrix(hand: matrix_identity_float4x4, grip: grip, hold: .aimed,
+                                         palette: vm.restPose, idlePalette: vm.restPose, handIsLeft: false)
+    let restMuzzle = (rest * SIMD4(muzzle, 1)).xyz3
+    var out: (degrees: Float, degreesIn: String, units: Float, unitsIn: String, carrier: String) = (0, "-", 0, "-", vm.boneNames[carrier])
+    var seq: Int32 = 0
+    var name = [CChar](repeating: 0, count: 32)
+    var frames: Int32 = 0
+    var pose = lambda_weapon_pose_t()
+    while lambda_body_sequence(seq, &name, &frames) != 0 {
+        defer { seq += 1 }
+        let label = String(cString: name)
+        let l = label.lowercased()
+        if l.contains("draw") || l.contains("holster") || l.contains("deploy") || l == "up" || l == "down" { continue }
+        for f in 0..<max(1, Int(frames)) where lambda_body_pose_at(seq, Float(f), &pose) != 0 {
+            var live = [float4x4](repeating: matrix_identity_float4x4, count: n)
+            withUnsafePointer(to: &pose.bones) { raw in
+                raw.withMemoryRebound(to: Float.self, capacity: Int(LAMBDA_WEAPON_MAX_BONES) * 12) { p in
+                    for i in live.indices { live[i] = AvatarRig.matrix(fromRowMajor3x4: p + i * 12) }
+                }
+            }
+            let m = ViewmodelGrip.modelMatrix(hand: matrix_identity_float4x4, grip: grip, hold: .aimed,
+                                              palette: live, idlePalette: vm.restPose, handIsLeft: false)
+            let b = simd_normalize((m * live[carrier] * SIMD4(barrelLocal, 0)).xyz3)
+            let deg = acosf(max(-1, min(1, b.x))) * 180 / .pi
+            let d = simd_distance((m * live[carrier] * SIMD4(muzzleLocal, 1)).xyz3, restMuzzle)
+            if deg > out.degrees { out.degrees = deg; out.degreesIn = label }
+            if d > out.units { out.units = d; out.unitsIn = label }
+        }
+    }
+    return out
+}
+
 func parkedInRest(_ model: ProbeModel) -> [Bool] {
     let pts = boneLocalPoints(model)
     let loose = ViewmodelGrip.looseParts(points: pts, restPose: model.restPose, boneNames: model.boneNames)
@@ -111,8 +175,10 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
             vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
         let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
             .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
+        let loose = looseInRest(vm)
         let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
-                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints)
+                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints,
+                                      hasAttachment: !vm.attachments.isEmpty, loose: loose)
         let fingerChains = ViewmodelGrip.fingerChains(parents: vm.parents, geometry: geometry)
 
         // The synthesised hand frame, built for a hand that has a real Bip01
@@ -156,16 +222,32 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
         let hold = ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose)
         let barrel = ViewmodelGrip.barrel(grip: grip, hold: hold, idlePalette: vm.restPose, handIsLeft: false)
         let muzzle = ViewmodelGrip.muzzle(attachment: vm.attachments.first, idlePalette: vm.restPose,
-                                          gunPoints: gunPoints)
+                                          gunPoints: shownGunPoints(vm, loose: loose))
         let muzzleInHand = muzzle.map { ViewmodelGrip.muzzleInHand($0, grip: grip, idlePalette: vm.restPose,
                                                                    handIsLeft: false) }
         print(String(format: "  %-20@ cut %3d/%3d tris  grip %@%@  Valve's hand %.0f° off the barrel → %@%@",
                      file, cut, vm.triangles.count, vm.boneNames[grip.bone],
                      grip.fingerPrefix == nil ? " (synthesised)" : "", offFingers,
                      hold == .aimed ? "aimed" : "held", synthNote))
+        let fromAttachment = muzzle != nil && vm.attachments.first.map {
+            simd_distance((vm.restPose[$0.bone] * SIMD4($0.org, 1)).xyz3, muzzle!) < 1e-4 } == true
         if let m = muzzleInHand {
             print(String(format: "      muzzle in hand (%.1f %.1f %.1f) units, from %@", m.x, m.y, m.z,
-                         vm.attachments.isEmpty ? "the front of the gun" : "attachment 0"))
+                         fromAttachment ? "attachment 0" : vm.attachments.isEmpty ? "the front of the gun"
+                             : "the front of the gun (attachment 0 is off the barrel)"))
+        }
+        // Held still by its body: whatever Valve's hand does on the gun, the
+        // barrel must stay on the aim through every sequence it fires,
+        // idles and reloads in.
+        if hold == .aimed, let muzzle {
+            let drift = sequenceDrift(vm, grip: grip, muzzle: muzzle, loose: loose)
+            print(String(format: "      held by %@; in the hand the barrel (%@) strays at most %.1f° (%@), the muzzle %.1f units (%@)",
+                         vm.boneNames[grip.body ?? grip.bone], drift.carrier, drift.degrees, drift.degreesIn, drift.units, drift.unitsIn))
+            // A gun that marks its muzzle is held by its body, so nothing it
+            // plays outside draw and holster may turn it off the aim.
+            if !vm.attachments.isEmpty, drift.degrees > 1 || drift.units > 0.5 {
+                die("\(file): the held gun strays off the aim in \(drift.degreesIn)")
+            }
         }
         // Guns must come out aimed with the muzzle ahead of the hand. Thrown
         // and placed items may go either way: the split only matters where
@@ -282,8 +364,10 @@ func runAnchorChecks(modelsDir: String, rig: AvatarRig, gordon: ProbeModel, dump
             vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
         let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
             .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
+        let loose = looseInRest(vm)
         let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
-                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints)
+                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints,
+                                      hasAttachment: !vm.attachments.isEmpty, loose: loose)
         let ok = ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: vm.restPose,
                                                gunVertexCount: vm.triangles.count - cut)
         let hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: vm.restPose) == .aimed ? "aimed" : "held" } ?? "-"
@@ -304,6 +388,17 @@ func runAnchorChecks(modelsDir: String, rig: AvatarRig, gordon: ProbeModel, dump
         let parked = parkedInRest(vm)
         if parked.contains(true) {
             print("      parked out of shot (hidden): " + parked.indices.filter { parked[$0] }.map { vm.boneNames[$0] }.joined(separator: ", "))
+        }
+        if ok, let grip, ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose) == .aimed,
+           let muzzle = ViewmodelGrip.muzzle(attachment: vm.attachments.first, idlePalette: vm.restPose,
+                                             gunPoints: shownGunPoints(vm, loose: loose)) {
+            let m = ViewmodelGrip.muzzleInHand(muzzle, grip: grip, idlePalette: vm.restPose, handIsLeft: false)
+            let drift = sequenceDrift(vm, grip: grip, muzzle: muzzle, loose: loose)
+            let fromAttachment = vm.attachments.first.map {
+                simd_distance((vm.restPose[$0.bone] * SIMD4($0.org, 1)).xyz3, muzzle) < 1e-4 } == true
+            print(String(format: "      muzzle in hand (%.1f %.1f %.1f) from %@; held by %@, barrel (%@) strays %.1f° (%@), muzzle %.1f units (%@)",
+                         m.x, m.y, m.z, fromAttachment ? "attachment 0" : vm.attachments.isEmpty ? "the gun's front" : "the gun's front (attachment 0 off the barrel)",
+                         vm.boneNames[grip.body ?? grip.bone], drift.carrier, drift.degrees, drift.degreesIn, drift.units, drift.unitsIn))
         }
         if let dumpDir {
             // The viewmodel as authored, in its idle model space: hands as

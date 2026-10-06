@@ -465,6 +465,31 @@ instead of deleting them.
   rim to pick a weapon*. `Tools/HandsProbe` checks the arc layout, opening,
   folding, clamping and the setting. On device: the reach (radii in
   `WeaponWheelGesture.Tuning` / `WeaponWheelPanel.member*R`) and legibility.
+- ~~.357 off the finger-gun aim and the crosshair~~ (device check pending).
+  The models stream's recent changes didn't cause it: the probe's output
+  for the Python is the same before and after them. Two faults in the HD
+  model's data did. Both are now fixed by general rules:
+  - *Fidget.* In `fidget1`, Valve's hand raises the HD Python 8° for about
+    four seconds. The grip bone was the part held still, so the drawn gun
+    tipped off the aim. An aimed gun that marks a muzzle is now held by its
+    body, the bone carrying the most of the gun (`ViewmodelGrip.gunBody`,
+    `Grip.body`). The pump, the cylinder and the magazines still animate
+    around it. The same rule fixes the sniper rifle's bolt cycle, which
+    turned the gun 47° after every shot, and the HD MP5's grenade, which
+    flipped it. Thrown items and melee weapons mark no muzzle, so they keep
+    the old hold, and their throws and swings still leave the hand. The
+    RPG's reload (11°) and the spore launcher's `idle2` (10°) still move
+    their guns, for the same reason.
+  - *Muzzle.* The HD Python reuses the classic model's attachment offset
+    on a bone that sits differently, so attachment 0 sits 4 units ahead of
+    the barrel and 4 above it. Shots and the reticle left 11 cm above the
+    drawn barrel. Attachment 0 is now the muzzle only when it falls inside
+    the outline of the gun's front 6 units, seen down the barrel
+    (`ViewmodelGrip.isOnBarrel`); otherwise the gun's front is used. The
+    rule also corrects the HD shotgun, OF's Desert Eagle, M249, sniper rifle
+    and displacer. Muzzle flashes still draw at attachment 0.
+  The probe prints each gun's holding bone and how far its barrel strays
+  through every sequence. It fails if a gun that marks a muzzle strays.
 
 - ~~HEV HUD in flat modes: ammo panel stuck at the resting gun hand~~
   (device check pending). Outside hands mode the HEV readouts become a

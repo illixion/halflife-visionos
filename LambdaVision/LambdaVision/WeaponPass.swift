@@ -394,16 +394,21 @@ final class WeaponPass {
                                                   textureNames: uploaded.textureNames,
                                                   vertices: StudioMesh.vertexTextureBones(of: raw))
         let gunPoints = StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) }
-        self.grip = ViewmodelGrip.grip(boneNames: uploaded.boneNames, parents: uploaded.boneParents,
-                                       pose: idle, extractorChoice: uploaded.handBoneIndex,
-                                       geometry: geometry, gunPoints: gunPoints)
-        self.hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: idle) } ?? .held
-        self.attachments = StudioMesh.attachments(of: raw)
-        self.muzzle = ViewmodelGrip.muzzle(
-            attachment: attachments.first, idlePalette: idle, gunPoints: gunPoints)
         self.bonePoints = StudioMesh.bonePoints(of: raw)
         self.looseParts = ViewmodelGrip.looseParts(points: bonePoints, restPose: idle,
                                                    boneNames: uploaded.boneNames)
+        self.attachments = StudioMesh.attachments(of: raw)
+        self.grip = ViewmodelGrip.grip(boneNames: uploaded.boneNames, parents: uploaded.boneParents,
+                                       pose: idle, extractorChoice: uploaded.handBoneIndex,
+                                       geometry: geometry, gunPoints: gunPoints,
+                                       hasAttachment: !attachments.isEmpty, loose: looseParts)
+        self.hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: idle) } ?? .held
+        let loose = looseParts
+        let shownGunPoints = StudioMesh.posedPoints(of: raw, palette: idle) { t, a, b, c in
+            !isHand(t, a, b, c) && ![a, b, c].allSatisfy { $0 < loose.count && loose[$0] }
+        }
+        self.muzzle = ViewmodelGrip.muzzle(
+            attachment: attachments.first, idlePalette: idle, gunPoints: shownGunPoints)
         self.gunCorners = WeaponWarmup.viewmodelCorners(raw, idle: idle)
         self.viewmodelKey = WeaponWarmup.key(of: raw)
         self.drawsFlat = !ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: idle,
