@@ -307,7 +307,7 @@ static inline float3 glassViewRay(float2 uv, ushort eye, constant DisplayParams 
 // grazing angles, as a lake does toward the horizon. A function of the world
 // point and time (the view bias differs between the eyes only by their
 // separation's angle), so both eyes see the same ripple at the same spot.
-static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float cosTheta,
+static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float cosTheta, float pixTan,
                                  constant DisplayParams &p)
 {
     const float slope = p.water.w / (1.0 + dist / 120.0) * saturate(cosTheta * 4.0);
@@ -315,21 +315,37 @@ static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float
         return n;
     const float3 t1 = normalize(cross(n, abs(n.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0)));
     const float3 t2 = cross(n, t1);
-    const float2 q = float2(dot(P, t1), dot(P, t2)) / max(p.reflectExtra.w, 0.05);
+    const float scale = max(p.reflectExtra.w, 0.05);
+    const float2 q = float2(dot(P, t1), dot(P, t2)) / scale;
     const float t = p.reflectExtra.z;
+    // the view direction along the surface, and across it
+    const float3 along = normalize(d - dot(d, n) * n + 1e-5 * t1);
+    const float3 across = cross(n, along);
+    const float2 alongB = float2(dot(along, t1), dot(along, t2)), acrossB = float2(dot(across, t1), dot(across, t2));
+    const float cosV = max(cosTheta, 0.05);
     // direction (unit), spatial frequency (rad / unit), speed (rad / s)
     const float4 waves[6] = { float4( 0.89,  0.45, 0.95, 0.40), float4(-0.31,  0.95, 1.21, 0.55),
                               float4( 0.98, -0.20, 1.53, 0.65), float4(-0.77, -0.64, 1.87, 0.80),
                               float4( 0.20, -0.98, 2.23, 0.95), float4(-0.95,  0.31, 2.61, 1.10) };
     const float amp[6] = { 0.26, 0.22, 0.18, 0.14, 0.11, 0.09 };
     float2 g = 0.0;
-    for (int i = 0; i < 6; i++)
-        g += amp[i] * waves[i].xy * cos(dot(waves[i].xy, q) * waves[i].z + waves[i].w * t);
+    for (int i = 0; i < 6; i++) {
+        // Band limit (the headset showed fine hatching): the wave's period
+        // on screen, in engine pixels — foreshortened along the view by the
+        // grazing angle — fades it out between 5 and 2.5 pixels, and its
+        // tilt is capped so the mirror's ripple offset never folds over
+        // (offset gradient under 1: tilt ≤ 0.08 · period in px · pixTan).
+        const float2 k = waves[i].xy;
+        const float lambda = 6.2831853 * scale / waves[i].z;
+        const float screenFreq = dist / lambda * length(float2(dot(k, alongB) / cosV, dot(k, acrossB)));
+        const float periodPx = 1.0 / max(screenFreq * pixTan, 1e-6);
+        const float band = saturate(periodPx / 2.5 - 1.0);
+        const float a = min(slope * amp[i], 0.08 * periodPx * pixTan) * band;
+        g += a * k * cos(dot(k, q) * waves[i].z + waves[i].w * t);
+    }
     const float3 tilt = g.x * t1 + g.y * t2;
     // along the view (vertical on screen) in full, across it a quarter
-    const float3 along = normalize(d - dot(d, n) * n + 1e-5 * t1);
-    const float3 across = cross(n, along);
-    return normalize(n - slope * (dot(tilt, along) * along + 0.25 * dot(tilt, across) * across));
+    return normalize(n - (dot(tilt, along) * along + 0.25 * dot(tilt, across) * across));
 }
 
 static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
@@ -378,7 +394,8 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     }
     if (nd > 0.0)
         n = -n;                              // the side facing the viewer
-    const float3 shape = water ? waterRipple(n, P, d, dist, saturate(-dot(d, n)), p) : n;
+    const float pixTan = (p.eyeTangents[eye].z + p.eyeTangents[eye].w) / float(size.y);   // one engine pixel
+    const float3 shape = water ? waterRipple(n, P, d, dist, saturate(-dot(d, n)), pixTan, p) : n;
     const float4 k = water ? p.water : p.glass;   // strength, F0, cap
     const float cosTheta = saturate(-dot(d, shape));
     const float F = k.y + (1.0 - k.y) * pow(1.0 - cosTheta, 5.0)
@@ -400,7 +417,11 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float3 along = normalize(d - dot(d, n) * n + 1e-5);
         const float3 across = cross(n, along);
         const float3 tilt = shape - n;
-        const float2 offset = 2.0 * float2(dot(tilt, across) / (t.x + t.y), -dot(tilt, along) / (t.z + t.w));
+        float2 offset = 2.0 * float2(dot(tilt, across) / (t.x + t.y), -dot(tilt, along) / (t.z + t.w));
+        // never more than a mirror texel and a half: where the mirror is
+        // coarse a larger nudge jumps between its texels
+        const float2 texel = 1.0 / float2(sharpWater.get_width(), sharpWater.get_height());
+        offset = clamp(offset, -1.5 * texel, 1.5 * texel);
         const float2 suv = uv + offset;
         const float texelY = 1.0 / float(sharpWater.get_height());
         half4 c = sharpWater.sample(s, suv, eye);
@@ -618,12 +639,20 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     for (int sj = 0; sj < SSPR_SUB_Y; sj++) {
         for (int si = 0; si < SSPR_SUB_X; si++) {
             const float2 sub = (float2(si, sj) + 0.5) / float2(SSPR_SUB_X, SSPR_SUB_Y);
-            const float3 d = glassViewRay((float2(gid.xy) + sub) / float2(size.xy), eye, p);
-            if (d.z > -1e-4) continue;
+            float3 d = glassViewRay((float2(gid.xy) + sub) / float2(size.xy), eye, p);
+            if (d.z > -1e-4) d = float3(d.xy, -1e-4);
             const float3 P = E + d * ((height - E.z) / d.z);
             const float3 r = float3(d.x, d.y, -d.z);
             float best = 1e30;
             float2 bestSrc = float2(-1.0);
+            // if no candidate checks out (the ray's point lands on the water
+            // itself, or off the frame), the first candidate's own source
+            // stands in: a skipped sample left the texel part-empty, and
+            // texels of uneven coverage showed as fine horizontal hatching
+            // and dark smudges on the headset
+            float2 fallback = float2(-1.0);
+            for (int k = 0; k < 5 && fallback.x < 0.0; k++)
+                if (valid[k]) fallback = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
             for (int k = 0; k < 5; k++) {
                 if (!valid[k]) continue;
                 const float along = max(dot(Wc[k] - P, r), 0.0);
@@ -640,6 +669,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 const float miss = length(off - r * dot(off, r)) + 0.01 * along;   // nearer wins a tie
                 if (A.z > height && miss < best) { best = miss; bestSrc = src; }
             }
+            if (bestSrc.x < 0.0) bestSrc = fallback;
             if (bestSrc.x < 0.0) continue;
             const float2 edge = min(bestSrc, 1.0 - bestSrc);
             const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));

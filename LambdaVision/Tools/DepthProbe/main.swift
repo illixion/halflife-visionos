@@ -540,8 +540,40 @@ for path in args {
     // water pixels away from the mask's edge: the composite of the shifted
     // frame against this one resampled by δ, and the same for the plain
     // composite (the shift's own resampling noise) as the baseline.
+    // Hatching: fine horizontal lines on the water (the headset showed them
+    // with the ripple on): the mean vertical second difference of the
+    // composite over water pixels away from the mask edge, against the same
+    // with the ripple off. Aliased or folding ripple raises it.
     if sharp, params.sspr.0.z > 0 {
-        func shifted(_ dx: Float, _ dy: Float) -> (DisplayParams, [Int: MTLTexture], [UInt8]) {
+        func hatching(_ img: [UInt8]) -> Float {
+            var sum: Float = 0, n = 0
+            for row in stride(from: 3, to: h - 3, by: 1) {
+                for x in stride(from: 3, to: w - 3, by: 2) {
+                    let sy = h - 1 - row
+                    let c = Int(stencil[sy * w + x])
+                    guard c == Int(params.sspr.0.x) + 16, Int(stencil[(sy + 3) * w + x]) == c, Int(stencil[(sy - 3) * w + x]) == c else { continue }
+                    let i = (row * w + x) * 4
+                    for k in 0..<3 {
+                        sum += abs(2 * Float(img[i + k]) - Float(img[i - w * 4 + k]) - Float(img[i + w * 4 + k]))
+                    }
+                    n += 3
+                }
+            }
+            return sum / Float(max(n, 1))
+        }
+        var still = params
+        still.water.w = 0
+        let calm = hatching(render(glassOnPipeline, w, h, still, textures))
+        var rough = params
+        rough.water.w *= 3                                  // "Water ripples" 3×
+        let at3 = hatching(render(glassOnPipeline, w, h, rough, textures))
+        let at1 = hatching(glass)
+        print(String(format: "%@ hatching: ripple 0× %.2f, 1× %.2f, 3× %.2f /255", name, calm, at1, at3))
+        // d7868d3 at the c1a2 device view: 0× 1.77, 1× 2.10, 3× 3.18 (fails)
+        if at1 > calm + 0.2 || at3 > calm + 0.6 { failures += 1 }
+    }
+    if sharp, params.sspr.0.z > 0 {
+        func shifted(_ dx: Float, _ dy: Float, dt: Float = 0) -> (DisplayParams, [Int: MTLTexture], [UInt8]) {
             var rgba = [UInt8](repeating: 0, count: w * h * 4)
             var depth = [Float](repeating: 1, count: w * h)
             var st = [UInt8](repeating: 0, count: w * h)
@@ -564,6 +596,7 @@ for path in args {
                 }
             }
             var pp = params
+            pp.reflectExtra.z += dt                       // the ripples a frame later
             let t = pp.eyeTangents.0
             let sx = (t.x + t.y) / Float(w), sy = (t.z + t.w) / Float(h)
             let t2 = SIMD4(t.x + dx * sx, t.y - dx * sx, t.z - dy * sy, t.w + dy * sy)
@@ -588,8 +621,11 @@ for path in args {
         }
         let waterRow = Int(params.sspr.0.x) + 16
         var worst: (Float, Float) = (0, 0)
-        for (dx, dy) in [(Float(0.3), Float(0)), (0, 0.3), (0.5, 0.5)] {
-            let (pp, tx, st) = shifted(dx, dy)
+        // the last two: a frame later at 90 Hz with the ripples moving, and
+        // a tenth of a second later — moving water must still not sparkle
+        for (dx, dy, dt) in [(Float(0.3), Float(0), Float(0)), (0, 0.3, 0), (0.5, 0.5, 0),
+                             (0.3, 0.3, 1.0 / 90), (0.3, 0.3, 0.1)] {
+            let (pp, tx, st) = shifted(dx, dy, dt: dt)
             let g2 = render(glassOnPipeline, w, h, pp, tx)
             let p2 = render(plainPipeline, w, h, pp, tx)
             var errs: [Float] = [], base: [Float] = []
@@ -618,13 +654,13 @@ for path in args {
                     let v = UInt8(min(e * 8, 255))
                     img[i] = v; img[i + 1] = UInt8(Float(glass[i + 1]) / 4); img[i + 2] = UInt8(Float(glass[i + 2]) / 4)
                 } }
-                writePNG(img, w, h, String(format: "%@/stability-%@-%.1f-%.1f.png", dir, name, dx, dy))
+                writePNG(img, w, h, String(format: "%@/stability-%@-%.1f-%.1f-%.3f.png", dir, name, dx, dy, dt))
             }
             errs.sort(); base.sort()
             let p99 = errs.isEmpty ? 0 : errs[errs.count * 99 / 100], b99 = base.isEmpty ? 0 : base[base.count * 99 / 100]
             let mean = errs.reduce(0, +) / Float(max(errs.count, 1)), bmean = base.reduce(0, +) / Float(max(base.count, 1))
-            print(String(format: "%@ stability, shift (%.1f, %.1f) px: water mean %.1f p99 %.0f /255 (plain image: mean %.1f p99 %.0f) over %d px",
-                         name, dx, dy, mean, p99, bmean, b99, errs.count))
+            print(String(format: "%@ stability, shift (%.1f, %.1f) px, +%.3f s: water mean %.1f p99 %.0f /255 (plain image: mean %.1f p99 %.0f) over %d px",
+                         name, dx, dy, dt, mean, p99, bmean, b99, errs.count))
             worst = (max(worst.0, p99 - b99), max(worst.1, mean - bmean))
         }
         // the shifted reflection may differ from the resampled one by the
