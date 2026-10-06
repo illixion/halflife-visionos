@@ -137,8 +137,35 @@ instead of deleting them.
   state; it sets the tone map's peak for the HDR step (half-float engine
   target + Oneiros-style `tonemapDisplay`).
 
-- **Per-pixel reprojection depth.** We submit a constant depth; real
-  depth would reduce jelly artifacts during head motion.
+- **GPU budget: measure on device.** The Performance HUD now shows the
+  GPU's own time per frame against the 8.3 ms a 120 Hz frame has
+  (`GPUPassTimer`): our command buffer from Metal 4 commit feedback
+  (`gpuQueue`, always on), and with Settings → Diagnostics → "GPU pass
+  timing" on, ANGLE's time per eye from GL timer queries (`gEngine0/1`, if
+  ANGLE exposes `GL_EXT_disjoint_timer_query`; the worker logs which) and
+  each of our passes from counter-heap timestamps (composite, arms,
+  gun+body, HUD, depth). The same numbers go to the log as `[FT] gpu(ms)`
+  every 512 frames. The old `angleGPU`/`frameGPU` columns are CPU-observed
+  latencies, not GPU time. Next: record p50/p95 in the tram ride, a dense
+  room (c1a0 cafeteria) and a firefight, with the thermal state, into
+  `docs/plans/modern-lighting.md`; check `gpuQueue` ≈ the sum of our
+  passes (if it is much larger, commit feedback counts the wait on ANGLE).
+- **Modern lighting tier 1 (glass): prototype, device check pending.**
+  Settings → Graphics "Glass reflections (prototype)" (default off, live;
+  `Renderer.glassReflections` + the engine's `r_vrglass`). The engine marks
+  glass in the stencil of the depth texture the app owns: translucent-texture
+  brush entities (GoldSrc windows) and non-additive brush surfaces named
+  `*glass*`, each with a code holding its eye-space normal (ref/gl
+  `gl_rsurf.c` `R_VRGlass*`, in `xash3d-visionos.patch`; glass writes no
+  depth, so the normal cannot come from the depth buffer). The composite adds
+  Schlick Fresnel with the frame itself as a distant environment (reflected
+  ray projected back into the eye's frustum, room light where it leaves the
+  frame) — `Shaders.metal` `glassShade`, one stencil read per pixel, no pass.
+  Mods get it by the same rules or not at all. Verified on the Mac build
+  (c1a0 windows: mask exactly on the panes, normal codes match the wall;
+  `Tools/DepthProbe --png` renders plain vs glass from a version-2
+  `r_vrdump`). Needs a libxash rebuild to reach the device. Left: see
+  `docs/plans/modern-lighting.md` (tier 1 status).
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored
@@ -275,9 +302,21 @@ instead of deleting them.
   behind. Seen in the probe's grip renders; likely visible on device near the
   gun. A fix wants a rule for "what the flat viewmodel would not have shown",
   e.g. culling against the original view frustum in viewmodel space.
-- **2D overlay minification.** The HUD box is downsampled ~2.15×; could
-  render the 2D layer at a matching smaller virtual resolution instead.
-- **`tangents` API deprecation** warning in Renderer.swift.
+- **2D overlay minification (looked at, not changed).** The 2D layer's
+  ortho keeps the full virtual screen (the engine render size, ~3800 px at
+  0.75 scale) and `R_Set2DMode` squeezes it into the 50° box, 1/frac ≈ 2.15×
+  smaller. HUD sprites and console glyphs are *not* texture-minified by
+  that: `hud_scale 4` / `con_fontscale 3` magnify them first, so they land
+  ~1.9× magnified. What does suffer is anything one virtual pixel thick (net
+  graph lines, console cursor, menu outlines: ~0.46 px, so they flicker)
+  and the stock menu if mainui rasterises its fonts at the virtual height.
+  The fix is to give the 2D layer its own virtual size equal to the box
+  (decoupled from `refState` width/height, which the 3D view also uses),
+  with `hud_scale`/`con_fontscale` divided by the same factor and
+  `Renderer.menuCursorFromGaze`'s render-target mapping switched to the
+  box. That touches client HUD layout, mainui's VidInit and the cursor
+  mapping, and can't be judged without the headset, so it is left for a
+  device session; check first whether menu text actually looks aliased.
 - **Level-transition hitches** (~43 ms signon parse + 110-180 ms map
   spawn) are inherent HL; a fade/hold would mask them.
 
@@ -466,6 +505,33 @@ instead of deleting them.
   too. No Opposing Force or Blue Shift campaign map carries an
   `item_longjump`. Diagnostics: the `ground
   speed:` line shows the jump kind and whether the module is owned.
+- ~~Per-pixel reprojection depth~~ — Settings → Graphics "Per-pixel
+  reprojection depth" (default off, live; `Renderer.reprojectionDepth`,
+  `ReprojectionDepth.swift`) gives the compositor each pixel's real depth
+  instead of one constant far value. The composite converts the engine's GL
+  window depth to distance and back through `drawable.computeProjection`
+  (`Shaders.metal` `compositorDepth`), clamped inside the layer's range
+  (far = the old 0.0001, since depth 0 drew black in Oneiros); the gun and
+  body's own depth is then copied over it where they drew
+  (`reprojectionDepthMerge`). The stock flat viewmodel (squeezed into the
+  front 30% of GL depth, decoding under 16 cm) keeps the far depth, as do
+  the menu, the HDR test, the level-load snapshot (its parallax is drawn in)
+  and a frame without engine depth. HUD holograms, arcs and the wireframe
+  arms write none and inherit what is behind them. `Tools/DepthProbe` runs
+  the real shaders on Mac `r_vrdump` frames: every pixel unprojects to
+  within 3e-4 of the GL point for infinite and finite reverse-Z
+  projections, and the merge replaces exactly the overlay's texels. On
+  device: A/B while leaning toward a near wall and a crate, and with the gun
+  held close; look for jelly at depth edges (door frames) and for the HUD
+  numbers swimming (device check pending).
+
+- ~~`tangents` API deprecation~~ — `View.tangents` (deprecated since
+  visionOS 2) is gone from Renderer and LoadSnapshot: the frustum tangents
+  are read back from `drawable.computeProjection` instead
+  (`Drawable.frustumTangents`, `DrawableProjection.swift`), whose x/y rows
+  carry exactly the frustum. Each view's tangents are logged once at the
+  first drawable (`[LambdaVision] viewN tangents …`); on device, check they
+  match the old values (and the image fuses as before) (device check pending).
 
 - ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
   orientation came from Valve's hand bone, which sits differently on every

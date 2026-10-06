@@ -138,6 +138,30 @@ typedef struct
     float hdrTest;      // headroom test pattern: 0 off, 1 dots on black, 2 full-view patches
     float aspect;       // eye viewport width / height, so the test dots are round
     float pad;
+    // Per-pixel reprojection depth (fragmentShaderDepth / fragmentShaderFXAADepth):
+    // the engine's GL window depth → the compositor's reverse-Z depth.
+    // x = 2·n·f, y = f + n, z = f − n of the engine's projection (metres),
+    // so distance = x / (y − ndc·z).
+    simd_float4 engineClip;
+    // Per eye: the compositor projection's z and w rows at a view-space z,
+    // (P[2].z, P[3].z, P[2].w, P[3].w): depth = (x·z + y) / (z·z + w).
+    simd_float4 depthProjection[2];
+    // x = depth for "far" (just inside the far plane: exactly 0 displays
+    // black), y = nearest depth allowed, z = metres: anything the engine
+    // puts nearer than this is its flat viewmodel (squeezed into the front
+    // 30% of the depth range) and gets the far depth, as before.
+    simd_float4 depthLimits;
+    // Glass (the composite's kGlass variants, Shaders.metal glassShade): where
+    // the engine marked glass in its stencil (r_vrglass), a Fresnel
+    // reflection. x = strength, y = F0 (normal-incidence reflectance), z = the
+    // most of the pixel the reflection may replace, w unused.
+    simd_float4 glass;
+    // rgb = what the reflection shows where its ray leaves the frame, in the
+    // engine's (gamma-encoded) colour space.
+    simd_float4 glassAmbient;
+    // Per eye: the engine frustum's left, right, top, bottom tangents, for
+    // each pixel's view ray.
+    simd_float4 eyeTangents[2];
 } DisplayParams;
 
 #ifdef __METAL_VERSION__

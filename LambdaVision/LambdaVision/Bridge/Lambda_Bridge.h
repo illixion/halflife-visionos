@@ -471,6 +471,14 @@ void lambda_gl_worker_set_2d_viewport(float x, float y, float w, float h);
 void lambda_gl_set_frame_fence(void *mtl_shared_event,
                                unsigned long long signal_value);
 
+// GPU time of each display eye's engine frame on ANGLE's queue, from
+// GL_EXT_disjoint_timer_query (no-op without it; the worker logs which).
+// Off by default: lambda_gl_set_gpu_timing(1) starts timing. The getter
+// fills the latest result per eye (ms) and returns a bit per eye (1 = eye 0,
+// 2 = eye 1) that has a result not taken by an earlier call.
+void lambda_gl_set_gpu_timing(int enabled);
+int  lambda_gl_gpu_eye_ms(float out_ms[2]);
+
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
 // 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,

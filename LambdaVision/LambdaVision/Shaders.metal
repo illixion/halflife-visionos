@@ -208,6 +208,55 @@ static inline float3 hdrTestPattern(float2 uv, float mode, float aspect)
     return 0.0;
 }
 
+// ---- Glass (modern lighting tier 1; Renderer.glassReflections) -----------
+// The engine marks glass in the stencil aspect of the depth texture we gave
+// it (r_vrglass, ref/gl gl_rsurf.c R_VRGlass*): 16 + the surface's eye-space
+// normal, x and y quantised to 15 steps each, facing the viewer. Glass in
+// GoldSrc writes no depth, so the normal has to come from there rather than
+// from the depth buffer, which holds whatever is behind the pane.
+//
+// The reflection is Schlick's Fresnel over a "distant environment" made of
+// the frame itself: the reflected ray, taken as a direction, is projected
+// back into this eye's frustum and the engine image sampled there. Looking
+// along a glass wall that shows the corridor ahead — the case where real
+// glass reflects most; facing a pane head-on the ray points behind the eye,
+// F is 4%, and the ambient colour stands in. One stencil read per pixel and
+// one extra colour sample on glass only; no extra pass.
+constant bool kGlassValue [[function_constant(22)]];
+constant bool kGlass = is_function_constant_defined(kGlassValue) && kGlassValue;
+
+static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
+                                texture2d_array<half> colorMap, sampler s,
+                                texture2d_array<uint> engineStencil,
+                                constant DisplayParams &p)
+{
+    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
+    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
+    if (code < 16 || code > 240)
+        return rgb;
+    const uint i = code - 16;
+    const float2 nxy = float2(float(i / 15), float(i % 15)) / 7.0 - 1.0;
+    const float3 n = normalize(float3(nxy, sqrt(saturate(1.0 - dot(nxy, nxy)))));
+    // GL eye space: x right, y up, the eye looking down −z; uv.y = 0 is the
+    // bottom row (the engine image is bottom-up, sampled unflipped).
+    const float4 t = p.eyeTangents[eye];   // left, right, top, bottom
+    const float3 v = normalize(float3(mix(-t.x, t.y, uv.x), mix(-t.w, t.z, uv.y), -1.0));
+    const float cosTheta = saturate(dot(-v, n));
+    const float F = p.glass.y + (1.0 - p.glass.y) * pow(1.0 - cosTheta, 5.0);
+    const float3 r = reflect(v, n);
+    float3 env = p.glassAmbient.rgb;
+    if (r.z < -0.05) {
+        const float2 tanR = r.xy / -r.z;
+        const float2 ruv = float2((tanR.x + t.x) / (t.x + t.y), (tanR.y + t.w) / (t.z + t.w));
+        const float2 edge = min(ruv, 1.0 - ruv);
+        // fade out toward the frame's edges and as the ray turns sideways
+        const float w = saturate(min(edge.x, edge.y) * 8.0) * saturate((-r.z - 0.05) * 4.0);
+        if (w > 0.0)
+            env = mix(env, float3(colorMap.sample(s, saturate(ruv), eye).rgb), w);
+    }
+    return mix(rgb, env, min(F * p.glass.x, p.glass.z));
+}
+
 static inline float4 displayOutput(float3 rgb, float alpha, float2 uv, float2 pixel,
                                    constant DisplayParams &p)
 {
@@ -218,7 +267,8 @@ static inline float4 displayOutput(float3 rgb, float alpha, float2 uv, float2 pi
 
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
-                               texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
+                               texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                               texture2d_array<uint> engineStencil [[ texture(2) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -233,8 +283,11 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     // engine colorMap when MetalFX is unavailable.
     float2 uv = in.texCoord;
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    float3 rgb = float3(colorSample.rgb);
+    if (kGlass)
+        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
 
-    return displayOutput(float3(colorSample.rgb), float(colorSample.a), uv, in.position.xy, params);
+    return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
 
 // Composite pass with FXAA folded in (Renderer.compositeFXAA, default on).
@@ -243,7 +296,8 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
 // from the centre tap so the drawable's alpha behaviour is unchanged.
 fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
                                    constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
-                                   texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]])
+                                   texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                                   texture2d_array<uint> engineStencil [[ texture(2) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -254,6 +308,108 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     float2 uv = in.texCoord;
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
-    half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
-    return displayOutput(float3(rgb), float(colorSample.a), uv, in.position.xy, params);
+    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
+    if (kGlass)
+        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+    return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
+}
+
+// ---- Per-pixel reprojection depth (Renderer.reprojectionDepth) ------------
+// The compositor re-warps each frame from the pose it was drawn at to the
+// pose at display time, using the drawable's depth for the positional part.
+// The constant far depth (fullscreenVertexShader) makes that a pure rotation:
+// right for distant walls, wrong for anything near when the head moves. These
+// variants give every pixel the engine's own depth instead, converted from
+// its GL window depth (standard Z, the projection Lambda_Bridge.c builds from
+// the same frustum tangents, near/far in DisplayParams.engineClip) to the
+// distance along the eye's forward axis and back through the compositor's
+// projection, so both name the same point in the room.
+//
+// Kept inside the layer's depth range: exactly 0 (the far plane) displayed
+// pure black on device in Oneiros, so sky, empty texels and anything past the
+// compositor's far plane get depthLimits.x, the old constant. A pixel the
+// engine puts nearer than depthLimits.z is its own flat viewmodel (the stock
+// one is squeezed into the front 30% of the depth range, so it decodes a few
+// centimetres from the eye) and gets the far depth too, as it always had: a
+// head-locked image has no right depth, and the near one would warp it hard.
+struct CompositeDepthOut
+{
+    float4 color [[color(0)]];
+    float  depth [[depth(any)]];
+};
+
+static inline float compositorDepth(depth2d_array<float> engineDepth, float2 uv, ushort eye,
+                                    constant DisplayParams &p)
+{
+    const uint2 size = uint2(engineDepth.get_width(), engineDepth.get_height());
+    const uint2 texel = min(uint2(uv * float2(size)), size - 1);
+    const float ndc = engineDepth.read(texel, eye) * 2.0 - 1.0;
+    const float distance = p.engineClip.x / (p.engineClip.y - ndc * p.engineClip.z);
+    if (distance < p.depthLimits.z)
+        return p.depthLimits.x;
+    const float4 P = p.depthProjection[eye];
+    const float z = -distance;
+    const float depth = (P.x * z + P.y) / (P.z * z + P.w);
+    return clamp(depth, p.depthLimits.x, p.depthLimits.y);
+}
+
+fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
+                                               constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
+                                               texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                                               depth2d_array<float> engineDepth [[ texture(1) ]],
+                                               texture2d_array<uint> engineStencil [[ texture(2) ]])
+{
+    constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
+                                   min_filter::linear, address::clamp_to_edge);
+    const float2 uv = in.texCoord;
+    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    float3 rgb = float3(colorSample.rgb);
+    if (kGlass)
+        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+    CompositeDepthOut out;
+    out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    return out;
+}
+
+fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
+                                                   constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
+                                                   texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                                                   depth2d_array<float> engineDepth [[ texture(1) ]],
+                                                   texture2d_array<uint> engineStencil [[ texture(2) ]])
+{
+    constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
+                                   min_filter::linear, address::clamp_to_edge);
+    const float2 uv = in.texCoord;
+    const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
+    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
+    if (kGlass)
+        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+    CompositeDepthOut out;
+    out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    return out;
+}
+
+// The gun and body draw over the engine image with their own depth buffer
+// (WeaponPass), so the drawable's depth still holds the engine's under them.
+// This copies their depth over it wherever they drew: the drawable texel and
+// the weapon depth texel are the same physical pixel (same size, same rate
+// map), and both are the compositor's reverse-Z already. Untouched texels
+// (the clear value, 0) keep the engine's depth.
+struct DepthOnlyOut
+{
+    float depth [[depth(any)]];
+};
+
+fragment DepthOnlyOut reprojectionDepthMerge(ColorInOut in [[stage_in]],
+                                             depth2d_array<float> overlayDepth [[ texture(0) ]])
+{
+    const float d = overlayDepth.read(uint2(in.position.xy), in.eye);
+    if (d <= 0.0)
+        discard_fragment();
+    DepthOnlyOut out;
+    out.depth = d;
+    return out;
 }

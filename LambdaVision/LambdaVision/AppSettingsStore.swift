@@ -37,6 +37,8 @@ enum AppSettingsStore {
     private static let brightnessKey      = "lambdavision.settings.brightness"
     private static let linearColorKey     = "lambdavision.settings.linearColor"
     private static let snapTurnDegreesKey = "lambdavision.settings.snapTurnDegrees"
+    private static let reprojectionDepthKey = "lambdavision.settings.reprojectionDepth"
+    private static let glassReflectionsKey = "lambdavision.settings.glassReflections"
 
     static var renderScale: Double {
         get { double(renderScaleKey, 0.75) }
@@ -61,6 +63,18 @@ enum AppSettingsStore {
     static var linearColor: Bool {
         get { bool(linearColorKey, true) }
         set { defaults.set(newValue, forKey: linearColorKey) }
+    }
+    /// Per-pixel depth for the compositor's reprojection
+    /// (Renderer.reprojectionDepth). Off by default until judged on device.
+    static var reprojectionDepth: Bool {
+        get { bool(reprojectionDepthKey, false) }
+        set { defaults.set(newValue, forKey: reprojectionDepthKey) }
+    }
+    /// Fresnel reflections on glass (Renderer.glassReflections, r_vrglass).
+    /// Off by default: a prototype until judged on device.
+    static var glassReflections: Bool {
+        get { bool(glassReflectionsKey, false) }
+        set { defaults.set(newValue, forKey: glassReflectionsKey) }
     }
     static var gamma: Double {
         get { double(gammaKey, 2.4) }   // tuned on the headset (engine default 2.5)

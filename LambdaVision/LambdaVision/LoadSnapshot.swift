@@ -167,8 +167,10 @@ final class LoadSnapshot {
 
     /// The engine just started a load: copy this frame (encoded by the next
     /// `encodeCapture`) and hold it until the load is done. `views` are the
-    /// drawable views and `anchor` the pose the engine drew this frame from.
-    func arm(views: [LayerRenderer.Drawable.View], anchor: float4x4,
+    /// drawable views, `tangents` their frustum tangents (left, right, top,
+    /// bottom — Drawable.frustumTangents) and `anchor` the pose the engine
+    /// drew this frame from.
+    func arm(views: [LayerRenderer.Drawable.View], tangents: [SIMD4<Float>], anchor: float4x4,
              zNear: Float, zFar: Float, now: Double) {
         let n = zNear / 39.37, f = zFar / 39.37
         if Self.dumpFirstCapture, dumpBuffers == nil, let color {
@@ -179,9 +181,9 @@ final class LoadSnapshot {
             }
         }
         pendingViews = []
-        pendingCapture = views.map { view in
+        pendingCapture = zip(views, tangents).map { view, t in
             let eye = anchor * view.transform
-            let t = view.tangents   // left, right, top, bottom
+            // t: left, right, top, bottom
             let l = -t.x * n, r = t.y * n, top = t.z * n, b = -t.w * n
             // The engine's own projection (Lambda_Bridge.c
             // lambda_engine_set_projection_tangents), in metres.
@@ -194,7 +196,7 @@ final class LoadSnapshot {
             return (eye * p.inverse, eye.columns.3)
         }
         // Cells of about cellDegrees across the frame's field of view.
-        if let t = views.first?.tangents {
+        if let t = tangents.first {
             let degrees = { (a: Float, b: Float) in (atanf(a) + atanf(b)) * 180 / .pi }
             pendingGrid = SIMD2(UInt32(ceilf(degrees(t.x, t.y) / Self.cellDegrees)),
                                 UInt32(ceilf(degrees(t.z, t.w) / Self.cellDegrees)))

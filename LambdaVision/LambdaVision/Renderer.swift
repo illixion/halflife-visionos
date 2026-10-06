@@ -54,6 +54,12 @@ extension LayerRenderer.Clock.Instant {
 ///   angleGPU — eye-submit end → ANGLE's queue finished both eyes
 ///   frameGPU — eye-submit end → our compositor pass finished too
 ///   total    — whole renderFrame
+/// angleGPU and frameGPU are CPU-observed latencies (event listener fire
+/// times), not GPU execution. The GPU's own numbers go on a second line,
+/// "[FT] gpu(ms)" (see GPUPassTimer): gpuQueue is our command buffer's GPU
+/// start → end (commit feedback, always on); gEngine0/1 ANGLE's GPU time per
+/// eye and gComposite/gArms/gWeapon/gHUD/gDepth our passes, while Settings →
+/// Diagnostics → "GPU pass timing" is on.
 /// The per-column store, the 512-frame window and the p50/p95/max reduction all
 /// come from RAVE Engine now — four apps had grown four copies of that same
 /// shape. What stays here is this renderer's column vocabulary and its console
@@ -64,6 +70,8 @@ extension LayerRenderer.Clock.Instant {
 /// await anything.
 enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
+    /// The GPU-execution columns (GPUPassTimer), logged on their own line.
+    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth"]
 
     static let shared: RAVEFrameProfiler = {
         let profiler = RAVEFrameProfiler(
@@ -74,6 +82,8 @@ enum FrameTimingStats {
         )
         profiler.onWindowClosed = { snapshot in
             AppLog.perf.log("[FT] app(ms) \(snapshot.percentileLine(keys: order), privacy: .public)")
+            let gpu = snapshot.percentileLine(keys: gpuOrder)
+            if !gpu.isEmpty { AppLog.perf.log("[FT] gpu(ms) \(gpu, privacy: .public)") }
         }
         return profiler
     }()
@@ -130,11 +140,20 @@ actor Renderer {
 
     let dynamicUniformBuffer: MTLBuffer
     let pipelineState: MTLRenderPipelineState
-    let fullscreenPipelineState: MTLRenderPipelineState
-    // Same composite pass with the FXAA kernel folded into its fragment
-    // shader — the default. Selected per frame from Renderer.compositeFXAA,
-    // so the Settings toggle is live without adding a pass or a uniform.
-    let fullscreenFXAAPipelineState: MTLRenderPipelineState
+    // Every composite variant, indexed by CompositeVariant bits, selected per
+    // frame so each Settings toggle is live without adding a pass: FXAA
+    // folded into the fragment shader (the default, Renderer.compositeFXAA),
+    // per-pixel reprojection depth (Renderer.reprojectionDepth), glass
+    // reflections (Renderer.glassReflections).
+    let compositePipelines: [MTLRenderPipelineState]
+    struct CompositeVariant: OptionSet {
+        let rawValue: Int
+        static let fxaa  = CompositeVariant(rawValue: 1)
+        static let depth = CompositeVariant(rawValue: 2)
+        static let glass = CompositeVariant(rawValue: 4)
+    }
+    // Copies the gun and body's depth over the drawable's (ReprojectionDepth).
+    let reprojectionDepthPass: ReprojectionDepth
     let fxaaPipelineState: MTLRenderPipelineState
     let fxaaArgumentTable: MTL4ArgumentTable
     let depthState: MTLDepthStencilState
@@ -149,6 +168,9 @@ actor Renderer {
     // redraw the frame with parallax.
     var engineDepth: MTLTexture!
     var engineDepthLayerViews: [MTLTexture] = []
+    // The stencil aspect of engineDepth, where the engine marks glass
+    // (r_vrglass) for the composite's glass reflection.
+    var engineStencil: MTLTexture?
     // Holds the last frame of a level still in the room while the next loads.
     var loadSnapshot: LoadSnapshot!
     // This frame's colorMap is copied into the snapshot (render() encodes it).
@@ -215,6 +237,8 @@ actor Renderer {
     // GPU-completion timestamps for FrameTimingStats (MTL4 command
     // buffers expose no gpuStart/EndTime; shared-event listeners do).
     let ftListener = MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "LambdaVision.ft"))
+    // GPU execution time per pass (GPUPassTimer), one slot per frame in flight.
+    let gpuTimer: GPUPassTimer
 
     var uniformBufferOffset = 0
 
@@ -277,6 +301,22 @@ actor Renderer {
     // chain above). Read on the render thread every frame, so the Settings
     // toggle applies live — it only picks between two pipeline states.
     nonisolated(unsafe) static var compositeFXAA: Bool = true
+    /// Give the compositor every pixel's real depth for reprojection
+    /// (ReprojectionDepth) instead of one constant far depth. Settings →
+    /// Graphics, default off until judged on device. Live.
+    nonisolated(unsafe) static var reprojectionDepth: Bool = false
+    /// Modern lighting tier 1: a Fresnel reflection on glass the engine marks
+    /// in its stencil (Shaders.metal glassShade; GameSettings pushes the
+    /// engine's r_vrglass with it). Settings → Graphics, default off. Live.
+    nonisolated(unsafe) static var glassReflections: Bool = false
+    /// How much of the Fresnel reflectance the glass shows (1 = physical).
+    nonisolated(unsafe) static var glassStrength: Float = 1.0
+    /// The engine's projection near/far, xash units (HL inches ≈ 39.37/m).
+    /// zFar matches the engine's culling far clip (R_GetFarClip floors zmax
+    /// at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era maps)
+    /// clips into view as gray in long halls like the tram ride.
+    static let engineZNear: Float = 4.0
+    static let engineZFar: Float = 16384.0 * 1.73
     /// Exponent that decodes the engine's gamma-encoded colours into the
     /// linear drawable (displayLinearize, ShaderTypes.h): a plain power, as
     /// the game was lit and textured for a CRT. 0 = write them as they are.
@@ -1086,7 +1126,7 @@ actor Renderer {
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
-        argTableDesc.maxTextureBindCount = 1
+        argTableDesc.maxTextureBindCount = 3    // colour@0, engine depth@1, engine stencil@2 (glass)
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
         // GPU state, so sharing one table across two encoders that bind
@@ -1129,12 +1169,12 @@ actor Renderer {
         }
 
         do {
-            fullscreenPipelineState = try Self.buildFullscreenPipeline(device: device,
-                                                                       layerRenderer: layerRenderer,
-                                                                       fxaa: false)
-            fullscreenFXAAPipelineState = try Self.buildFullscreenPipeline(device: device,
-                                                                          layerRenderer: layerRenderer,
-                                                                          fxaa: true)
+            compositePipelines = try (0..<8).map { bits in
+                let v = CompositeVariant(rawValue: bits)
+                return try Self.buildFullscreenPipeline(device: device, layerRenderer: layerRenderer,
+                                                        fxaa: v.contains(.fxaa), depth: v.contains(.depth),
+                                                        glass: v.contains(.glass))
+            }
         } catch {
             fatalError("Unable to compile fullscreen pipeline state. Error info: \(error)")
         }
@@ -1146,6 +1186,8 @@ actor Renderer {
         }
 
         self.depthState = Self.buildDepthStencilState(device: device)
+        self.gpuTimer = GPUPassTimer(device: device, slots: maxBuffersInFlight)
+        self.reprojectionDepthPass = ReprojectionDepth(device: device, layerRenderer: layerRenderer)
         self.loadSnapshot = LoadSnapshot(device: device, layerRenderer: layerRenderer,
                                          slots: maxBuffersInFlight + 1)
 
@@ -1290,12 +1332,17 @@ actor Renderer {
     // composite with the FXAA kernel folded in (zero extra passes — just the
     // neighbourhood taps at the sampled texture's texel size). Everything
     // else about the two pipelines is identical.
+    // `depth` picks the variant that also writes each pixel's reprojection
+    // depth (fragmentShaderDepth / fragmentShaderFXAADepth); `glass` turns on
+    // the glass reflection (function constant 22, Shaders.metal glassShade).
     static func buildFullscreenPipeline(device: MTLDevice,
                                         layerRenderer: LayerRenderer,
-                                        fxaa: Bool) throws -> MTLRenderPipelineState {
+                                        fxaa: Bool, depth: Bool = false,
+                                        glass: Bool = false) throws -> MTLRenderPipelineState {
         let library = device.makeDefaultLibrary()
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.label = fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline"
+        pipelineDescriptor.label = (fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline")
+            + (depth ? "Depth" : "") + (glass ? "Glass" : "")
         pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
         let format = layerRenderer.configuration.colorFormat
         let output = outputQuantization(format)
@@ -1303,9 +1350,11 @@ actor Renderer {
         var srgb = output.srgb, lsb = output.lsb
         constants.setConstantValue(&srgb, type: .bool, index: 20)
         constants.setConstantValue(&lsb, type: .float, index: 21)
+        var glassOn = glass
+        constants.setConstantValue(&glassOn, type: .bool, index: 22)
         pipelineDescriptor.fragmentFunction = try library?.makeFunction(
-            name: fxaa ? "fragmentShaderFXAA" : "fragmentShader", constantValues: constants)
-        if !fxaa {
+            name: (fxaa ? "fragmentShaderFXAA" : "fragmentShader") + (depth ? "Depth" : ""), constantValues: constants)
+        if !fxaa && !depth && !glass {
             AppLog.render.log("[LambdaVision] drawable colorFormat=\(format.rawValue) (\(format, privacy: .public)) → composite dither srgb=\(srgb) lsb=\(lsb)")
         }
         pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
@@ -1438,6 +1487,12 @@ actor Renderer {
             let p0 = rateMap.physicalSize(layer: 0)
             AppLog.render.log("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
         }
+        // Read back from computeProjection (View.tangents is deprecated):
+        // the frustum every eye of the engine renders through.
+        for i in drawable.views.indices {
+            let t = drawable.frustumTangents(viewIndex: i)
+            AppLog.render.log("[LambdaVision] view\(i) tangents L\(t.x, format: .fixed(precision: 3)) R\(t.y, format: .fixed(precision: 3)) T\(t.z, format: .fixed(precision: 3)) B\(t.w, format: .fixed(precision: 3))")
+        }
         let logicalW = w
         let logicalH = h
         // Scale the engine render below the logical size: the GL world pass
@@ -1533,6 +1588,8 @@ actor Renderer {
                                      levels: 0..<1,
                                      slices: slice..<(slice + 1))!
         }
+        engineStencil = depthTex.makeTextureView(pixelFormat: .x32_stencil8)
+        engineStencil?.label = "AngleStencil"
         let snapshotTextures = loadSnapshot.ensureTextures(colorMap: tex, engineDepth: depthTex)
 
         #if !targetEnvironment(simulator)
@@ -1735,6 +1792,9 @@ actor Renderer {
 
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffer.contents() + uniformBufferOffset).bindMemory(to: Uniforms.self, capacity: 1)
 
+        // This slot's last frame is complete (wait0): read its pass times.
+        gpuTimer.beginFrame(slot: uniformBufferIndex)
+
         /// Reset resources used in previous frame
 
         #if !targetEnvironment(simulator)
@@ -1825,8 +1885,8 @@ actor Renderer {
         // zFar matches the engine's culling far clip (R_GetFarClip floors
         // zmax at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era
         // maps) clips into view as gray in long halls like the tram ride.
-        let zNear: Float = 4.0
-        let zFar:  Float = 16384.0 * 1.73
+        let zNear = Renderer.engineZNear
+        let zFar  = Renderer.engineZFar
         // Use the first drawable's tangents (built-in target). Capture
         // target may have different tangents but for now match builtIn.
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
@@ -2281,6 +2341,16 @@ actor Renderer {
         let ftEyesStart = CACurrentMediaTime()
         FrameTimingStats.shared.add("wait1", (ftEyesStart - ftWait1Start) * 1000)
 
+        // ANGLE's GPU time per eye (GL timer queries on the worker), taken
+        // as results arrive a few frames late.
+        lambda_gl_set_gpu_timing(GPUPassTimer.enabled ? 1 : 0)
+        if GPUPassTimer.enabled {
+            var eyeMs: [Float] = [0, 0]
+            let fresh = lambda_gl_gpu_eye_ms(&eyeMs)
+            if fresh & 1 != 0 { FrameTimingStats.shared.add("gEngine0", Double(eyeMs[0])) }
+            if fresh & 2 != 0 { FrameTimingStats.shared.add("gEngine1", Double(eyeMs[1])) }
+        }
+
         // Level load: while the engine is busy, keep drawing the snapshot of
         // its last frame instead of waiting on it (LoadSnapshot). Its frames
         // run without anyone waiting; the live view returns once the client
@@ -2321,7 +2391,7 @@ actor Renderer {
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             lambda_gl_worker_set_depth_texture(Unmanaged.passUnretained(engineDepthLayerViews[eye]).toOpaque())
-            var tang = primary.views[eye].tangents  // (left, right, top, bottom)
+            var tang = primary.frustumTangents(viewIndex: eye)  // (left, right, top, bottom)
 
             // 2D overlay (HUD/console/menu) placement: a box of fixed
             // ANGULAR size centered on the forward axis, computed per eye
@@ -2391,7 +2461,9 @@ actor Renderer {
         if !engineHeld, !loadSnapshot.isHolding, !snapshotRearmBlocked,
            lambda_engine_loading() != 0, let anchor = frameDeviceAnchor {
             loadSnapshot.hasDepth = lambda_gl_depth_target_ok() != 0
-            loadSnapshot.arm(views: primary.views, anchor: anchor.originFromAnchorTransform,
+            loadSnapshot.arm(views: primary.views,
+                             tangents: primary.views.indices.map { primary.frustumTangents(viewIndex: $0) },
+                             anchor: anchor.originFromAnchorTransform,
                              zNear: zNear, zFar: zFar, now: ftEyesStart)
             captureSnapshotThisFrame = true
         }
@@ -2610,6 +2682,10 @@ actor Renderer {
         let commandAllocator = self.commandAllocators[uniformBufferIndex]
         commandBuffer.beginCommandBuffer(allocator: commandAllocator)
         commandBuffer.useResidencySet(residencySet)
+        // Pass timestamps for the first drawable only (a capture drawable
+        // would repeat the same passes into the same slot).
+        let timed = encodeUpscale
+        if timed { gpuTimer.markStart(commandBuffer) }
 
         if encodeUpscale && captureSnapshotThisFrame {
             captureSnapshotThisFrame = false
@@ -2669,11 +2745,26 @@ actor Renderer {
         // MetalFX chain is live: that path already ran a dedicated FXAA pass
         // into fxaaMap, and displayMap is what we'd be filtering here.
         let compositeFXAA = Renderer.compositeFXAA && spatialScalers.isEmpty
-        renderEncoder.setRenderPipelineState(compositeFXAA ? fullscreenFXAAPipelineState
-                                                           : fullscreenPipelineState)
+        // Per-pixel reprojection depth (ReprojectionDepth), unless there is
+        // no engine depth to read (ANGLE refused our texture), the menu owns
+        // the view, or the HDR test pattern replaces it: those keep the
+        // constant far depth.
+        let perPixelDepth = Renderer.reprojectionDepth && engineDepth != nil
+            && lambda_gl_depth_target_ok() != 0 && lambda_menu_active() == 0
+            && Renderer.hdrTestMode == 0 && displayMap == nil
+        weaponPass.keepsDepth = perPixelDepth
+        // Glass needs the engine's stencil, which lives in the same texture.
+        let glass = Renderer.glassReflections && engineStencil != nil
+            && lambda_gl_depth_target_ok() != 0 && Renderer.hdrTestMode == 0 && displayMap == nil
+        var variant: CompositeVariant = []
+        if compositeFXAA { variant.insert(.fxaa) }
+        if perPixelDepth { variant.insert(.depth) }
+        if glass { variant.insert(.glass) }
+        renderEncoder.setRenderPipelineState(compositePipelines[variant.rawValue])
         // Depth must still be set since the pass has a depth attachment;
-        // fullscreen triangle outputs z=1 which wins under reverse-Z
-        // (drawable cleared to 0, compareFunction = greater).
+        // the fullscreen triangle's depth (the constant far one, or each
+        // pixel's with perPixelDepth) is above the clear value 0, so it
+        // passes under reverse-Z (compareFunction = greater).
         renderEncoder.setDepthStencilState(depthState)
 
         let viewports = drawable.views.map { $0.textureMap.viewport }
@@ -2695,10 +2786,36 @@ actor Renderer {
             self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
             let paramsOffset = Self.displayParamsStride * uniformBufferIndex
             let vp = viewports.first
-            var params = DisplayParams(decodeGamma: Renderer.displayDecodeGamma,
-                                       hdrTest: Float(Renderer.hdrTestMode),
-                                       aspect: vp.map { Float($0.width / max($0.height, 1)) } ?? 1,
-                                       pad: 0)
+            var params = DisplayParams()
+            params.decodeGamma = Renderer.displayDecodeGamma
+            params.hdrTest = Float(Renderer.hdrTestMode)
+            params.aspect = vp.map { Float($0.width / max($0.height, 1)) } ?? 1
+            if perPixelDepth {
+                self.fragmentArgumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
+                let n = Renderer.engineZNear / 39.37, f = Renderer.engineZFar / 39.37
+                params.engineClip = SIMD4(2 * n * f, f + n, f - n, 0)
+                let rows = drawable.views.indices.map { i -> SIMD4<Float> in
+                    let p = drawable.computeProjection(viewIndex: i)
+                    return SIMD4(p.columns.2.z, p.columns.3.z, p.columns.2.w, p.columns.3.w)
+                }
+                params.depthProjection = (rows[0], rows[min(1, rows.count - 1)])
+                // Far = the old constant; nearest = the near plane; flat
+                // viewmodel cut-off 16 cm (its squeezed depth decodes at most
+                // 1.43 × the 10 cm near plane — see compositorDepth).
+                params.depthLimits = SIMD4(0.0001, 1, 0.16, 0)
+            }
+            if glass, let engineStencil {
+                self.fragmentArgumentTable.setTexture(engineStencil.gpuResourceID, index: 2)
+                params.glass = SIMD4(Renderer.glassStrength, 0.04, 0.85, 0)
+                // Where a reflected ray leaves the frame: the room's light at
+                // the eye (the engine's probe), dimmed — a guess at what is
+                // behind the viewer. Engine colour space, like the image.
+                var light: [Float] = [0.3, 0.3, 0.3]
+                light.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
+                params.glassAmbient = SIMD4(SIMD3(light[0], light[1], light[2]) * 0.5, 0)
+                let t = drawable.views.indices.map { drawable.frustumTangents(viewIndex: $0) }
+                params.eyeTangents = (t[0], t[min(1, t.count - 1)])
+            }
             memcpy(displayParamsBuffer.contents() + paramsOffset, &params, MemoryLayout<DisplayParams>.size)
             self.fragmentArgumentTable.setAddress(displayParamsBuffer.gpuAddress + UInt64(paramsOffset),
                                                   index: BufferIndex.uniforms.rawValue)
@@ -2713,6 +2830,7 @@ actor Renderer {
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
+        if timed { gpuTimer.mark(.composite, commandBuffer) }
 
         if !armVertices.isEmpty {
             armPass.encode(commandBuffer: commandBuffer, drawable: drawable,
@@ -2720,6 +2838,7 @@ actor Renderer {
                            viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
                            uniformBufferIndex: uniformBufferIndex,
                            vertexFloats: armVertices)
+            if timed { gpuTimer.mark(.arms, commandBuffer) }
         }
 
         if supplementalPassActive {
@@ -2948,8 +3067,10 @@ actor Renderer {
                                   body: body,
                                   arcs: arcs,
                                   fade: screenFade(),
-                                  hud: hudScene.flatMap { [uniformBufferIndex] scene in hudRenderer.map { holo in
+                                  hud: hudScene.flatMap { [uniformBufferIndex, gpuTimer] scene in hudRenderer.map { holo in
                                       { enc in
+                                          // Gun and body done; the rest of the encoder is the holograms.
+                                          if timed { gpuTimer.mark(.weapon, enc, precise: true) }
                                           holo.encode(scene, encoder: enc,
                                                       viewProjections: drawableTarget.viewProjections(drawable: drawable),
                                                       slot: uniformBufferIndex,
@@ -2957,7 +3078,14 @@ actor Renderer {
                                                                   .truncatingRemainder(dividingBy: 1000)))
                                       }
                                   } })
+                if timed { gpuTimer.mark(hudScene != nil ? .hud : .weapon, commandBuffer) }
             }
+        }
+        // The gun and body's depth over the engine's, where they drew.
+        if perPixelDepth, let overlayDepth = weaponPass.storedDepth {
+            reprojectionDepthPass.encodeMerge(commandBuffer: commandBuffer, drawable: drawable,
+                                              overlayDepth: overlayDepth)
+            if timed { gpuTimer.mark(.depth, commandBuffer) }
         }
 
         // The palm debug panel's buttons into the tracking-areas texture: its
@@ -2990,7 +3118,19 @@ actor Renderer {
 
         commandBuffer.endCommandBuffer()
 
-        self.commandQueue.commit([commandBuffer])
+        if timed {
+            // Our command buffer's real GPU execution time. Fresh options per
+            // commit: a reused MTL4CommitOptions delivered only its first
+            // callback on the headset (Oneiros, 2026-09).
+            let options = MTL4CommitOptions()
+            options.addFeedbackHandler { feedback in
+                guard feedback.error == nil, feedback.gpuEndTime > feedback.gpuStartTime else { return }
+                FrameTimingStats.shared.add("gpuQueue", (feedback.gpuEndTime - feedback.gpuStartTime) * 1000)
+            }
+            self.commandQueue.commit([commandBuffer], options: options)
+        } else {
+            self.commandQueue.commit([commandBuffer])
+        }
 
         drawable.encodePresent()
     }

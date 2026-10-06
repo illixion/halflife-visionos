@@ -127,11 +127,30 @@ final class GameSettings {
         didSet { AppSettingsStore.linearColor = linearColor
                  Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0 }
     }
+    /// Hand the compositor each pixel's real depth (engine, gun and body)
+    /// for reprojection instead of one constant far depth. Live.
+    var reprojectionDepth: Bool = AppSettingsStore.reprojectionDepth {
+        didSet { AppSettingsStore.reprojectionDepth = reprojectionDepth
+                 Renderer.reprojectionDepth = reprojectionDepth }
+    }
+    /// Modern lighting tier 1: Fresnel reflections on the glass the engine
+    /// marks (r_vrglass, pushed with it). Live.
+    var glassReflections: Bool = AppSettingsStore.glassReflections {
+        didSet { AppSettingsStore.glassReflections = glassReflections
+                 Renderer.glassReflections = glassReflections
+                 cvar("r_vrglass", glassReflections ? 1 : 0) }
+    }
     /// HDR headroom test pattern over the whole view. Not stored: a
     /// diagnostic, and a black screen on the next launch would look broken.
     var hdrTest: HDRTestPattern = .off {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
                  AppLog.render.log("[HDR] test pattern \(hdrTest.label, privacy: .public), thermal state \(ProcessInfo.processInfo.thermalState.label, privacy: .public)") }
+    }
+    /// Per-pass GPU timestamps and the engine's GL timer queries
+    /// (GPUPassTimer) for the Performance HUD. Not stored: a diagnostic with
+    /// a small cost of its own (the HUD split can split the weapon encoder).
+    var gpuPassTiming: Bool = false {
+        didSet { GPUPassTimer.enabled = gpuPassTiming }
     }
     var gamma: Double = AppSettingsStore.gamma {
         didSet { AppSettingsStore.gamma = gamma; cvar("gamma", gamma) }
@@ -302,6 +321,8 @@ final class GameSettings {
         Renderer.useMetalFXChain   = metalFXEnabled
         Renderer.compositeFXAA     = fxaaEnabled
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
+        Renderer.reprojectionDepth = reprojectionDepth
+        Renderer.glassReflections = glassReflections
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
@@ -357,6 +378,7 @@ final class GameSettings {
         cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0)
         cvar("vr_weapon_external", weaponExternal ? 1 : 0)
         cvar("crosshair", stockCrosshair)
+        cvar("r_vrglass", glassReflections ? 1 : 0)
     }
 
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
