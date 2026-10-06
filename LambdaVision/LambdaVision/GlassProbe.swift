@@ -18,10 +18,13 @@
 //  parallax-corrected lookups. Same reflection whatever the gaze, same for
 //  both eyes but for true parallax.
 //
-//  Cost control: the engine draws one 256² face per frame, after the second
+//  Cost control: the engine draws one 128² face per frame, after the second
 //  eye, and only while glass is in sight (the engine's plane table is not
-//  empty) and the probe is stale — the head has moved 48 units from where it
-//  was captured, or 4 s have passed (doors, lights). Otherwise nothing. A face
+//  empty) and the probe is stale — the head has moved 160 units from where it
+//  was captured, or 30 s have passed (doors, lights). Otherwise nothing. (The
+//  first headset build drew 256² faces every 48 units / 4 s and measured
+//  2.2 ms GPU p50 per face.) A face draws no dynamic lights, and its render
+//  targets are kept per slice rather than rebuilt per face. A face
 //  is world and brush entities only (no studio models, sprites, particles or
 //  glass), so the extra view is cheap; its GPU and worker CPU times are logged
 //  as gProbe / probeCPU. Three probe slots: the current one, the one fading
@@ -37,9 +40,10 @@ import simd
 struct GlassProbeSchedule {
     static let slotCount = 3
     /// Head movement (xash units) after which the probe is recaptured.
-    static let refreshDistance: Float = 48
+    static let refreshDistance: Float = 160
     /// Recapture this often while glass is in sight (doors open, lights change).
-    static let refreshAge: Double = 4
+    /// Rare: each capture is six frames of an extra engine view.
+    static let refreshAge: Double = 30
     /// Keep capturing this long after the last glass left the view.
     static let glassMemory: Double = 1
     /// A completed probe fades in over this long.
@@ -114,7 +118,9 @@ struct GlassProbeSchedule {
 
 /// The probe textures and the per-frame calls into the engine.
 final class GlassProbe {
-    static let faceSize = 256
+    /// 128²: the reflection is soft anyway (ripples, the parallax walk), and
+    /// 256² faces measured 2.2 ms GPU p50 each on the headset.
+    static let faceSize = 128
     static let slices = GlassProbeSchedule.slotCount * 6
 
     let color: MTLTexture
@@ -150,6 +156,7 @@ final class GlassProbe {
         depthFaces = (0..<Self.slices).map {
             depth.makeTextureView(pixelFormat: .depth32Float_stencil8, textureType: .type2D, levels: 0..<1, slices: $0..<($0 + 1))!
         }
+        lambda_gl_worker_forget_probe_targets()
     }
 
     /// A level load or the toggle going off: forget every capture.

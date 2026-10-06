@@ -3959,56 +3959,95 @@ int lambda_gl_probe_ms(float out_ms[2]) {
     return fresh;
 }
 
-// One staged probe face into its own FBO (the app's two slice views, through
-// EGLImages like the eye targets), then the eye's FBO is bound back for
-// lambda_gl_end_frame.
+// One staged probe face into its FBO, then the eye's FBO is bound back for
+// lambda_gl_end_frame. The probe's textures live as long as the app's
+// GlassProbe, so each slice's EGLImages, renderbuffers and FBO are made once
+// and kept (keyed by the slice views), not rebuilt per face: a fresh render
+// target per draw is the expensive part on ANGLE, more than the small view.
+#define PROBE_FBO_CACHE 24
+typedef struct {
+    void    *color, *depth;     // the app's slice views, borrowed
+    EGLImage ci, di;
+    GLuint   rb[2], fbo;
+} probe_fbo_t;
+static probe_fbo_t g_probe_fbos[PROBE_FBO_CACHE];
+static int g_probe_fbo_next = 0;
+static _Atomic int g_probe_fbo_flush = 0;   // new probe textures: drop the cache
+
+void lambda_gl_worker_forget_probe_targets(void) { atomic_store(&g_probe_fbo_flush, 1); }
+
+static void probe_fbo_release(probe_fbo_t *f) {
+    if (f->fbo) glDeleteFramebuffers(1, &f->fbo);
+    if (f->rb[0]) glDeleteRenderbuffers(2, f->rb);
+    if (f->ci != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, f->ci);
+    if (f->di != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, f->di);
+    memset(f, 0, sizeof(*f));
+    f->ci = f->di = EGL_NO_IMAGE;
+}
+
+static GLuint probe_fbo_for(void *color, void *depth) {
+    for (int i = 0; i < PROBE_FBO_CACHE; i++)
+        if (g_probe_fbos[i].fbo && g_probe_fbos[i].color == color && g_probe_fbos[i].depth == depth)
+            return g_probe_fbos[i].fbo;
+
+    typedef void (*egl_rb_fn)(GLenum, void *);
+    static egl_rb_fn egl_rb = NULL;
+    if (!egl_rb) egl_rb = (egl_rb_fn)eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
+    if (!egl_rb) return 0;
+
+    // round robin: a new probe (new textures) replaces the old entries
+    probe_fbo_t *f = &g_probe_fbos[g_probe_fbo_next];
+    g_probe_fbo_next = (g_probe_fbo_next + 1) % PROBE_FBO_CACHE;
+    if (f->fbo) probe_fbo_release(f);
+    f->ci = f->di = EGL_NO_IMAGE;
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    f->ci = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)color, img_attribs);
+    f->di = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)depth, img_attribs);
+    if (f->ci == EGL_NO_IMAGE || f->di == EGL_NO_IMAGE) { probe_fbo_release(f); return 0; }
+    glGenRenderbuffers(2, f->rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, f->rb[0]);
+    egl_rb(GL_RENDERBUFFER, f->ci);
+    glBindRenderbuffer(GL_RENDERBUFFER, f->rb[1]);
+    egl_rb(GL_RENDERBUFFER, f->di);
+    glGenFramebuffers(1, &f->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, f->rb[0]);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, f->rb[1]);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+        probe_fbo_release(f);
+        return 0;
+    }
+    f->color = color;
+    f->depth = depth;
+    return f->fbo;
+}
+
 static void worker_render_probe_face(void) {
     void *color = g_probe_color, *depth = g_probe_depth;
     g_probe_color = g_probe_depth = NULL;
     if (!color || !depth || g_probe_size <= 0) return;
 
-    typedef void (*egl_rb_fn)(GLenum, void *);
-    static egl_rb_fn egl_rb = NULL;
-    if (!egl_rb) egl_rb = (egl_rb_fn)eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
-    if (!egl_rb) return;
-
     double t0 = ft_now_ms();
-    const EGLAttrib img_attribs[] = { EGL_NONE };
-    EGLImage ci = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE,
-                                 (EGLClientBuffer)color, img_attribs);
-    EGLImage di = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE,
-                                 (EGLClientBuffer)depth, img_attribs);
-    GLuint rb[2] = { 0, 0 }, fbo = 0;
-    if (ci != EGL_NO_IMAGE && di != EGL_NO_IMAGE) {
-        glGenRenderbuffers(2, rb);
-        glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
-        egl_rb(GL_RENDERBUFFER, ci);
-        glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
-        egl_rb(GL_RENDERBUFFER, di);
-        glGenFramebuffers(1, &fbo);
+    if (atomic_exchange(&g_probe_fbo_flush, 0))
+        for (int i = 0; i < PROBE_FBO_CACHE; i++) probe_fbo_release(&g_probe_fbos[i]);
+    GLuint fbo = probe_fbo_for(color, depth);
+    if (fbo) {
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-            // the 2D layer may have left a scissor on
-            GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-            glDisable(GL_SCISSOR_TEST);
-            glViewport(0, 0, g_probe_size, g_probe_size);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClearDepthf(1.0f);
-            glClearStencil(0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            gt_begin(2);
-            R_VRProbeFace(g_probe_origin, g_probe_face, g_probe_size, g_w_znear, g_w_zfar);
-            gt_end();
-            if (scissor) glEnable(GL_SCISSOR_TEST);
-        }
+        // the 2D layer may have left a scissor on
+        GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, g_probe_size, g_probe_size);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClearDepthf(1.0f);
+        glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        gt_begin(2);
+        R_VRProbeFace(g_probe_origin, g_probe_face, g_probe_size, g_w_znear, g_w_zfar);
+        gt_end();
+        if (scissor) glEnable(GL_SCISSOR_TEST);
         glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
     }
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (rb[0]) glDeleteRenderbuffers(2, rb);
-    if (ci != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, ci);
-    if (di != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, di);
     atomic_store(&g_probe_cpu_ms, (float)(ft_now_ms() - t0));
     atomic_store(&g_probe_cpu_fresh, 1);
 }

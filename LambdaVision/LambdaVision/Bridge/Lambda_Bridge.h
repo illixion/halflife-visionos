@@ -530,6 +530,9 @@ void lambda_glass_get_eye(int eye, lambda_glass_eye_t *out);
 // xash units. Uses the eyes' zNear/zFar. One render per staging.
 void lambda_gl_worker_set_probe_face(void *mtl_color_view, void *mtl_depth_view,
                                      int size, int face, const float *origin3);
+// The probe's textures are new (a new GlassProbe): the worker drops the render
+// targets it keeps per slice before the next face.
+void lambda_gl_worker_forget_probe_targets(void);
 
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a

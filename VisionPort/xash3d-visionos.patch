@@ -3572,7 +3572,7 @@ index 05a130f..600b22e 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..a0161a7 100644
+index 0568486..42de72d 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3678,7 +3678,21 @@ index 0568486..a0161a7 100644
  	{
  		R_AllowFog( false );
  		gEngfuncs.CL_DrawEFX( tr.frametime, true );
-@@ -1087,6 +1129,127 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -968,7 +1010,12 @@ void R_RenderScene( void )
+ 	// begin a new frame
+ 	tr.framecount++;
+ 
+-	tr.dlightframecount = R_PushDlights( WORLDMODEL, tr.framecount );
++	// the glass probe leaves dynamic lights out: no lightmap rebuilds and
++	// re-uploads (the flashlight cone) for a view nobody sees directly; a
++	// count no surface's dlightframe can equal tr.framecount with
++	if( r_vrprobe_pass )
++		tr.dlightframecount = -1 - tr.framecount;
++	else tr.dlightframecount = R_PushDlights( WORLDMODEL, tr.framecount );
+ 
+ 	R_SetupFrustum();
+ 	R_SetupFrame();
+@@ -1087,6 +1134,127 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3806,7 +3820,7 @@ index 0568486..a0161a7 100644
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1095,6 +1258,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1095,6 +1263,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	// setup the initial render params
  	R_SetupRefParams( rvp );
  
@@ -3817,7 +3831,7 @@ index 0568486..a0161a7 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1118,6 +1285,19 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1118,6 +1290,19 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  
  	tr.realframecount++; // right called after viewmodel events
  	R_RenderScene();
@@ -3837,7 +3851,7 @@ index 0568486..a0161a7 100644
  
  	return;
  }
-@@ -1167,6 +1347,74 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1352,74 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -3913,7 +3927,7 @@ index 0568486..a0161a7 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..749cbda 100644
+index df6f012..c7e6fe4 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4213,7 +4227,17 @@ index df6f012..749cbda 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1959,6 +2196,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1946,7 +2183,8 @@ void R_DrawBrushModel( cl_entity_t *e )
+ 	e->visframe = tr.realframecount; // visible
+ 
+ 	// calculate dynamic lighting for bmodel
+-	R_PushDlightsForBmodel( clmodel, tr.dlightframecount, RI.objectMatrix );
++	if( !r_vrprobe_pass ) // the glass probe leaves dynamic lights out
++		R_PushDlightsForBmodel( clmodel, tr.dlightframecount, RI.objectMatrix );
+ 
+ 	// setup the rendermode
+ 	R_SetRenderMode( e );
+@@ -1959,6 +2197,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
@@ -4226,7 +4250,7 @@ index df6f012..749cbda 100644
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2215,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2216,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
