@@ -2,7 +2,8 @@
 // engine dumps (vrdumpN.bin, r_vrdump N): the reprojection depth
 // (fragmentShaderDepth, reprojectionDepthMerge), checked against the dump's
 // own matrices, and the glass reflection (glassShade) on dumps that carry the
-// engine's stencil (version 2, taken with r_vrglass 1).
+// engine's stencil and glass plane table (version 3, taken with r_vrglass 1),
+// lit by environment probes (vrprobeN.bin, r_vrprobedump N).
 //
 // For every pixel the composite turns the engine's GL window depth into the
 // compositor's reverse-Z depth. Unprojecting that through the compositor
@@ -13,12 +14,20 @@
 // the flat-viewmodel cut-off. Then the merge: a square of overlay depth must
 // replace the drawable's depth inside it and leave it alone outside.
 //
-// Glass: renders the plain and the glass composite and checks that only
-// pixels the engine marked changed, and that some did; with --png DIR it
-// writes glass-<dump>.png (plain left, glass right, marked pixels tinted
-// below) for a look.
+// Glass, with the first probe given as the current one:
+// - probe view: each probe looked up along every pixel's own view ray
+//   (glassProbeView) must reproduce the engine image on static surfaces —
+//   checks the face layout, the depth decode and, for a probe captured away
+//   from the eye, that the parallax walk beats the plain direction lookup;
+// - mask: only pixels the engine marked change, and some do;
+// - gaze: dumps from the same origin (different yaw) must show the same
+//   reflection at the same glass point;
+// - stereo: dumps from origins an eye apart are compared the same way, and
+//   both must take every glass pixel's reflection from the probe.
+// With --png DIR it writes glass-<dump>.png (plain | glass over the
+// reflection alone | the mask) for a look.
 //
-//   ./build.sh [--png DIR] vrdump1.bin [vrdump2.bin ...]
+//   ./build.sh [--png DIR] vrdump1.bin [vrdump2.bin ...] [vrprobe1.bin ...]
 //
 // Exits non-zero on any mismatch.
 
@@ -37,6 +46,8 @@ struct Dump {
     var rgba = Data()
     var depth = [Float]()
     var stencil: [UInt8]?   // version 2 dumps (r_vrglass codes), bottom-up rows
+    var origin = SIMD3<Float>(), angles = SIMD3<Float>()
+    var planes: [SIMD4<Float>]? // version 3: the glass plane table the codes index
 
     init(path: String) throws {
         let d = try Data(contentsOf: URL(fileURLWithPath: path))
@@ -58,6 +69,44 @@ struct Dump {
         if header[1] >= 2, d.count >= stencilAt + width * height {
             stencil = [UInt8](d.subdata(in: stencilAt..<stencilAt + width * height))
         }
+        let o = floats(144, 6)
+        origin = SIMD3(o[0], o[1], o[2]); angles = SIMD3(o[3], o[4], o[5])
+        let tableAt = stencilAt + width * height
+        if header[1] >= 3, d.count >= tableAt + 4 {
+            let n = Int(ints(tableAt, 1)[0])
+            let f = floats(tableAt + 4, n * 4)
+            planes = (0..<n).map { SIMD4(f[$0 * 4], f[$0 * 4 + 1], f[$0 * 4 + 2], f[$0 * 4 + 3]) }
+        }
+    }
+
+    /// The engine's AngleVectors: forward, right, up for this view.
+    var axes: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) { angleVectors(angles) }
+}
+
+func angleVectors(_ a: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+    let r = a * .pi / 180
+    let sp = sin(r.x), cp = cos(r.x), sy = sin(r.y), cy = cos(r.y), sr = sin(r.z), cr = cos(r.z)
+    return (SIMD3(cp * cy, cp * sy, -sp),
+            SIMD3(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp),
+            SIMD3(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp))
+}
+
+/// vrprobeN.bin: six faces (+X +Y −X −Y +Z −Z), RGBA8 then float GL depth, bottom-up rows.
+struct Probe {
+    var size = 0
+    var origin = SIMD3<Float>(), clip = SIMD2<Float>()
+    var rgba = Data(), depth = [Float]()
+
+    init(path: String) throws {
+        let d = try Data(contentsOf: URL(fileURLWithPath: path))
+        let header = d.subdata(in: 0..<16).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
+        guard header[0] == 0x5052_5656 else { throw NSError(domain: "not a vrprobe", code: 1) }
+        size = Int(header[2])
+        let f = d.subdata(in: 16..<36).withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        origin = SIMD3(f[0], f[1], f[2]); clip = SIMD2(f[3], f[4])
+        let n = size * size * 6
+        rgba = d.subdata(in: 36..<36 + n * 4)
+        depth = d.subdata(in: 36 + n * 4..<36 + n * 8).withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
     }
 }
 
@@ -68,6 +117,13 @@ if let i = args.firstIndex(of: "--png"), i + 1 < args.count {
     pngDir = args[i + 1]
     args.removeSubrange(i...(i + 1))
 }
+func isProbe(_ path: String) -> Bool {
+    guard let h = FileHandle(forReadingAtPath: path) else { return false }
+    defer { try? h.close() }
+    return h.readData(ofLength: 4) == Data([0x56, 0x56, 0x52, 0x50])   // "VVRP"
+}
+let probePaths = args.filter(isProbe)
+args = args.filter { !isProbe($0) }
 let device = MTLCreateSystemDefaultDevice()!
 let library = try device.makeLibrary(URL: URL(fileURLWithPath: libraryPath))
 let queue = device.makeCommandQueue()!
@@ -125,6 +181,12 @@ func readDepth(_ tex: MTLTexture) -> [Float] {
               destinationBytesPerRow: w * 4, destinationBytesPerImage: w * h * 4)
     blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
     return Array(UnsafeBufferPointer(start: buf.contents().bindMemory(to: Float.self, capacity: w * h), count: w * h))
+}
+
+/// DisplayParams outgrew setFragmentBytes' 4 KB (the glass plane tables).
+func paramsBuffer(_ params: DisplayParams) -> MTLBuffer {
+    var p = params
+    return device.makeBuffer(bytes: &p, length: MemoryLayout<DisplayParams>.stride, options: .storageModeShared)!
 }
 
 let composite = try compositePipeline()
@@ -186,7 +248,7 @@ for path in args {
         let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
         enc.setRenderPipelineState(composite)
         enc.setDepthStencilState(depthState(.greater))
-        enc.setFragmentBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: BufferIndex.uniforms.rawValue)
+        enc.setFragmentBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
         enc.setFragmentTexture(color, index: TextureIndex.color.rawValue)
         enc.setFragmentTexture(engineDepth, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -222,8 +284,8 @@ for path in args {
     }
 }
 
-// Glass: the plain composite against the glass one, on dumps with a stencil.
-func glassPipeline(_ glass: Bool) throws -> MTLRenderPipelineState {
+// Glass: the composite with and without glassShade, lit by the probes given.
+func glassPipeline(_ glass: Bool, fragment: String = "fragmentShader") throws -> MTLRenderPipelineState {
     let constants = MTLFunctionConstantValues()
     var srgb = false, lsb: Float = 0, on = glass
     constants.setConstantValue(&srgb, type: .bool, index: 20)
@@ -231,7 +293,7 @@ func glassPipeline(_ glass: Bool) throws -> MTLRenderPipelineState {
     constants.setConstantValue(&on, type: .bool, index: 22)
     let d = MTLRenderPipelineDescriptor()
     d.vertexFunction = library.makeFunction(name: "fullscreenVertexShader")
-    d.fragmentFunction = try library.makeFunction(name: "fragmentShader", constantValues: constants)
+    d.fragmentFunction = try library.makeFunction(name: fragment, constantValues: constants)
     d.colorAttachments[0].pixelFormat = .rgba8Unorm
     return try device.makeRenderPipelineState(descriptor: d)
 }
@@ -248,86 +310,239 @@ func writePNG(_ rgba: [UInt8], _ w: Int, _ h: Int, _ path: String) {
     CGImageDestinationFinalize(dest)
 }
 
-let plainPipeline = try glassPipeline(false)
-let glassOnPipeline = try glassPipeline(true)
-for path in args {
-    let dump = try Dump(path: path)
-    guard let stencil = dump.stencil else { continue }
-    let w = dump.width, h = dump.height
-    func array2D(_ format: MTLPixelFormat, _ bytes: UnsafeRawPointer, _ bpp: Int) -> MTLTexture {
-        let td = MTLTextureDescriptor()
-        td.textureType = .type2DArray
-        td.pixelFormat = format
-        td.width = w; td.height = h
-        td.usage = .shaderRead
-        let t = device.makeTexture(descriptor: td)!
-        t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, slice: 0,
-                  withBytes: bytes, bytesPerRow: w * bpp, bytesPerImage: w * h * bpp)
-        return t
+func array2D(_ format: MTLPixelFormat, _ w: Int, _ h: Int, slices: Int, _ bytes: UnsafeRawPointer, _ bpp: Int) -> MTLTexture {
+    let td = MTLTextureDescriptor()
+    td.textureType = .type2DArray
+    td.pixelFormat = format
+    td.width = w; td.height = h; td.arrayLength = slices
+    td.usage = .shaderRead
+    td.storageMode = format == .depth32Float ? .private : .shared
+    let t = device.makeTexture(descriptor: td)!
+    if format == .depth32Float {
+        let staging = device.makeBuffer(bytes: bytes, length: w * h * bpp * slices)!
+        let cb = queue.makeCommandBuffer()!, blit = cb.makeBlitCommandEncoder()!
+        for i in 0..<slices {
+            blit.copy(from: staging, sourceOffset: w * h * bpp * i, sourceBytesPerRow: w * bpp,
+                      sourceBytesPerImage: w * h * bpp, sourceSize: MTLSize(width: w, height: h, depth: 1),
+                      to: t, destinationSlice: i, destinationLevel: 0, destinationOrigin: MTLOrigin())
+        }
+        blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    } else {
+        for i in 0..<slices {
+            t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, slice: i,
+                      withBytes: bytes + w * h * bpp * i, bytesPerRow: w * bpp, bytesPerImage: w * h * bpp)
+        }
     }
-    let color = dump.rgba.withUnsafeBytes { array2D(.rgba8Unorm, $0.baseAddress!, 4) }
-    let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, $0.baseAddress!, 1) }
-    // The engine frustum's tangents from its GL projection (DrawableProjection's formula).
-    let p = dump.projection
+    return t
+}
+
+/// Writes a dump's view and plane table into both eyes' glass fields (the
+/// probe renders one eye at a time).
+func setGlassView(_ params: inout DisplayParams, _ dump: Dump) {
+    let (f, r, u) = dump.axes
+    let view: [SIMD4<Float>] = [SIMD4(dump.origin, 0), SIMD4(f, 0), SIMD4(r, 0), SIMD4(u, 0)]
+    let planes = dump.planes ?? []
+    withUnsafeMutableBytes(of: &params) { raw in
+        let eyeAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassEye)!
+        let planesAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassPlanes)!
+        let v = (raw.baseAddress! + eyeAt).bindMemory(to: SIMD4<Float>.self, capacity: 8)
+        let pl = (raw.baseAddress! + planesAt).bindMemory(to: SIMD4<Float>.self, capacity: 448)
+        for eye in 0..<2 {
+            for i in 0..<4 { v[eye * 4 + i] = view[i] }
+            for (i, p) in planes.prefix(224).enumerated() { pl[eye * 224 + i] = p }
+        }
+    }
+    let p = dump.projection   // tangents from the GL projection (DrawableProjection's formula)
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
                   (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
-    var params = DisplayParams()
-    params.glass = SIMD4(1, 0.04, 0.85, 0)
-    params.glassAmbient = SIMD4(0.15, 0.15, 0.15, 0)
     params.eyeTangents = (t, t)
+}
 
-    func render(_ pipeline: MTLRenderPipelineState) -> [UInt8] {
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
-        td.usage = .renderTarget
-        let target = device.makeTexture(descriptor: td)!
-        let rpd = MTLRenderPassDescriptor()
-        rpd.colorAttachments[0].texture = target
-        rpd.colorAttachments[0].loadAction = .clear
-        rpd.colorAttachments[0].storeAction = .store
-        let cb = queue.makeCommandBuffer()!
-        let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
-        enc.setRenderPipelineState(pipeline)
-        enc.setFragmentBytes(&params, length: MemoryLayout<DisplayParams>.stride, index: BufferIndex.uniforms.rawValue)
-        enc.setFragmentTexture(color, index: TextureIndex.color.rawValue)
-        enc.setFragmentTexture(stencilTex, index: 2)
-        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
-        var out = [UInt8](repeating: 0, count: w * h * 4)
-        target.getBytes(&out, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        return out
+/// A probe's textures: colour (rgba8, sampled as half like the app's) and depth, six slices.
+struct ProbeTextures {
+    let probe: Probe, color: MTLTexture, depth: MTLTexture
+    init(_ probe: Probe) {
+        self.probe = probe
+        let s = probe.size
+        color = probe.rgba.withUnsafeBytes { array2D(.rgba8Unorm, s, s, slices: 6, $0.baseAddress!, 4) }
+        depth = probe.depth.withUnsafeBytes { array2D(.depth32Float, s, s, slices: 6, $0.baseAddress!, 4) }
     }
-    let plain = render(plainPipeline), glass = render(glassOnPipeline)
-    var marked = 0, changedOutside = 0, changedInside = 0
+    func use(_ params: inout DisplayParams, iterations: Float = 0) {
+        params.probe = (SIMD4(0, 0, 0, -1), SIMD4(probe.origin, 0))
+        params.probeMix = SIMD4(1, probe.clip.x, probe.clip.y, iterations)
+    }
+}
+
+func render(_ pipeline: MTLRenderPipelineState, _ w: Int, _ h: Int, _ params: DisplayParams,
+            _ textures: [Int: MTLTexture]) -> [UInt8] {
+    let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
+    td.usage = .renderTarget
+    let target = device.makeTexture(descriptor: td)!
+    let rpd = MTLRenderPassDescriptor()
+    rpd.colorAttachments[0].texture = target
+    rpd.colorAttachments[0].loadAction = .clear
+    rpd.colorAttachments[0].storeAction = .store
+    let cb = queue.makeCommandBuffer()!
+    let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
+    enc.setRenderPipelineState(pipeline)
+    enc.setFragmentBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    for (i, t) in textures { enc.setFragmentTexture(t, index: i) }
+    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    var out = [UInt8](repeating: 0, count: w * h * 4)
+    target.getBytes(&out, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+    return out
+}
+
+let probes = try probePaths.map { ProbeTextures(try Probe(path: $0)) }
+let plainPipeline = try glassPipeline(false)
+let glassOnPipeline = try glassPipeline(true)
+let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
+
+struct GlassView {
+    let name: String, dump: Dump, glass: [UInt8], env: [UInt8]
+}
+var glassViews: [GlassView] = []
+
+for path in args {
+    let dump = try Dump(path: path)
+    guard let stencil = dump.stencil, dump.planes != nil, let current = probes.first else { continue }
+    let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+    let w = dump.width, h = dump.height
+    let color = dump.rgba.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
+    let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
+    var params = DisplayParams()
+    params.glass = SIMD4(1, 0.04, 0.85, 0.35)
+    params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
+    params.glassTint = SIMD4(0.80, 0.90, 0.88, 0)
+    setGlassView(&params, dump)
+
+    // Probe view: each probe along the eye's own rays, on static world pixels
+    // (not glass, not the flat viewmodel, which decodes nearer than 6 units).
+    let p22 = dump.projection.columns.2.z, p32 = dump.projection.columns.3.z
+    let near = p32 / (p22 - 1), far = p32 / (p22 + 1)
+    for probe in probes {
+        let offset = simd_length(probe.probe.origin - dump.origin)
+        var errors: [Float] = []
+        for iterations: Float in [0, 3] {
+            var pp = params
+            probe.use(&pp, iterations: iterations)
+            let out = render(probeViewPipeline, w, h, pp, [3: probe.color, 4: probe.depth])
+            var sum = 0, n = 0
+            for row in stride(from: 0, to: h, by: 2) {
+                for col in stride(from: 0, to: w, by: 2) {
+                    let src = (h - 1 - row) * w + col
+                    let code = stencil[src]
+                    let ndc = dump.depth[src] * 2 - 1
+                    let dist = 2 * near * far / ((far + near) - ndc * (far - near))
+                    if (code >= 16 && code <= 239) || dist < 6 || dump.depth[src] >= 1 { continue }
+                    let i = (row * w + col) * 4, j = src * 4
+                    sum += (0..<3).reduce(0) { $0 + abs(Int(out[i + $1]) - Int(dump.rgba[j + $1])) }
+                    n += 1
+                }
+            }
+            errors.append(Float(sum) / Float(max(n * 3, 1)))
+        }
+        print(String(format: "%@ probe view, probe %.0f units from the eye: mean error %.1f/255 plain, %.1f/255 parallax-corrected",
+                     name, offset, errors[0], errors[1]))
+        // At the eye both lookups must match the image to within the probe's
+        // resolution; away from it the parallax walk must do clearly better.
+        if offset < 1 ? errors[1] > 12 : errors[1] > errors[0] * 0.8 { failures += 1 }
+    }
+
+    current.use(&params, iterations: 3)
+    let textures: [Int: MTLTexture] = [TextureIndex.color.rawValue: color, 2: stencilTex, 3: current.color, 4: current.depth]
+    let plain = render(plainPipeline, w, h, params, textures)
+    let glass = render(glassOnPipeline, w, h, params, textures)
+    var envParams = params                             // the reflection alone
+    envParams.glass = SIMD4(100, 0.04, 1, 0)
+    let env = render(glassOnPipeline, w, h, envParams, textures)
+    var marked = 0, changedOutside = 0, changedInside = 0, missed = 0
     for row in 0..<h {
         for col in 0..<w {
             let code = stencil[(h - 1 - row) * w + col]      // output row 0 is the top
-            let isGlass = code >= 16 && code <= 240
+            let isGlass = code >= 16 && code <= 239
             let i = (row * w + col) * 4
             let changed = (0..<3).contains { abs(Int(plain[i + $0]) - Int(glass[i + $0])) > 1 }
-            if isGlass { marked += 1; if changed { changedInside += 1 } } else if changed { changedOutside += 1 }
+            if isGlass {
+                marked += 1
+                if changed { changedInside += 1 }
+                if env[i] > 250 && env[i + 1] < 5 && env[i + 2] > 250 { missed += 1 }
+            } else if changed { changedOutside += 1 }
         }
     }
-    print("\((path as NSString).lastPathComponent) glass: \(marked) px marked, \(changedInside) changed by the reflection, \(changedOutside) changed outside the mask")
-    if changedOutside > 0 || (marked > 0 && changedInside == 0) { failures += 1 }
+    print("\(name) glass: \(marked) px marked, \(changedInside) changed, \(changedOutside) changed outside the mask, \(missed) without a probe reflection")
+    if changedOutside > 0 || (marked > 0 && changedInside == 0) || missed > 0 { failures += 1 }
+    glassViews.append(GlassView(name: name, dump: dump, glass: glass, env: env))
     if let pngDir {
-        // plain | glass on top, the mask tinted under each
+        // plain | glass on top, the reflection alone | the mask below
         var sheet = [UInt8](repeating: 0, count: w * 2 * h * 2 * 4)
         for row in 0..<h {
             for col in 0..<w {
                 let i = (row * w + col) * 4
                 let code = stencil[(h - 1 - row) * w + col]
-                let tint = code >= 16 && code <= 240
+                let tint = code >= 16 && code <= 239
                 for (k, src) in [plain, glass].enumerated() {
                     let o = (row * w * 2 + k * w + col) * 4
                     for c in 0..<3 { sheet[o + c] = src[i + c] }
-                    let u = ((row + h) * w * 2 + k * w + col) * 4
-                    sheet[u] = tint ? 255 : src[i] / 3
-                    sheet[u + 1] = src[i + 1] / 3; sheet[u + 2] = src[i + 2] / 3
                 }
+                let e = ((row + h) * w * 2 + col) * 4, m = ((row + h) * w * 2 + w + col) * 4
+                for c in 0..<3 { sheet[e + c] = tint ? env[i + c] : plain[i + c] / 4 }
+                sheet[m] = tint ? 255 : plain[i] / 3
+                sheet[m + 1] = plain[i + 1] / 3; sheet[m + 2] = plain[i + 2] / 3
             }
         }
-        let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
         writePNG(sheet, w * 2, h * 2, "\(pngDir)/glass-\(name).png")
+    }
+}
+
+// Gaze and stereo: every glass pixel of one view is carried to the other
+// through its world point (the plane), and the reflections compared there.
+// Same origin (only the yaw differs): the reflection is a function of the
+// world point and the eye position alone, so it must agree — the old
+// frame-sampled reflection changed with where the eye looked. Origins an eye
+// apart: it may differ by true parallax only, which is small.
+func compare(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float)? {
+    guard let pa = a.dump.planes, let pb = b.dump.planes, let sa = a.dump.stencil, let sb = b.dump.stencil else { return nil }
+    let w = a.dump.width, h = a.dump.height
+    let (fa, ra, ua) = a.dump.axes, (fb, rb, ub) = b.dump.axes
+    let p = a.dump.projection
+    let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                  (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+    var sum = 0, n = 0
+    for row in stride(from: 1, to: h - 1, by: 3) {
+        for col in stride(from: 1, to: w - 1, by: 3) {
+            let code = Int(sa[(h - 1 - row) * w + col])
+            guard code >= 16, code - 16 < pa.count else { continue }
+            let plane = pa[code - 16]
+            let u = (Float(col) + 0.5) / Float(w), v = 1 - (Float(row) + 0.5) / Float(h)
+            let x = -t.x + (t.x + t.y) * u, y = -t.w + (t.z + t.w) * v
+            let d = simd_normalize(fa + x * ra + y * ua)
+            let nd = simd_dot(SIMD3(plane.x, plane.y, plane.z), d)
+            guard abs(nd) > 1e-3 else { continue }
+            let P = a.dump.origin + d * ((plane.w - simd_dot(SIMD3(plane.x, plane.y, plane.z), a.dump.origin)) / nd)
+            let q = P - b.dump.origin
+            let z = simd_dot(q, fb)
+            guard z > 1 else { continue }
+            let ub2 = (simd_dot(q, rb) / z + t.x) / (t.x + t.y), vb = (simd_dot(q, ub) / z + t.w) / (t.z + t.w)
+            let cb = Int(ub2 * Float(w)), rbow = Int(vb * Float(h))       // bottom-up row
+            guard cb > 1, cb < w - 2, rbow > 1, rbow < h - 2 else { continue }
+            let codeB = Int(sb[rbow * w + cb])
+            guard codeB >= 16, codeB - 16 < pb.count, simd_distance(pb[codeB - 16], plane) < 0.01 else { continue }
+            let i = (row * w + col) * 4, j = ((h - 1 - rbow) * w + cb) * 4
+            sum += (0..<3).reduce(0) { $0 + abs(Int(a.env[i + $1]) - Int(b.env[j + $1])) }
+            n += 1
+        }
+    }
+    return n > 0 ? (n, Float(sum) / Float(n * 3)) : nil
+}
+for (i, a) in glassViews.enumerated() {
+    for b in glassViews[(i + 1)...] {
+        let apart = simd_distance(a.dump.origin, b.dump.origin)
+        guard apart < 4, let r = compare(a, b) else { continue }
+        let kind = apart < 0.01 ? "gaze (same origin)" : String(format: "stereo (%.1f units apart)", apart)
+        print(String(format: "%@ vs %@ %@: %d glass points, mean reflection difference %.1f/255", a.name, b.name, kind, r.n, r.mean))
+        if r.mean > (apart < 0.01 ? 3 : 8) { failures += 1 }
     }
 }
 

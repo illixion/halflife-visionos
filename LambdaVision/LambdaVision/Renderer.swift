@@ -71,7 +71,8 @@ extension LayerRenderer.Clock.Instant {
 enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
     /// The GPU-execution columns (GPUPassTimer), logged on their own line.
-    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth"]
+    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
+                           "gProbe", "probeCPU"]   // glass probe face (GlassProbe), on frames that draw one
 
     static let shared: RAVEFrameProfiler = {
         let profiler = RAVEFrameProfiler(
@@ -132,7 +133,7 @@ actor Renderer {
     let fragmentArgumentTable: MTL4ArgumentTable
     /// Per-frame DisplayParams for the composite, one slot per frame in flight.
     let displayParamsBuffer: MTLBuffer
-    static let displayParamsStride = 256
+    static let displayParamsStride = (MemoryLayout<DisplayParams>.stride + 255) & ~255
     #if !targetEnvironment(simulator)
     let residencySets: [MTLResidencySet]
     let commandQueueResidencySet: MTLResidencySet
@@ -171,6 +172,10 @@ actor Renderer {
     // The stencil aspect of engineDepth, where the engine marks glass
     // (r_vrglass) for the composite's glass reflection.
     var engineStencil: MTLTexture?
+    // What the glass reflects (GlassProbe), made when glass is first on, and
+    // each eye's view and glass planes from the engine, read after the eyes.
+    var glassProbe: GlassProbe?
+    var glassEyes: [lambda_glass_eye_t] = []
     // Holds the last frame of a level still in the room while the next loads.
     var loadSnapshot: LoadSnapshot!
     // This frame's colorMap is copied into the snapshot (render() encodes it).
@@ -311,6 +316,11 @@ actor Renderer {
     nonisolated(unsafe) static var glassReflections: Bool = false
     /// How much of the Fresnel reflectance the glass shows (1 = physical).
     nonisolated(unsafe) static var glassStrength: Float = 1.0
+    /// The pane's own colour, multiplied into what is seen through it (float
+    /// glass's faint green), and how far: GoldSrc's translucent glass alone
+    /// reads as nearly clear. Engine colour space.
+    nonisolated(unsafe) static var glassTint: SIMD3<Float> = SIMD3(0.80, 0.90, 0.88)
+    nonisolated(unsafe) static var glassTintAmount: Float = 0.35
     /// The engine's projection near/far, xash units (HL inches ≈ 39.37/m).
     /// zFar matches the engine's culling far clip (R_GetFarClip floors zmax
     /// at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era maps)
@@ -1227,7 +1237,7 @@ actor Renderer {
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
-        argTableDesc.maxTextureBindCount = 3    // colour@0, engine depth@1, engine stencil@2 (glass)
+        argTableDesc.maxTextureBindCount = 5    // colour@0, engine depth@1, engine stencil@2, glass probe colour@3, depth@4
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
         // GPU state, so sharing one table across two encoders that bind
@@ -2508,6 +2518,19 @@ actor Renderer {
             }
         }
 
+        // Glass probe (GlassProbe): made on first use; forgotten across a
+        // load or while the toggle is off.
+        if Renderer.glassReflections, glassProbe == nil, let colorMap,
+           let probe = GlassProbe(device: device, colorFormat: colorMap.pixelFormat) {
+            glassProbe = probe
+            #if !targetEnvironment(simulator)
+            commandQueueResidencySet.addAllocations([probe.color, probe.depth])
+            commandQueueResidencySet.commit()
+            #endif
+        }
+        if engineHeld || !Renderer.glassReflections { glassProbe?.reset() }
+        var secondEyeRan = false
+
         for eye in 0..<2 where !engineHeld {
             // GPU-side fence for this eye: the bridge signals angleFenceEvent
             // with this value on ANGLE's queue when the eye's render
@@ -2548,6 +2571,10 @@ actor Renderer {
                 // The box's tan height/width ratio, for the gaze→menu mapper.
                 if eye == 0 { Renderer.hudBoxAspect = sumV / sumH }
             }
+            // The glass probe's face for this frame rides on the second eye.
+            if eye == 1, Renderer.glassReflections, let glassProbe {
+                glassProbe.stageFace(now: ftEyesStart, eyes: glassEyes)
+            }
             let rc: Int32 = withUnsafePointer(to: &tang) { tp in
                 tp.withMemoryRebound(to: Float.self, capacity: 4) { fp -> Int32 in
                     if var angles = headAngles {
@@ -2577,6 +2604,16 @@ actor Renderer {
             if rc != 0 {
                 AppLog.render.log("[LambdaVision] GL worker render eye=\(eye) rc=\(rc)")
             }
+            if eye == 1 { secondEyeRan = rc == 0 }
+        }
+        if !engineHeld {
+            // Each eye's view and glass planes, for the composite's glass.
+            glassEyes = (0..<2).map { eye in
+                var e = lambda_glass_eye_t()
+                lambda_glass_get_eye(Int32(eye), &e)
+                return e
+            }
+            glassProbe?.eyesDone(now: ftEyesStart, secondEyeRan: secondEyeRan)
         }
 
         // Order our queue after ANGLE's colorMap writes for both eyes. The
@@ -2636,6 +2673,29 @@ actor Renderer {
         frame.endSubmission()
         FrameTimingStats.shared.add("total", (CACurrentMediaTime() - ftFrameStart) * 1000)
         FrameTimingStats.shared.frameDone()
+    }
+
+    /// Each eye's engine view and glass plane table into DisplayParams
+    /// (glassEye, glassPlanes; Shaders.metal glassShade).
+    static func setGlassEyes(_ params: inout DisplayParams, _ eyes: [lambda_glass_eye_t]) {
+        withUnsafeMutableBytes(of: &params) { raw in
+            let view = (raw.baseAddress! + MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassEye)!)
+                .bindMemory(to: SIMD4<Float>.self, capacity: 8)
+            let planes = raw.baseAddress! + MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassPlanes)!
+            let rowBytes = MemoryLayout<SIMD4<Float>>.stride
+            for (eye, e) in eyes.prefix(2).enumerated() {
+                view[eye * 4 + 0] = SIMD4(e.origin.0, e.origin.1, e.origin.2, 0)
+                view[eye * 4 + 1] = SIMD4(e.forward.0, e.forward.1, e.forward.2, 0)
+                view[eye * 4 + 2] = SIMD4(e.right.0, e.right.1, e.right.2, 0)
+                view[eye * 4 + 3] = SIMD4(e.up.0, e.up.1, e.up.2, 0)
+                var copy = e
+                let n = Int(min(max(e.count, 0), LAMBDA_GLASS_MAX_PLANES))
+                withUnsafeBytes(of: &copy.planes) { src in
+                    (planes + eye * Int(LAMBDA_GLASS_MAX_PLANES) * rowBytes)
+                        .copyMemory(from: src.baseAddress!, byteCount: n * rowBytes)
+                }
+            }
+        }
     }
 
     func render(drawable: LayerRenderer.Drawable, frameIndex: UInt64,
@@ -2905,6 +2965,7 @@ actor Renderer {
         weaponPass.keepsDepth = perPixelDepth
         // Glass needs the engine's stencil, which lives in the same texture.
         let glass = Renderer.glassReflections && engineStencil != nil
+            && glassProbe != nil && glassEyes.count == 2
             && lambda_gl_depth_target_ok() != 0 && Renderer.hdrTestMode == 0 && displayMap == nil
         var variant: CompositeVariant = []
         if compositeFXAA { variant.insert(.fxaa) }
@@ -2954,17 +3015,24 @@ actor Renderer {
                 // 1.43 × the 10 cm near plane — see compositorDepth).
                 params.depthLimits = SIMD4(0.0001, 1, 0.16, 0)
             }
-            if glass, let engineStencil {
+            if glass, let engineStencil, let glassProbe, glassEyes.count == 2 {
                 self.fragmentArgumentTable.setTexture(engineStencil.gpuResourceID, index: 2)
-                params.glass = SIMD4(Renderer.glassStrength, 0.04, 0.85, 0)
-                // Where a reflected ray leaves the frame: the room's light at
-                // the eye (the engine's probe), dimmed — a guess at what is
-                // behind the viewer. Engine colour space, like the image.
+                self.fragmentArgumentTable.setTexture(glassProbe.color.gpuResourceID, index: 3)
+                self.fragmentArgumentTable.setTexture(glassProbe.depth.gpuResourceID, index: 4)
+                params.glass = SIMD4(Renderer.glassStrength, 0.04, 0.85, Renderer.glassTintAmount)
+                // Until the first probe is in: the room's light at the eye
+                // (the engine's light probe), dimmed. Engine colour space,
+                // like the image.
                 var light: [Float] = [0.3, 0.3, 0.3]
                 light.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 params.glassAmbient = SIMD4(SIMD3(light[0], light[1], light[2]) * 0.5, 0)
+                params.glassTint = SIMD4(Renderer.glassTint, 0)
                 let t = drawable.views.indices.map { drawable.frustumTangents(viewIndex: $0) }
                 params.eyeTangents = (t[0], t[min(1, t.count - 1)])
+                let probe = glassProbe.shaderParams(now: CACurrentMediaTime())
+                params.probe = probe.probe
+                params.probeMix = probe.mix
+                Self.setGlassEyes(&params, glassEyes)
             }
             memcpy(displayParamsBuffer.contents() + paramsOffset, &params, MemoryLayout<DisplayParams>.size)
             self.fragmentArgumentTable.setAddress(displayParamsBuffer.gpuAddress + UInt64(paramsOffset),

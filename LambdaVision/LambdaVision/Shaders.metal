@@ -210,51 +210,140 @@ static inline float3 hdrTestPattern(float2 uv, float mode, float aspect)
 
 // ---- Glass (modern lighting tier 1; Renderer.glassReflections) -----------
 // The engine marks glass in the stencil aspect of the depth texture we gave
-// it (r_vrglass, ref/gl gl_rsurf.c R_VRGlass*): 16 + the surface's eye-space
-// normal, x and y quantised to 15 steps each, facing the viewer. Glass in
-// GoldSrc writes no depth, so the normal has to come from there rather than
-// from the depth buffer, which holds whatever is behind the pane.
+// it (r_vrglass, ref/gl gl_rsurf.c R_VRGlass*): 16 + the row of that eye's
+// glass plane table (DisplayParams.glassPlanes) holding the surface's world
+// plane. Glass in GoldSrc writes no depth, so the plane is what places the
+// pixel: the eye's view ray (from the view the engine drew it with, glassEye)
+// meets it at P, in the world, the same point for both eyes.
 //
-// The reflection is Schlick's Fresnel over a "distant environment" made of
-// the frame itself: the reflected ray, taken as a direction, is projected
-// back into this eye's frustum and the engine image sampled there. Looking
-// along a glass wall that shows the corridor ahead — the case where real
-// glass reflects most; facing a pane head-on the ray points behind the eye,
-// F is 4%, and the ambient colour stands in. One stencil read per pixel and
-// one extra colour sample on glass only; no extra pass.
+// The reflection is Schlick's Fresnel over an environment probe: six 90°
+// views of the room the engine renders from the player's head, one face per
+// frame, while glass is in sight (GlassProbe.swift, ref/gl R_VRProbeFace).
+// The probe is fixed in the world, so what a pane reflects no longer depends
+// on where the eye looks — the old lookup projected the reflected ray into the
+// eye's own frame and fell back to a flat colour where it left the frame,
+// which popped with gaze and differed between the eyes. The probe also keeps
+// its depth, so the lookup is parallax-corrected: the reflected ray from P is
+// walked to where it meets the probe's surroundings (probeLookup), and each
+// eye sees the mirrored room at its true distance. Two probes are blended
+// across a refresh (probeMix.x), so a new capture fades in rather than pops.
+// What is seen through the pane takes on its tint (glassTint).
+//
+// Per glass pixel: one stencil read, then three depth reads and a colour
+// sample per probe (two probes only while a refresh fades in). None elsewhere.
 constant bool kGlassValue [[function_constant(22)]];
 constant bool kGlass = is_function_constant_defined(kGlassValue) && kGlassValue;
 
-static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
-                                texture2d_array<half> colorMap, sampler s,
-                                texture2d_array<uint> engineStencil,
-                                constant DisplayParams &p)
+// The probe face a world (xash) direction falls on, and where in it (each
+// axis −1…1, v up; GL rows are bottom-up, so uv = ab·0.5 + 0.5 unflipped).
+// Faces 0–5 look along +X +Y −X −Y +Z −Z, right/up as AngleVectors gives
+// them for the angles R_VRProbeFace renders each with.
+static inline uint probeFace(float3 d, thread float2 &ab)
 {
-    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
-    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
-    if (code < 16 || code > 240)
-        return rgb;
-    const uint i = code - 16;
-    const float2 nxy = float2(float(i / 15), float(i % 15)) / 7.0 - 1.0;
-    const float3 n = normalize(float3(nxy, sqrt(saturate(1.0 - dot(nxy, nxy)))));
+    const float3 a = abs(d);
+    if (a.x >= a.y && a.x >= a.z) {
+        if (d.x > 0.0) { ab = float2(-d.y, d.z) / a.x; return 0; }
+        ab = float2(d.y, d.z) / a.x; return 2;
+    }
+    if (a.y >= a.z) {
+        if (d.y > 0.0) { ab = float2(d.x, d.z) / a.y; return 1; }
+        ab = float2(-d.x, d.z) / a.y; return 3;
+    }
+    if (d.z > 0.0) { ab = float2(-d.y, -d.x) / a.z; return 4; }
+    ab = float2(-d.y, d.x) / a.z; return 5;
+}
+
+// What the probe saw along the ray from P in direction r (unit). probe.xyz is
+// where it was captured, probe.w its first slice; clip = zNear, zFar.
+// `iterations` 0 is the plain direction lookup (the room taken as infinitely
+// far); each step re-reads the probe's distance where the current hit guess
+// lies and moves the hit to the ray's crossing of that sphere about the probe.
+static inline float3 probeLookup(texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
+                                 sampler s, float3 P, float3 r, float4 probe, float2 clip,
+                                 int iterations)
+{
+    const uint size = probeDepth.get_width();
+    const uint base = uint(probe.w);
+    const float3 PC = P - probe.xyz;
+    const float b = dot(r, PC), c0 = dot(PC, PC);
+    const float n = clip.x, f = clip.y;
+    float3 dir = r;
+    float2 ab;
+    for (int i = 0; i < iterations; i++) {
+        const uint face = probeFace(dir, ab);
+        const uint2 texel = min(uint2((ab * 0.5 + 0.5) * float(size)), uint2(size - 1));
+        const float ndc = probeDepth.read(texel, base + face) * 2.0 - 1.0;
+        // GL depth → distance along the face's axis → along the texel's ray
+        const float D = 2.0 * n * f / ((f + n) - ndc * (f - n)) * sqrt(1.0 + dot(ab, ab));
+        const float t = -b + sqrt(max(b * b - (c0 - D * D), 0.0));
+        dir = PC + r * max(t, 1.0);
+    }
+    const uint face = probeFace(dir, ab);
+    return float3(probeColor.sample(s, ab * 0.5 + 0.5, base + face).rgb);
+}
+
+// The view ray through engine-image uv for this eye, in xash world axes.
+static inline float3 glassViewRay(float2 uv, ushort eye, constant DisplayParams &p)
+{
     // GL eye space: x right, y up, the eye looking down −z; uv.y = 0 is the
     // bottom row (the engine image is bottom-up, sampled unflipped).
     const float4 t = p.eyeTangents[eye];   // left, right, top, bottom
-    const float3 v = normalize(float3(mix(-t.x, t.y, uv.x), mix(-t.w, t.z, uv.y), -1.0));
-    const float cosTheta = saturate(dot(-v, n));
+    const float2 v = float2(mix(-t.x, t.y, uv.x), mix(-t.w, t.z, uv.y));
+    return normalize(p.glassEye[eye][1].xyz + v.x * p.glassEye[eye][2].xyz + v.y * p.glassEye[eye][3].xyz);
+}
+
+static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
+                                texture2d_array<uint> engineStencil,
+                                texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
+                                sampler s, constant DisplayParams &p)
+{
+    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
+    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
+    if (code < 16 || code > 239)
+        return rgb;
+    const float4 plane = p.glassPlanes[eye][code - 16];
+    const float3 E = p.glassEye[eye][0].xyz;
+    const float3 d = glassViewRay(uv, eye, p);
+    float3 n = plane.xyz;
+    const float nd = dot(n, d);
+    if (abs(nd) < 1e-4)
+        return rgb;
+    const float3 P = E + d * max((plane.w - dot(n, E)) / nd, 0.0);
+    if (nd > 0.0)
+        n = -n;                              // the side facing the viewer
+    const float cosTheta = saturate(-dot(d, n));
     const float F = p.glass.y + (1.0 - p.glass.y) * pow(1.0 - cosTheta, 5.0);
-    const float3 r = reflect(v, n);
+    const float3 r = reflect(d, n);
+    const float2 clip = p.probeMix.yz;
     float3 env = p.glassAmbient.rgb;
-    if (r.z < -0.05) {
-        const float2 tanR = r.xy / -r.z;
-        const float2 ruv = float2((tanR.x + t.x) / (t.x + t.y), (tanR.y + t.w) / (t.z + t.w));
-        const float2 edge = min(ruv, 1.0 - ruv);
-        // fade out toward the frame's edges and as the ray turns sideways
-        const float w = saturate(min(edge.x, edge.y) * 8.0) * saturate((-r.z - 0.05) * 4.0);
-        if (w > 0.0)
-            env = mix(env, float3(colorMap.sample(s, saturate(ruv), eye).rgb), w);
+    if (p.probe[1].w >= 0.0) {
+        const float w = p.probeMix.x;
+        float3 older = env;
+        if (w < 1.0 && p.probe[0].w >= 0.0)
+            older = probeLookup(probeColor, probeDepth, s, P, r, p.probe[0], clip, 3);
+        const float3 cur = probeLookup(probeColor, probeDepth, s, P, r, p.probe[1], clip, 3);
+        env = mix(older, cur, w);
     }
-    return mix(rgb, env, min(F * p.glass.x, p.glass.z));
+    const float3 seen = rgb * mix(float3(1.0), p.glassTint.rgb, p.glass.w);
+    return mix(seen, env, min(F * p.glass.x, p.glass.z));
+}
+
+// Test hook for Tools/DepthProbe: what the probe shows along each pixel's
+// own view ray from the eye (no glass, no reflection), with or without the
+// parallax walk (probeMix.w = iterations). Where the probe and the eye see the
+// same static surface this reproduces the engine image, which checks the
+// probe's face layout, depth decode and parallax correction against the
+// engine. Not used by the app.
+fragment float4 glassProbeView(ColorInOut in [[stage_in]],
+                               constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
+                               texture2d_array<half> probeColor [[ texture(3) ]],
+                               depth2d_array<float> probeDepth [[ texture(4) ]])
+{
+    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    const float3 d = glassViewRay(in.texCoord, in.eye, params);
+    const float3 rgb = probeLookup(probeColor, probeDepth, s, params.glassEye[in.eye][0].xyz, d,
+                                   params.probe[1], params.probeMix.yz, int(params.probeMix.w));
+    return float4(rgb, 1.0);
 }
 
 static inline float4 displayOutput(float3 rgb, float alpha, float2 uv, float2 pixel,
@@ -268,7 +357,9 @@ static inline float4 displayOutput(float3 rgb, float alpha, float2 uv, float2 pi
 fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
-                               texture2d_array<uint> engineStencil [[ texture(2) ]])
+                               texture2d_array<uint> engineStencil [[ texture(2) ]],
+                               texture2d_array<half> probeColor [[ texture(3) ]],
+                               depth2d_array<float> probeDepth [[ texture(4) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -285,7 +376,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, probeColor, probeDepth, colorSampler, params);
 
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
@@ -297,7 +388,9 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
 fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
                                    constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                    texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
-                                   texture2d_array<uint> engineStencil [[ texture(2) ]])
+                                   texture2d_array<uint> engineStencil [[ texture(2) ]],
+                               texture2d_array<half> probeColor [[ texture(3) ]],
+                               depth2d_array<float> probeDepth [[ texture(4) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -310,7 +403,7 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, probeColor, probeDepth, colorSampler, params);
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
 
@@ -357,7 +450,9 @@ fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
                                                constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                                texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
                                                depth2d_array<float> engineDepth [[ texture(1) ]],
-                                               texture2d_array<uint> engineStencil [[ texture(2) ]])
+                                               texture2d_array<uint> engineStencil [[ texture(2) ]],
+                               texture2d_array<half> probeColor [[ texture(3) ]],
+                               depth2d_array<float> probeDepth [[ texture(4) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
@@ -365,7 +460,7 @@ fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
     const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, probeColor, probeDepth, colorSampler, params);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
     out.depth = compositorDepth(engineDepth, uv, in.eye, params);
@@ -376,7 +471,9 @@ fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
                                                    constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                                    texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
                                                    depth2d_array<float> engineDepth [[ texture(1) ]],
-                                                   texture2d_array<uint> engineStencil [[ texture(2) ]])
+                                                   texture2d_array<uint> engineStencil [[ texture(2) ]],
+                               texture2d_array<half> probeColor [[ texture(3) ]],
+                               depth2d_array<float> probeDepth [[ texture(4) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
@@ -385,7 +482,7 @@ fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
     const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, colorMap, colorSampler, engineStencil, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, probeColor, probeDepth, colorSampler, params);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
     out.depth = compositorDepth(engineDepth, uv, in.eye, params);

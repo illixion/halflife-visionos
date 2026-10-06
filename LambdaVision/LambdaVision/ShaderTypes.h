@@ -153,15 +153,32 @@ typedef struct
     simd_float4 depthLimits;
     // Glass (the composite's kGlass variants, Shaders.metal glassShade): where
     // the engine marked glass in its stencil (r_vrglass), a Fresnel
-    // reflection. x = strength, y = F0 (normal-incidence reflectance), z = the
-    // most of the pixel the reflection may replace, w unused.
+    // reflection of the environment probe (GlassProbe.swift). x = strength,
+    // y = F0 (normal-incidence reflectance), z = the most of the pixel the
+    // reflection may replace, w = how far what is seen through the pane takes
+    // on glassTint (0 = clear).
     simd_float4 glass;
-    // rgb = what the reflection shows where its ray leaves the frame, in the
-    // engine's (gamma-encoded) colour space.
+    // rgb = what the reflection shows while no probe is ready, in the engine's
+    // (gamma-encoded) colour space.
     simd_float4 glassAmbient;
+    // rgb = the pane's own colour, multiplied into what is seen through it.
+    simd_float4 glassTint;
     // Per eye: the engine frustum's left, right, top, bottom tangents, for
     // each pixel's view ray.
     simd_float4 eyeTangents[2];
+    // Per eye, the view the engine drew it from (lambda_glass_eye_t), xash
+    // world units and axes: origin, forward, right, up (w unused).
+    simd_float4 glassEye[2][4];
+    // The two environment probes being blended (GlassProbe): [0] the one
+    // fading out, [1] the current one. xyz = where it was captured (xash
+    // units), w = the array slice of its first face, or −1 for none.
+    simd_float4 probe[2];
+    // x = probe[1]'s weight (0 → 1 over a swap), y, z = the probe depth's
+    // zNear, zFar (xash units), w unused.
+    simd_float4 probeMix;
+    // Per eye: the glass planes the stencil codes name (code − 16), xash
+    // world: normal xyz, distance (lambda_glass_eye_t.planes).
+    simd_float4 glassPlanes[2][224];
 } DisplayParams;
 
 #ifdef __METAL_VERSION__

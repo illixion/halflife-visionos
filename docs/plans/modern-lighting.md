@@ -1,7 +1,8 @@
 # Plan — Modern lighting: reflections, glass and shadows
 
-> **Status (2026-10-06): measurement plumbing and a tier-1 glass prototype
-> built, both behind toggles; no headset numbers yet.** See "Progress" at the
+> **Status (2026-10-06): measurement plumbing and tier-1 glass (environment
+> probe reflections, after a failed screen-space first version) built, both
+> behind toggles; no headset numbers yet.** See "Progress" at the
 > end. Numbers quoted from Oneiros are from its notes, not re-measured for
 > this app.
 
@@ -136,8 +137,8 @@ the range and decodes under 16 cm, which is how it is told apart.
 
 ### 3. Tier 1, windows and glass (prototype, default off)
 
-**Identification — decided: an engine stencil mask.** ref/gl marks glass in
-the stencil aspect of the depth texture the app already owns
+**Identification — an engine stencil mask with a plane table.** ref/gl marks
+glass in the stencil aspect of the depth texture the app already owns
 (`r_vrglass 1`, `gl_rsurf.c` `R_VRGlass*` in `xash3d-visionos.patch`):
 
 - glass = a brush entity drawn with `kRenderTransTexture` (how GoldSrc maps
@@ -145,58 +146,126 @@ the stencil aspect of the depth texture the app already owns
   material Glass), or any non-additive brush surface whose texture name
   contains `glass`. Texture-name prefixes alone (`{`, `!`) mean alpha-test
   and water, not glass, and `kRenderTransColor` is mostly solid colour
-  fades, so neither is used.
+  fades, so neither is used. (Translucent water boxes such as the c1a2
+  sink count too, and get the same reflection.)
 - GoldSrc glass writes no depth (`R_SetRenderMode` masks it), so the
-  depth buffer holds what is behind the pane and cannot give a normal. The
-  stencil value carries it instead: 16 + the eye-space normal's x and y
-  quantised to 15 steps each (codes 16–240; the engine's own stencil users
-  write small counts). A pane is planar, so it gets one code; the ~6°
-  quantisation only biases its Fresnel angle.
+  depth buffer holds what is behind the pane. The stencil value is
+  16 + a row of that view's **glass plane table** (`vr_glass_planes`,
+  world-space normal and distance, up to 224 rows; codes 16–239; the
+  engine's own stencil users write small counts). Every eye view refills
+  the table; the bridge copies it after each eye with the eye's view
+  (`vr_glass_view`, `lambda_glass_get_eye`). The plane places each glass
+  pixel in the world: the eye's ray meets it at the same point for both
+  eyes. (The first version stored a 15 × 15 quantised eye-space normal
+  instead, which could orient a reflection but not place it.)
 - Translucent brush entities already bypass the VBO path; with `r_vrglass`
   on, every brush entity draws surface by surface so each glass surface gets
-  its code. World (non-entity) surfaces are not marked.
+  its code. World (non-entity) surfaces are not marked. A view with more
+  than 224 glass planes in its frustum leaves the rest unmarked.
 - Mods: the same rules or nothing. A game whose windows are something else
   simply shows no effect.
 
-**Shading.** Inside the composite (a `kGlass` function-constant variant,
-pipelines indexed by variant bits), no extra pass: one stencil read per
-pixel, and on glass only, Schlick Fresnel (F0 0.04) mixing in an
-environment sample. The environment is the frame itself: the reflected ray,
-as a direction, is projected back into the eye's frustum and the engine
-image sampled there, faded to the room's light (the engine's light probe at
-the eye, halved) where it leaves the frame. That is right where glass
-reflects most — looking along a glass wall, the reflection shows the
-corridor ahead — and head-on the ray points behind the eye where F is 4%
-anyway.
+**What failed on the headset (first shading, 2026-10-06).** The reflection
+was the frame itself: the reflected ray, as a direction, projected back into
+the *current eye's* frustum and the engine image sampled there, faded to a
+flat ambient colour where it left the frame. In the c1a2 office lab (the
+flooded bench under the periodic-table poster) the pane showed a mirrored copy
+of on-screen content (the faucet, the poster), flickered between that and no
+reflection as the gaze moved, and de-synced between the eyes looking
+sideways. The code confirms the reading: the lookup depended on what was on
+screen, so moving the gaze moved content in and out of the reflection; each
+eye's frustum is asymmetric and canted, so the same reflected direction fell
+inside one eye's frame and outside the other's; and treating the frame as
+infinitely far gave the reflection no parallax.
 
-**Verified offline** on the Mac build in c1a0: `r_vrdump` now appends the
-stencil (dump version 2); the mask lies exactly on the panes, the codes
-decode to the wall's normal as seen from the dumped yaw (code 38 for a +x
-wall at yaw 240°), and `Tools/DepthProbe --png` renders plain vs glass: only
-marked pixels change, and at a grazing angle the pane shows the mirrored
-frame and corridor. Deterministic camera placement on the Mac:
-`sv_cheats 1; noclip; host_framerate 0.01; cl_yawspeed 100`, then `+left` /
-`+forward` for a counted number of `wait`s (1° and ~3.2 units per frame).
+**Shading now — an environment probe (option a).** Options weighed:
+(b) planar reflection is exact but costs a mirrored engine view per plane per
+eye, against an engine already at 2–4 ms per eye in an 8.3 ms frame; (c) a
+sturdier screen-space trace still loses everything off screen and needs a
+shared fallback anyway — which is the probe. So the probe *is* the
+reflection:
 
-**Left for tier 1:**
+- **Capture** (`GlassProbe.swift`, ref/gl `R_VRProbeFace`, bridge
+  `lambda_gl_worker_set_probe_face`): six 256² faces, 90° each along ±X ±Y ±Z,
+  rendered by the engine from the head (midway between the eyes) into a
+  colour and a depth texture of ours (2D arrays, three probes × six faces).
+  One face per frame, drawn on the GL worker right after the second eye and
+  before its fence, so that frame's composite may read it. Like an envshot a
+  face draws the world and brush entities only (`RF_DRAW_CUBEMAP`: no
+  studio models, sprites or viewmodel), and the probe pass also skips glass,
+  particles, beams and the client's triangle callbacks: the static room. It
+  uses the eyes' depth range so its depth decodes like theirs.
+- **When:** only while glass is in sight (either eye's plane table was
+  non-empty within the last second) and the probe is stale: the head has
+  moved 48 units (1.2 m) from where it was captured, or 4 s have passed
+  (doors, lights). Otherwise nothing is drawn. A level load or teleport
+  (512 units) drops the probes; until the first new one is in, glass shows
+  the old ambient guess.
+- **No popping:** three probe slots — current, fading out, filling — so the
+  engine never draws into one the composite still reads (Metal 4 tracks no
+  hazards; a freed slot also rests `maxBuffersInFlight` frames). A completed
+  probe fades in over 0.3 s, and a new capture waits for the fade to end.
+- **Lookup** (`Shaders.metal` `glassShade` / `probeLookup`): per glass pixel,
+  the eye ray meets the pane's plane at P; r = reflect(ray, n); the probe is
+  walked three steps: read its distance where the current hit guess lies and
+  move the hit to the ray's crossing of that sphere about the probe origin.
+  That parallax correction is what makes a reflection from a probe captured
+  away from the pane land in the right place, and gives each eye the mirrored
+  room at its true distance. Same probe, same world point for both eyes:
+  stereo-consistent by construction, gaze-independent by construction.
+- **Tint:** what is seen through the pane is multiplied toward a faint glass
+  green (`Renderer.glassTint` (0.80, 0.90, 0.88) at `glassTintAmount` 0.35),
+  so panes read as glass head-on; the reflection then replaces
+  F × strength of the pixel (Schlick, F0 0.04, capped at 0.85).
+- **Cost:** per glass pixel one stencil read, three depth reads and one
+  colour sample (twice during a fade); other pixels one stencil read. The
+  face's ANGLE GPU time and the worker's CPU time for it log as `gProbe` and
+  `probeCPU` in the `[FT] gpu(ms)` line (GPU side needs "GPU pass timing").
 
-- A headset look: strength, F0, the 0.85 cap and the ambient guess are
-  first values. Settings has only the toggle (`Renderer.glassStrength`).
-- The device needs a libxash rebuild (`build_xash_libxash.sh`) to have
-  `r_vrglass`; without it the toggle changes nothing.
-- The pane's own tint: TransTexture glass is the texture at `renderamt`
-  over the scene; the reflection is mixed over that result rather than
-  under the glass colour.
-- The "environment" is only what is on screen. A real one: a low-res cube
-  probe per map, captured while the load snapshot holds the view (the engine
-  renders six views of the new level during the load), or around the player
-  on a slow cadence. That is also tier 3's fallback for rays that leave the
-  screen.
-- Sprites and particles drawn after the glass inherit its mark (they keep
-  the reflection over them). Worldspawn glass is not marked.
-- Cost: unmeasured — one `r8` read per pixel plus one sample per glass
-  pixel should be a fraction of the composite; read `gComposite` with the
-  toggle on and off.
+**Verified offline** on the Mac build (`r_vrdump` version 3 appends the plane
+table; `r_vrprobedump N` writes the probe from the current view;
+`Tools/DepthProbe` runs the real shaders), at the c1a2 bench and the c1a0
+lobby windows:
+
+| Check | c1a2 bench | c1a0 lobby |
+|---|---|---|
+| probe along the eye's own rays vs the engine image (probe at the eye) | 4.9 / 255 | 2.3 / 255 |
+| same, probe 58 units away: plain lookup → parallax-corrected | 27.1 → 7.1 | — |
+| same glass point, two gaze directions (same origin) | 0.6 / 255 | 0.4 / 255 |
+| same glass point, two eyes 2.5 units (6.4 cm) apart | 4.2 / 255 | 4.8 / 255 |
+| glass pixels without a probe reflection | 0 | 0 |
+| pixels changed outside the mask | 0 | 0 |
+
+The first row checks the face layout and depth decode against the engine;
+the gaze row is the device bug's opposite (the reflection no longer depends
+on where the eye looks); the stereo row differs only by true parallax.
+Camera placement on the Mac is now exact: `sv_enttools_enable 1; noclip;
+ent_fire 1 set origin "x y z"` (turn with `+left` and `host_framerate 0.01`).
+Run the Mac engine with `SDL_MAC_BACKGROUND_APP=1` and `-noenginemouse
+-window +m_ignore 1` so it never takes the mouse.
+
+**To check on the headset** (Settings → Graphics glass toggle on; libxash
+rebuilt; capture both eyes with the debug server's frame capture):
+
+1. c1a2 office lab, the flooded bench under the periodic-table poster
+   (the device screenshots; the sink's water box at about x 1225, y −260,
+   z −555): stand about 1.5 m back, at x 1110, y −330, facing the poster
+   (yaw ≈ 33°), looking down ≈ 17°. Capture both eyes: the sink top should
+   show the ceiling and the poster's edge, the front face the floor behind
+   you, the same in both eyes apart from a small shift.
+2. Same spot, turn the head ±40° keeping the sink in view, then put it at the
+   left and the right edge of the view: the reflection must not change or
+   vanish, and both eye captures must show it.
+3. c1a0 lobby, the interior windows along x −776 (y −690 to −450): from
+   x −700, y −380 look along the wall (yaw ≈ 250°) for a grazing view, then
+   walk along it: the corridor shows in the panes; a refresh (every 1.2 m)
+   should only ever fade, never jump.
+4. `[FT] gpu(ms)`: `gProbe` and `probeCPU` (expect well under 1 ms) and
+   `gComposite` with the toggle on vs off.
+
+**Left for tier 1:** tune strength, tint and the 0.85 cap on device; studio
+models (scientists, items) do not reflect, and sprites drawn after the glass
+still inherit its mark; worldspawn glass is not marked.
 
 ### Decisions on the open questions
 
@@ -229,5 +298,6 @@ frame and corridor. Deterministic camera placement on the Mac:
   colour and depth are on the GPU, opaque surfaces write depth, and the
   depth→eye conversion is `compositorDepth`'s. Needs normals (from depth, with
   Oneiros's foveation caveat), the cube-probe fallback above, and a
-  `gComposite`-sized slot in the budget.
+  `gComposite`-sized slot in the budget. The glass probe (tier 1) is
+  already the fallback for rays that leave the screen.
 

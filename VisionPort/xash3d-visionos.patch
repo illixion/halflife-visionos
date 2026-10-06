@@ -3517,48 +3517,58 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..c6188da 100644
+index e6e7712..f65ad22 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,10 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,18 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
 +#if !XASH_VISIONOS
 +extern convar_t	r_vrdump;
++extern convar_t	r_vrprobedump;
 +#endif
 +extern convar_t	r_vrglass;
++
++// visionOS glass pass (gl_rsurf.c R_VRGlass, gl_rmain.c R_VRProbeFace)
++#define VR_GLASS_MAX_PLANES	224	// codes 16-239
++extern int	vr_glass_count;
++extern float	vr_glass_planes[VR_GLASS_MAX_PLANES][4];
++extern qboolean	r_vrprobe_pass;
++void R_VRProbeFace( const float *origin, int face, int size, float zNear, float zFar );
  extern convar_t	r_nocull;
  extern convar_t	r_lockpvs;
  extern convar_t	r_lockfrustum;
 diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
-index 05a130f..ab677af 100644
+index 05a130f..e46209b 100644
 --- a/ref/gl/gl_opengl.c
 +++ b/ref/gl/gl_opengl.c
-@@ -26,6 +26,10 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
+@@ -26,6 +26,11 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
  CVAR_DEFINE_AUTO( r_lighting_ambient, "0.3", FCVAR_GLCONFIG, "map ambient lighting scale" );
  CVAR_DEFINE_AUTO( r_detailtextures, "1", FCVAR_GLCONFIG, "enable detail textures support" );
  CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
 +#if !XASH_VISIONOS
 +CVAR_DEFINE_AUTO( r_vrdump, "0", 0, "dump the next 3D view's colour, depth and matrices to vrdump.bin (visionOS snapshot tuning)" );
++CVAR_DEFINE_AUTO( r_vrprobedump, "0", 0, "dump the glass environment probe (six faces) from the next 3D view's origin to vrprobe.bin (visionOS glass tuning)" );
 +#endif
-+CVAR_DEFINE_AUTO( r_vrglass, "0", 0, "mark glass brush surfaces in the stencil buffer with their view-space normal (visionOS glass pass)" );
++CVAR_DEFINE_AUTO( r_vrglass, "0", 0, "mark glass brush surfaces in the stencil buffer with their plane's row in the glass plane table (visionOS glass pass)" );
  CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
  CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
  CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
-@@ -1151,6 +1155,10 @@ static void GL_InitCommands( void )
+@@ -1151,6 +1156,11 @@ static void GL_InitCommands( void )
  {
  	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
  	gEngfuncs.Cvar_RegisterVariable( &r_novis );
 +#if !XASH_VISIONOS
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrdump );
++	gEngfuncs.Cvar_RegisterVariable( &r_vrprobedump );
 +#endif
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrglass );
  	gEngfuncs.Cvar_RegisterVariable( &r_nocull );
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..328d5ed 100644
+index 0568486..88a6efc 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3629,7 +3639,42 @@ index 0568486..328d5ed 100644
  	RI.farClip = R_GetFarClip();
  
  	zNear = 4.0f;
-@@ -1087,6 +1129,65 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -873,14 +915,14 @@ static void R_DrawEntitiesOnList( void )
+ 
+ 	GL_CheckForErrors();
+ 
+-	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
++	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ) && !r_vrprobe_pass )
+ 	{
+ 		gEngfuncs.CL_DrawEFX( tr.frametime, false );
+ 	}
+ 
+ 	GL_CheckForErrors();
+ 
+-	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
++	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) && !r_vrprobe_pass )
+ 		gEngfuncs.pfnDrawNormalTriangles();
+ 
+ 	GL_CheckForErrors();
+@@ -922,7 +964,7 @@ static void R_DrawEntitiesOnList( void )
+ 
+ 	GL_CheckForErrors();
+ 
+-	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
++	if( FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) && !r_vrprobe_pass )
+ 	{
+ 		pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
+ 		gEngfuncs.pfnDrawTransparentTriangles ();
+@@ -930,7 +972,7 @@ static void R_DrawEntitiesOnList( void )
+ 
+ 	GL_CheckForErrors();
+ 
+-	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
++	if( !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ) && !r_vrprobe_pass )
+ 	{
+ 		R_AllowFog( false );
+ 		gEngfuncs.CL_DrawEFX( tr.frametime, true );
+@@ -1087,6 +1129,125 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3664,7 +3709,8 @@ index 0568486..328d5ed 100644
 +	depth = malloc( (size_t)w * h * sizeof( float ));
 +	pglReadPixels( vp[0], vp[1], w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba );
 +	pglReadPixels( vp[0], vp[1], w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depth );
-+	// version 2 appends the stencil (r_vrglass codes), one byte per pixel
++	// version 2 appends the stencil (r_vrglass codes), one byte per pixel;
++	// version 3 then the glass plane table
 +	stencil = malloc( (size_t)w * h );
 +	pglReadPixels( vp[0], vp[1], w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencil );
 +	Matrix4x4_ToArrayFloatGL( RI.projectionMatrix, proj );
@@ -3674,7 +3720,7 @@ index 0568486..328d5ed 100644
 +	f = fopen( name, "wb" );
 +	if( f )
 +	{
-+		int header[4] = { 0x44525656 /* VVRD */, 2, w, h };
++		int header[4] = { 0x44525656 /* VVRD */, 3, w, h };
 +		fwrite( header, sizeof( header ), 1, f );
 +		fwrite( proj, sizeof( proj ), 1, f );
 +		fwrite( view, sizeof( view ), 1, f );
@@ -3683,6 +3729,9 @@ index 0568486..328d5ed 100644
 +		fwrite( rgba, (size_t)w * h * 4, 1, f );
 +		fwrite( depth, (size_t)w * h * sizeof( float ), 1, f );
 +		fwrite( stencil, (size_t)w * h, 1, f );
++		// version 3 appends the glass plane table the stencil codes index
++		fwrite( &vr_glass_count, sizeof( int ), 1, f );
++		fwrite( vr_glass_planes, sizeof( float ) * 4, vr_glass_count, f );
 +		fclose( f );
 +		gEngfuncs.Con_Printf( "wrote %s (%dx%d)\n", name, w, h );
 +	}
@@ -3692,22 +3741,173 @@ index 0568486..328d5ed 100644
 +}
 +#endif
 +
++#if !XASH_VISIONOS
++/*
++===============
++R_DumpProbeForVR
++
++Desktop-only companion to R_DumpViewForVR for the glass pass: renders the
++glass environment probe (R_VRProbeFace) from the view just drawn and writes
++its six faces — RGBA8 colour, then float window depth, bottom-up rows each —
++to vrprobe<N>.bin with the origin and depth range. Overdraws the 3D view.
++===============
++*/
++static void R_DumpProbeForVR( void )
++{
++	const int size = 256;
++	int n = (int)r_vrprobedump.value, face;
++	float zNear = 4.0f, zFar = R_GetFarClip(), origin[3];
++	byte *rgba = malloc( (size_t)size * size * 4 * 6 );
++	float *depth = malloc( (size_t)size * size * sizeof( float ) * 6 );
++	char name[64];
++	FILE *f;
++
++	gEngfuncs.Cvar_SetValue( "r_vrprobedump", 0 );
++	VectorCopy( RI.rvp.vieworigin, origin );
++	for( face = 0; face < 6; face++ )
++	{
++		pglClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
++		pglClear( GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT );
++		R_VRProbeFace( origin, face, size, zNear, zFar );
++		pglReadPixels( 0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, rgba + (size_t)size * size * 4 * face );
++		pglReadPixels( 0, 0, size, size, GL_DEPTH_COMPONENT, GL_FLOAT, depth + (size_t)size * size * face );
++	}
++
++	Q_snprintf( name, sizeof( name ), "vrprobe%d.bin", n );
++	f = fopen( name, "wb" );
++	if( f )
++	{
++		int header[4] = { 0x50525656 /* VVRP */, 1, size, 6 };
++		float clip[2] = { zNear, zFar };
++		fwrite( header, sizeof( header ), 1, f );
++		fwrite( origin, sizeof( float ), 3, f );
++		fwrite( clip, sizeof( float ), 2, f );
++		fwrite( rgba, (size_t)size * size * 4 * 6, 1, f );
++		fwrite( depth, (size_t)size * size * sizeof( float ) * 6, 1, f );
++		fclose( f );
++		gEngfuncs.Con_Printf( "wrote %s (6 x %d^2)\n", name, size );
++	}
++	free( rgba );
++	free( depth );
++}
++#endif
++
++// The last 3D view's eye (not the probe's): origin, forward, right, up in
++// world space. The platform copies it after each eye with the glass plane
++// table, to place that eye's glass pixels in the world.
++__attribute__((visibility("default"))) float vr_glass_view[12];
++
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1118,6 +1219,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1095,6 +1256,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+ 	// setup the initial render params
+ 	R_SetupRefParams( rvp );
+ 
++	// every eye view refills the glass plane table its stencil codes index
++	if( !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
++		vr_glass_count = 0;
++
+ 	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
+ 		pglFinish();
+ 
+@@ -1118,6 +1283,19 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  
  	tr.realframecount++; // right called after viewmodel events
  	R_RenderScene();
++	if( !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
++	{
++		VectorCopy( RI.rvp.vieworigin, vr_glass_view );
++		VectorCopy( RI.vforward, vr_glass_view + 3 );
++		VectorCopy( RI.vright, vr_glass_view + 6 );
++		VectorCopy( RI.vup, vr_glass_view + 9 );
++	}
 +#if !XASH_VISIONOS
 +	if( r_vrdump.value )
 +		R_DumpViewForVR();
++	if( r_vrprobedump.value && !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ))
++		R_DumpProbeForVR();
 +#endif
  
  	return;
  }
+@@ -1167,6 +1345,74 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+ 	RI.viewleaf = NULL;		// force markleafs next frame
+ }
+ 
++/*
++===============
++R_VRProbeFace
++
++visionOS glass pass: one face of the glass's environment probe, a 90-degree
++view from `origin` into the bound framebuffer's (0, 0, size, size). Faces
++0-5 look along +X, +Y, -X, -Y, +Z, -Z, each upright in the engine's own
++AngleVectors frame (the app's shader samples them by that rule). Like an
++envshot it draws the world and brush entities only (RF_DRAW_CUBEMAP skips
++studio models, sprites and the viewmodel); it also leaves out glass itself,
++particles, beams and the client's triangle callbacks, so the probe holds the
++static room the glass reflects. The projection uses the eyes' depth range
++(zNear, zFar) so the app decodes the probe's depth like the eyes'. Restores
++the platform's stereo projection override afterwards.
++===============
++*/
++qboolean r_vrprobe_pass = false;
++
++__attribute__((visibility("default"))) void R_VRProbeFace( const float *origin, int face, int size, float zNear, float zFar )
++{
++	static const vec3_t probe_angles[6] =
++	{
++	{   0,   0, 0 },
++	{   0,  90, 0 },
++	{   0, 180, 0 },
++	{   0, 270, 0 },
++	{ -90,   0, 0 },
++	{  90,   0, 0 },
++	};
++	const int saved_active = cl_stereo_proj_override_active;
++	float saved_proj[16], saved_tangents[4];
++	ref_viewpass_t rvp;
++
++	if( !WORLDMODEL || face < 0 || face > 5 || size <= 0 || zFar <= zNear )
++		return;
++
++	memcpy( saved_proj, cl_stereo_proj_override, sizeof( saved_proj ));
++	memcpy( saved_tangents, cl_stereo_cull_tangents, sizeof( saved_tangents ));
++
++	// symmetric 90 x 90 degrees, column-major like the platform's override
++	memset( cl_stereo_proj_override, 0, sizeof( cl_stereo_proj_override ));
++	cl_stereo_proj_override[0] = 1.0f;
++	cl_stereo_proj_override[5] = 1.0f;
++	cl_stereo_proj_override[10] = -( zFar + zNear ) / ( zFar - zNear );
++	cl_stereo_proj_override[11] = -1.0f;
++	cl_stereo_proj_override[14] = -( 2.0f * zFar * zNear ) / ( zFar - zNear );
++	cl_stereo_cull_tangents[0] = cl_stereo_cull_tangents[1] = 1.0f;
++	cl_stereo_cull_tangents[2] = cl_stereo_cull_tangents[3] = 1.0f;
++	cl_stereo_proj_override_active = 1;
++
++	memset( &rvp, 0, sizeof( rvp ));
++	rvp.flags = RF_DRAW_WORLD|RF_DRAW_CUBEMAP;
++	rvp.viewport[2] = rvp.viewport[3] = size;
++	rvp.fov_x = rvp.fov_y = 90.0f;
++	VectorCopy( origin, rvp.vieworigin );
++	VectorCopy( probe_angles[face], rvp.viewangles );
++
++	r_vrprobe_pass = true;
++	R_Set2DMode( false );
++	R_RenderFrame( &rvp );
++	r_vrprobe_pass = false;
++	RI.viewleaf = NULL;		// force markleafs for the next eye view
++
++	memcpy( cl_stereo_proj_override, saved_proj, sizeof( saved_proj ));
++	memcpy( cl_stereo_cull_tangents, saved_tangents, sizeof( saved_tangents ));
++	cl_stereo_proj_override_active = saved_active;
++}
++
+ /*
+ ===============
+ CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..411a47d 100644
+index df6f012..32210d8 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -3843,7 +4043,7 @@ index df6f012..411a47d 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
-@@ -1830,6 +1939,62 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1830,6 +1939,98 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -3855,14 +4055,21 @@ index df6f012..411a47d 100644
 +stencil code. Glass is a translucent-texture brush entity (how GoldSrc maps
 +make windows: func_breakable / func_wall, rendermode Texture) or any non-
 +additive brush surface whose texture is named *glass*, so a mod's windows
-+qualify by the same rules and anything else is left alone. The code is the
-+surface's eye-space normal (GL axes, turned toward the viewer), quantised to
-+15 x 15 steps of x and y and offset by 16: the engine's own stencil users
-+(clipped decals, alias shadows) write small counts, never 16 or more. The app
-+reads the stencil aspect of the depth texture it gave the engine and adds a
-+Fresnel reflection there (Shaders.metal glassShade).
++qualify by the same rules and anything else is left alone. The code is 16 +
++the surface's row in this view's glass plane table (vr_glass_planes: the
++world-space plane, normal xyz and distance), so the app gets the exact plane,
++not a quantised normal: GoldSrc glass writes no depth, and the plane is what
++places each glass pixel in the world for both eyes alike. The engine's own
++stencil users (clipped decals, alias shadows) write small counts, never 16 or
++more. The table is refilled by every 3D view (R_RenderFrame); the platform
++copies it after each eye and reads the stencil aspect of the depth texture it
++gave the engine (Shaders.metal glassShade). A view with more glass planes than
++the table holds leaves the rest unmarked.
 +=================
 +*/
++__attribute__((visibility("default"))) int   vr_glass_count = 0;
++__attribute__((visibility("default"))) float vr_glass_planes[VR_GLASS_MAX_PLANES][4];
++
 +static qboolean R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
 +{
 +	if( e->curstate.rendermode == kRenderTransAdd || FBitSet( fa->flags, SURF_DRAWSKY|SURF_DRAWTURB ))
@@ -3874,27 +4081,56 @@ index df6f012..411a47d 100644
 +
 +static int R_VRGlassCode( const msurface_t *fa )
 +{
-+	vec3_t n, v;
-+	int ix, iy;
++	vec3_t n, p, nw, pw;
++	float d;
++	int i;
 +
 +	VectorCopy( fa->plane->normal, n );
++	d = fa->plane->dist;
 +	if( FBitSet( fa->flags, SURF_PLANEBACK ))
++	{
 +		VectorNegate( n, n );
-+	Matrix4x4_VectorRotate( RI.modelviewMatrix, n, v );
-+	VectorNormalize( v );
-+	if( v[2] < 0.0f )
-+		VectorNegate( v, v );
-+	ix = bound( 0, (int)floorf(( v[0] + 1.0f ) * 7.0f + 0.5f ), 14 );
-+	iy = bound( 0, (int)floorf(( v[1] + 1.0f ) * 7.0f + 0.5f ), 14 );
-+	return 16 + ix * 15 + iy;
++		d = -d;
++	}
++
++	// into world space (brush entities are drawn moved)
++	if( !tr.modelviewIdentity )
++	{
++		VectorScale( n, d, p );
++		Matrix4x4_VectorRotate( RI.objectMatrix, n, nw );
++		Matrix4x4_VectorTransform( RI.objectMatrix, p, pw );
++		VectorNormalize( nw );
++		d = DotProduct( nw, pw );
++	}
++	else VectorCopy( n, nw );
++
++	for( i = 0; i < vr_glass_count; i++ )
++	{
++		const float *q = vr_glass_planes[i];
++
++		if( DotProduct( q, nw ) > 0.9999f && fabs( q[3] - d ) < 0.5f )
++			return 16 + i;
++	}
++
++	if( vr_glass_count >= VR_GLASS_MAX_PLANES )
++		return 0;
++
++	VectorCopy( nw, vr_glass_planes[vr_glass_count] );
++	vr_glass_planes[vr_glass_count][3] = d;
++	return 16 + vr_glass_count++;
 +}
 +
-+static void R_VRGlassBegin( const msurface_t *fa )
++static qboolean R_VRGlassBegin( const msurface_t *fa )
 +{
++	int code = R_VRGlassCode( fa );
++
++	if( !code )
++		return false;
 +	pglEnable( GL_STENCIL_TEST );
 +	pglStencilMask( 0xFF );
-+	pglStencilFunc( GL_ALWAYS, R_VRGlassCode( fa ), 0xFF );
++	pglStencilFunc( GL_ALWAYS, code, 0xFF );
 +	pglStencilOp( GL_KEEP, GL_KEEP, GL_REPLACE );
++	return true;
 +}
 +
 +static void R_VRGlassEnd( void )
@@ -3906,29 +4142,31 @@ index df6f012..411a47d 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1959,6 +2124,11 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2160,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
 +	// glass surfaces are drawn one by one, each with its own stencil code
-+	qboolean vr_glass = r_vrglass.value != 0.0f;
++	// (not in the glass's own environment probe, which leaves glass out)
++	qboolean vr_glass = r_vrglass.value != 0.0f && !r_vrprobe_pass;
 +	if( vr_glass && allow_vbo )
 +		allow_vbo = false;
 +
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2142,15 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2179,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
 -		if( !allow_vbo || !R_AddSurfToVBO( gpGlobals->draw_surfaces[i].surf, true ))
 -			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
 +		msurface_t *surf = gpGlobals->draw_surfaces[i].surf;
-+		qboolean glass = vr_glass && R_VRGlassSurface( e, surf );
++		qboolean glass;
 +
-+		if( glass )
-+			R_VRGlassBegin( surf );
++		if( r_vrprobe_pass && R_VRGlassSurface( e, surf ))
++			continue;
++		glass = vr_glass && R_VRGlassSurface( e, surf ) && R_VRGlassBegin( surf );
 +		if( !allow_vbo || !R_AddSurfToVBO( surf, true ))
 +			R_RenderBrushPoly( surf, gpGlobals->draw_surfaces[i].cull );
 +		if( glass )

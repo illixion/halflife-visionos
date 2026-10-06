@@ -504,6 +504,31 @@ void lambda_gl_set_frame_fence(void *mtl_shared_event,
 // 2 = eye 1) that has a result not taken by an earlier call.
 void lambda_gl_set_gpu_timing(int enabled);
 int  lambda_gl_gpu_eye_ms(float out_ms[2]);
+// The glass environment probe face (lambda_gl_worker_set_probe_face), on the
+// frames that render one: [0] its GPU time (with GPU timing on), [1] the GL
+// worker's CPU time for it. Bit 1 / bit 2 = a fresh [0] / [1].
+int  lambda_gl_probe_ms(float out_ms[2]);
+
+// ---- Glass pass (Renderer.glassReflections, r_vrglass) ----
+// Each eye's view and the glass planes its stencil codes name: the engine
+// marks glass with 16 + a row of this table (gl_rsurf.c R_VRGlass). World
+// space, xash units and axes. Filled by each eye's render; read after the
+// second eye of the frame, before the next frame starts.
+#define LAMBDA_GLASS_MAX_PLANES 224   // = VR_GLASS_MAX_PLANES (gl_local.h)
+typedef struct {
+    float origin[3], forward[3], right[3], up[3];
+    int   count;
+    float planes[LAMBDA_GLASS_MAX_PLANES][4];   // normal xyz, distance
+} lambda_glass_eye_t;
+void lambda_glass_get_eye(int eye, lambda_glass_eye_t *out);
+// Stages one face of the glass environment probe for the next second-eye
+// render: drawn after that eye, before its fence, so the frame's composite
+// may read it. color/depth: 2D views (one slice) of a colour texture in the
+// colorMap's format and a depth32Float_stencil8 texture, size x size. face
+// 0-5 = +X +Y -X -Y +Z -Z in xash axes (gl_rmain.c R_VRProbeFace); origin in
+// xash units. Uses the eyes' zNear/zFar. One render per staging.
+void lambda_gl_worker_set_probe_face(void *mtl_color_view, void *mtl_depth_view,
+                                     int size, int face, const float *origin3);
 
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
