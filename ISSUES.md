@@ -194,6 +194,12 @@ instead of deleting them.
   surfaces per exact mirrored ray (2 × 2 per texel). DepthProbe gains a
   sub-pixel stability check that fails both old builds. Expected mirror cost
   ~1.4–1.8 ms; see `docs/plans/modern-lighting.md` (3h).
+- **Sharp water, round 6: noise fixed offline, device check pending.**
+  Hatching and smudges came from part-empty mirror texels and an
+  un-band-limited ripple whose mirror nudge folded over; now full coverage,
+  per-wave band limit and fold cap, clamped nudge. DepthProbe adds a moving-
+  ripple stability case and a hatching measure that fails d7868d3. See
+  `docs/plans/modern-lighting.md` (3i).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

@@ -654,6 +654,49 @@ where surfaces meet: roughly 2× the 963b205 resolve, so gMirror ≈ 1.0–1.4 m
 p50 and the mirror ≈ 1.4–1.8 ms in total. Divisor stays 4: at 3 the
 stability is no better (p99 10/11) and the cost is 1.8× more texels.
 
+### 3i. Sharp water, round 6: noise on the water
+
+**Device (d7868d3, looking down at the flood by the c1a2 bench):** "a weird
+noise pattern" — fine horizontal hatching near the bench leg and in the
+near field, and blotchy dark smudges (`build/screenshots/cropA.png`,
+`cropB.png` in the main checkout).
+
+**Causes found:**
+
+- The resolve skipped a sub-ray when no candidate surface checked out (its
+  point landed on the water itself, or off the frame), so texels at the
+  edge of what the mirror holds came out part-empty, with uneven coverage
+  from texel to texel: rows of lower confidence blending to the probe read
+  as hatching, and where the skipped ray's point was the water, dark
+  smudges. Such a sub-ray now takes the first candidate's own source; a
+  texel with any key is fully covered.
+- The ripple was not band-limited, and its nudge into the mirror could fold
+  over: at the default slope a 30-pixel wave moved the lookup by up to ~14
+  pixels, an offset gradient near 3. Each wave's period on screen is now
+  computed per pixel (in engine pixels, foreshortened along the view by the
+  grazing angle); waves under 5 pixels fade out by 2.5, and each wave's tilt
+  is capped so the offset gradient stays under 1 (tilt ≤ 0.08 · period ·
+  pixel angle). The nudge into the mirror is clamped to 1.5 mirror texels.
+  The near field, where the waves are tens of pixels long, keeps its
+  vertical streaks.
+
+**New DepthProbe checks:** the sub-pixel stability check also runs a frame
+(1/90 s) and 0.1 s later with the ripples moving; and a hatching measure —
+the mean vertical second difference of the composite on water away from
+the mask edge — at "Water ripples" 0×, 1× and 3×. d7868d3 at the device-like
+view (vent wall): 1.77 / 2.10 / 3.18 (fails: limits +0.2 at 1×, +0.6 at
+3×). Now: 1.77 / 1.88 / 1.95; the looking-down views 1.13 / 1.16 / 1.21 and
+1.03 / 1.04 / 1.05. Stability unchanged (p99 9–12 at the vent view, 2–6
+elsewhere, the same with the ripples moving).
+
+The device composite runs at the drawable's resolution (about 2.3× the
+engine image per axis at the centre), which the Mac check does not
+reproduce; the band limit uses the engine's pixel, the coarser one, so it
+is conservative there.
+
+**Cost:** unchanged in shape (a few more ALU per water pixel for the band
+limit; the resolve's fallback adds nothing): mirror ≈ 1.4–1.8 ms as in 3h.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new
