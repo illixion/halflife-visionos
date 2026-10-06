@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Recreates the gitignored vendored dependencies:
-#   - xash3d-fwgs (FWGS upstream + visionOS patch)
+#   - xash3d-fwgs (FWGS upstream + visionOS patch, plus the build.h patch for
+#     two of its submodules)
 #   - hlsdk-portable (Half-Life game logic source)
 #   - MoltenVK.xcframework (Vulkan-on-Metal, with prebuilt visionOS slice)
 #
@@ -9,8 +10,8 @@
 # silently stop applying (or worse, apply cleanly against different
 # surrounding code) the moment upstream moves — `git clone` of a floating
 # default branch is not reproducible across time. Bump these only alongside
-# re-verifying (and if needed regenerating) xash3d-visionos.patch and
-# hlsdk-vr/hooks.patch.
+# re-verifying (and if needed regenerating) xash3d-visionos.patch,
+# xash3d-visionos-build-h.patch and hlsdk-vr/hooks.patch.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -27,6 +28,17 @@ if [[ ! -d xash3d-fwgs ]]; then
         && git submodule update --init --recursive --depth 1 \
         && git apply ../xash3d-visionos.patch)
 fi
+# build.h (the platform detection) lives in two submodules, one copy for the
+# engine and one in mainui's SDK, so the superproject patch above can't carry
+# it: without XASH_VISIONOS every client file stops at "Please select video
+# backend". Applied to both copies, and to an older checkout that lacks it.
+BUILD_H_PATCH="$PWD/xash3d-visionos-build-h.patch"
+for sub in 3rdparty/library_suffix:include 3rdparty/mainui:sdk_includes/public; do
+    repo="xash3d-fwgs/${sub%%:*}" dir="${sub#*:}"
+    if ! git -C "$repo" apply --reverse --check -p2 --directory="$dir" "$BUILD_H_PATCH" 2>/dev/null; then
+        git -C "$repo" apply -p2 --directory="$dir" "$BUILD_H_PATCH"
+    fi
+done
 
 # 2. Half-Life SDK (+ the VR layer: hlsdk-vr/ sources and hook calls)
 if [[ ! -d hlsdk-portable ]]; then

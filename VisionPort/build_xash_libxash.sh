@@ -26,16 +26,36 @@ cd "$HERE/xash3d-fwgs"
 git submodule update --init --recursive
 rm -rf build
 python3 ./waf configure $WAF_PLATFORM --disable-gl --disable-soft --enable-gles3compat
-# Final `xash` exec link is expected to fail (filesystem is normally a
-# runtime-loaded dylib). We harvest .o files; ignore the link failure.
-python3 ./waf build || true
+# The final `xash` exec link is expected to fail (filesystem is normally a
+# runtime-loaded dylib); we only harvest the .o files. Tolerate exactly that
+# failure: -k keeps every other task going, and any compiler error, or a
+# failed task other than the xash link, still fails the build.
+WAF_LOG="$PWD/build/waf-build.log"
+mkdir -p build
+if ! python3 ./waf build -k 2>&1 | tee "$WAF_LOG"; then
+  if grep -E ': (fatal )?error:' "$WAF_LOG" | grep -vqE '^clang(\+\+)?: error: linker command failed'; then
+    echo "ERROR: xash3d-fwgs failed to compile (see the errors above)." >&2
+    exit 1
+  fi
+  if grep -E "^ -> task in '[^']*' failed" "$WAF_LOG" | grep -vq "^ -> task in 'xash' failed"; then
+    echo "ERROR: a xash3d-fwgs task other than the final xash link failed (see above)." >&2
+    exit 1
+  fi
+  if ! grep -q 'linker command failed' "$WAF_LOG"; then
+    echo "ERROR: waf build failed, and not with the expected xash link failure." >&2
+    exit 1
+  fi
+  echo "note: ignoring the expected link failure of the standalone xash executable."
+fi
 
 SDK="$(xcrun --show-sdk-path --sdk $SDK_NAME)"
 # Engine objects, raw — but excluding launcher.c (defines _main, conflicts
 # with our SwiftUI app's main) and build/filesystem/ (those go through a
 # pre-link step below to hide symbols that collide with engine globals when
 # whole-archive linked via -force_load).
-mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
+# (while-read loops rather than mapfile: macOS and CI runners run bash 3.2.)
+XASH_OBJS=()
+while IFS= read -r f; do XASH_OBJS+=("$f"); done < <(find "$PWD/build" -type f -name '*.o' \
   ! -path "*build/filesystem/*" \
   ! -name 'launcher.c.*.o' \
   ! -path "*build/game_launch/*" \
@@ -48,7 +68,8 @@ mapfile -t XASH_OBJS < <(find "$PWD/build" -type f -name '*.o' \
 # unit. Keeping them together lets ld -r resolve their cross-references
 # internally before we redefine-sym the names that collide with engine-
 # side cvar_t structs.
-GL_RAW_OBJS=( $(find "$PWD/build/ref/gl" "$PWD/build/ref/common" -type f -name '*.o' | sort) )
+GL_RAW_OBJS=()
+while IFS= read -r f; do GL_RAW_OBJS+=("$f"); done < <(find "$PWD/build/ref/gl" "$PWD/build/ref/common" -type f -name '*.o' | sort)
 GL_UNEXPORTS="$PWD/build/ref/gl/unexports.list"
 cat > "$GL_UNEXPORTS" <<'EOF'
 _R_Init
@@ -107,7 +128,8 @@ XASH_OBJS+=("$GL_OBJ")
 # hidden. Engine reaches FS via GetFSAPI/CreateInterface (extern in
 # filesystem_engine.c under XASH_VISIONOS), so direct FS_* callers aren't
 # needed visible.
-FS_RAW_OBJS=( $(find "$PWD/build/filesystem" -type f -name '*.o' | sort) )
+FS_RAW_OBJS=()
+while IFS= read -r f; do FS_RAW_OBJS+=("$f"); done < <(find "$PWD/build/filesystem" -type f -name '*.o' | sort)
 FS_UNEXPORTS="$PWD/build/filesystem/unexports.list"
 cat > "$FS_UNEXPORTS" <<'EOF'
 _FS_LoadFile

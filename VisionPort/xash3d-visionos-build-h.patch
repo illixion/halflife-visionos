@@ -1,0 +1,23 @@
+diff --git a/include/build.h b/include/build.h
+index 8b6a732..2c617a2 100644
+--- a/include/build.h
++++ b/include/build.h
+@@ -131,6 +131,9 @@ Then you can use another oneliner to query all variables:
+ 		#if TARGET_OS_IOS
+ 			#define XASH_IOS 1
+ 		#endif // TARGET_OS_IOS
++		#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
++			#define XASH_VISIONOS 1
++		#endif // TARGET_OS_VISION
+ 	#elif defined __SWITCH__
+ 		#define XASH_NSWITCH 1
+ 	#elif defined __vita__
+@@ -153,7 +156,7 @@ Then you can use another oneliner to query all variables:
+ // but we still need XASH_MOBILE_PLATFORM for the engine.
+ // So this macro is defined entirely in build-system: see main wscript
+ // HLSDK/PrimeXT/other SDKs users note: you may ignore this macro
+-#if ( XASH_ANDROID && !XASH_TERMUX ) || XASH_IOS || XASH_NSWITCH || XASH_PSVITA || XASH_SAILFISH
++#if ( XASH_ANDROID && !XASH_TERMUX ) || XASH_IOS || XASH_VISIONOS || XASH_NSWITCH || XASH_PSVITA || XASH_SAILFISH
+ 	#define XASH_MOBILE_PLATFORM 1
+ #endif
+ 
