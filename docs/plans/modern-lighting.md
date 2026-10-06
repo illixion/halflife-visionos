@@ -416,6 +416,85 @@ probe where it is empty.
 - Limits: horizontal planes only (one or a few per view); vertical glass
   stays probe-lit; reflections of things the eye cannot see stay soft.
 
+### 3d. Calm ripples and sharp water (built, device check pending)
+
+**Headset verdict on cebb5c0:** "nice reflections, but the movement is just
+too active — thick and moving on its own, like an oil spill." Reference: the
+visionOS lake environment — a near-mirror, crisp near the shore, fine slow
+horizontal streaks that stretch reflections vertically, calmer toward the
+horizon, no blobs.
+
+**Ripple retune** (`Shaders.metal` `waterRipple`): six waves in different
+directions, wavelengths 2.4–6.6 units (were 11–39), 0.4–1.1 rad/s, slope
+0.008 at 1× (`Renderer.waterRippleSlope`, was 0.12); the tilt is applied in
+full along the view direction on the surface and a quarter across it, so
+reflections break up into vertical streaks; it fades as 1/(1 + d/120) with
+distance and with grazing angle. GoldSrc's warp texture keeps its own
+motion; the ripple adds little on top. Much of the "thick" look was the
+lookup being bent by the old 0.12 slope through the probe walk. Settings →
+Graphics "Water ripples" (0–3×, 0 = still mirror; debug API `waterRipples`).
+
+**Sharp water reflections** (Settings "Sharp water reflections", on by
+default under Water reflections; `Renderer.sharpWaterReflections`,
+`SharpWater.swift`, `Shaders.metal` `ssprScatter`): the screen-space planar
+reflection proposed in 3c.
+
+- Each eye's plane: the highest horizontal water row (normal z > 0.99)
+  below the eye in its plane table (`SharpWater.planes`).
+- Scatter: one point per texel of a half-resolution target per eye
+  (`Renderer.sharpWaterDivisor` 2), vertex amplification for both eyes in
+  one draw: engine depth → world point W; W below the plane, the flat
+  viewmodel, or anything mirrored behind the eye is dropped; W mirrored in
+  the plane and projected back into the same eye; the depth test keeps the
+  nearest mirrored point. Colour premultiplied by a confidence that falls
+  off over the outer 15% of the frame (where the next head turn cuts the
+  source off).
+- Composite: at that plane's water pixels, read the target at the pixel,
+  nudged by the ripple's tilt (2δ, vertical along the view), look a texel
+  above and below to fill scatter gaps, and blend to the probe by the
+  confidence. Occluder, underwater and mask rules unchanged.
+- Each eye mirrors its own image, so the parallax is exactly a mirror's.
+
+**Verified offline** (c1a2 flood, capture view; same eye 25° turned; an eye
+apart; `Tools/DepthProbe` runs the scatter):
+
+| Check | result |
+|---|---|
+| pixels changed outside glass/water | 0 |
+| water pixels changed with the eye below the surface | 0 of 609 k |
+| marked pixels under a fake occluder that got shaded | 0 of 122 k |
+| final image at the same glass/water points, two gazes | 1.7 / 255 |
+| a point mirrored, both eyes' mirrors (sampling baseline of the same point unmirrored) | 7.5 / 255 (6.6) |
+| the same, two gazes (baseline) | 7.2 / 255 (1.7) |
+| c1a0 glass: gaze / mirror-image stereo (probe path) | 0.4 / 0.3 / 255 |
+
+The mirror differs more between gazes than its baseline because it holds
+only what is on screen: when an occluder enters or leaves the frame the
+mirror behind it changes. In the final image that is 1.7/255.
+
+**Cost estimate** (not measurable on the Mac): about 1 M points per eye at
+half resolution (an engine image of ~2200 × 1750), each one depth read, one
+colour sample and a 2×2-pixel point with a depth test: roughly 0.5–1 ms GPU
+for both eyes, only on frames where an eye has horizontal water below it in
+view; the composite adds one to three samples per sharp-water pixel. If it
+is too dear, `sharpWaterDivisor` 4 quarters it (~0.15–0.3 ms) at a softer
+mirror. Read `gComposite` / `gpuQueue` with the toggle on and off.
+
+**To check on the headset:** the c1a2 capture view, Water reflections and
+Sharp water on, Water ripples 1×: the fridge, bench and fallen panel should
+mirror crisply in the flood, broken only into fine vertical streaks; turn the
+head: the mirror should not jump, and near the frame edge it should soften
+into the probe rather than cut off. Try ripples 0× and 3×, sharp on and off.
+
+### Presets (planned)
+
+Graphics will collapse to two presets: **Modern** freely combines the new
+techniques (reflections, sharp water, reprojection depth, linear colour and
+later tiers), **Original** is the stock Half-Life look. Rule for every
+feature until then and after: it stays its own setting with a clearly named
+knob (toggle or slider, also on the debug API), so under either preset each
+effect can still be changed individually, PC-style.
+
 ### Decisions on the open questions
 
 - **Target chips:** tiers 1–4 must hold 120 FPS on the first-generation

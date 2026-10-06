@@ -168,6 +168,13 @@ instead of deleting them.
   30 s) after measuring 2.2 ms GPU per face. A screen-space planar
   reflection for large flat water is proposed, not built; see
   `docs/plans/modern-lighting.md` (3c).
+- **Calm ripples and sharp water reflections: built, device check pending.**
+  The ripple read as "an oil spill": now fine, slow, low (slope 0.008,
+  "Water ripples" 0–3×). "Sharp water reflections" mirrors each eye's own
+  image in horizontal water (half-resolution scatter), the probe filling in
+  what is off screen. Mac checks and cost in `docs/plans/modern-lighting.md` (3d).
+- **Graphics presets (planned):** Modern / Original, every effect still its
+  own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored
