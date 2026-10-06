@@ -149,6 +149,16 @@ instead of deleting them.
   rebuild needed; read `gProbe` / `probeCPU` in the `[FT] gpu(ms)` line, and
   see `docs/plans/modern-lighting.md` for the spots to check. Studio models
   (scientists, items) do not appear in reflections.
+- **Reflection strength and water reflections: built, device check
+  pending.** Headset verdict on the probe: right, but too faint. Settings →
+  Graphics "Reflection strength" (0.5–4×, live, default 3×; a head-on floor
+  and a cap so panes stay see-through) and "Water reflections (prototype)"
+  (default off; engine `r_vrwater`): warp surfaces and `func_water` join the
+  glass plane table as water rows, rippled (world-space sines, both eyes
+  agree), no reflection from below the surface. Verified on the Mac at the
+  c1a2 flood (`Tools/DepthProbe`: gaze 1.3/255, mirror-image stereo
+  1.3/255, nothing outside the mask, nothing underwater). Spots and cost in
+  `docs/plans/modern-lighting.md` (3b).
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored

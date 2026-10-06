@@ -267,6 +267,85 @@ rebuilt; capture both eyes with the debug server's frame capture):
 models (scientists, items) do not reflect, and sprites drawn after the glass
 still inherit its mark; worldspawn glass is not marked.
 
+### 3b. Strength, and water (default off)
+
+**Headset verdict on the glass probe (2026-10-06):** stereo and gaze fixed,
+"looks good, but so faint and hard to notice" — at the c1a2 sink the
+reflection was a faint lighter patch on the top and a barely visible floor
+on the front. Physical glass (F0 0.04, nothing added head-on) disappears in
+this art.
+
+**Strength.** Settings → Graphics "Reflection strength", 0.5–4×, live,
+default **3×** (`Renderer.reflectionStrength`, shared by glass and water).
+The reflectance is (Schlick + a head-on floor) × strength, capped:
+
+| | F0 | added head-on | cap | head-on at 3× | grazing |
+|---|---|---|---|---|---|
+| glass | 0.04 | 0.06 | 0.70 | 0.30 | 0.70 |
+| water | 0.02 | 0.04 | 0.60 | 0.11 (× 0.6 share) | 0.60 |
+
+The cap is what keeps a pane from ever turning opaque at the highest setting.
+Water takes 0.6 of the strength: seen at grazing angles at 3× it washed its
+own blue out to grey on the Mac dumps.
+
+**Water** (Settings → Graphics "Water reflections (prototype)", default off;
+`Renderer.waterReflections` + the engine's `r_vrwater`):
+
+- **Marking:** every warp surface (`SURF_DRAWTURB`, the `!` textures) is
+  marked as it is drawn — world water in `R_RenderBrushPoly` and the
+  translucent-water pass `R_DrawWaterSurfaces`, brush entities (`func_water`,
+  the c1a2 flood) in the brush-model loop — into the same plane table and
+  codes as glass, with `vr_glass_kind` 1 for its row (bridge
+  `lambda_glass_eye_t.kind`, packed as bits in `DisplayParams.glassKinds`).
+  Additive water and the probe pass are left out.
+- **Underwater:** water planes are stored facing up out of the water; a
+  pixel whose eye is on the far side of its plane gets no reflection (the
+  view from below the surface, or a vertical water face seen from inside).
+- **Ripples:** four travelling sine waves of the world point (wavelengths
+  11–39 units, speeds 1.7–4.3 rad/s) tilt the normal by slope 0.08
+  (`Renderer.waterRippleSlope`), fading with distance so far water does not
+  alias. World-space and a function of the point and time only, so both eyes
+  see the same ripple; a ripple never sends the ray below the surface.
+- **Probe above a water floor:** the probe sits at head height, above the
+  water; every reflected ray leaves the surface upward, so its hit H lies
+  above the plane and the line from the probe to H never crosses the water —
+  the probe's view of the water itself is never sampled. The parallax walk
+  handles the probe being far from a given water point. Water rows count as
+  "in sight", so a flooded room keeps the probe fresh.
+
+**Verified offline** (c1a2 flooded office lab, the device-capture view and
+the same eye 25° turned and 2.5 units right; `Tools/DepthProbe`):
+
+| Check | result |
+|---|---|
+| probe faces vs the engine view | 5.3 / 255 |
+| water and glass pixels changed / outside the mask | 688 k / 0 |
+| water pixels changed with the eye moved below the surface | 0 of 609 k |
+| same surface point, two gaze directions | 1.3 / 255 |
+| same surface point, two eyes (true parallax, larger on water near the feet) | 13.8 / 255 |
+| each eye at the mirror image of the same reflected point | 1.3 / 255 |
+
+The last row is the stereo check that matters for a mirror: it walks each
+reflected ray to the point it shows, mirrors that in the plane and looks
+where the image falls in the other eye.
+
+**Cost.** Probe capture unchanged (one 256² world-only face per frame while
+glass or water is in sight and the probe is stale; `gProbe` / `probeCPU`).
+Composite: every pixel one stencil read; each glass or water pixel adds three
+depth reads, one colour sample and the ripple's four sines (twice during a
+0.3 s probe fade). The flooded floor covers about 30% of that view, so the
+composite does roughly 1.3 extra texture fetches per pixel on average there;
+expect a few tenths of a millisecond on `gComposite` at worst, nothing where
+no glass or water is visible. Read `gComposite` with the toggles on and off
+in that room to confirm.
+
+**To check on the headset:** the c1a2 view from the device capture (x 1110,
+y −330, yaw ≈ 33°, looking down ≈ 17°) with both toggles on: the flood in
+front should show the shimmering, mirrored poster, fridge and ceiling, in
+both eyes at a depth behind the water; the sink box's top clearly reflective.
+Try strength 1×, 3× and 4×; duck the head toward the water and the
+reflection should stay above it, never flip.
+
 ### Decisions on the open questions
 
 - **Target chips:** tiers 1–4 must hold 120 FPS on the first-generation
