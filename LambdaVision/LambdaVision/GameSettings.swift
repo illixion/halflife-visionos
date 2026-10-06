@@ -300,6 +300,13 @@ final class GameSettings {
                  cvar("developer", developerMode ? 2 : 0) }
     }
 
+    /// Settings › Advanced › Debug server (LambdaDebugServer in
+    /// DebugEndpoints): starts or stops the debug API at once.
+    var debugServer: DebugServerMode = AppSettingsStore.debugServer {
+        didSet { AppSettingsStore.debugServer = debugServer
+                 LambdaDebugServer.apply(debugServer) }
+    }
+
     /// Hold the weapon's viewmodel or its world model (WeaponPass).
     var weaponModel: WeaponModelStyle = AppSettingsStore.weaponModel {
         didSet { AppSettingsStore.weaponModel = weaponModel

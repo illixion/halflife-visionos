@@ -10,7 +10,6 @@ import RAVEHolo
 import ARKit
 import AVFAudio
 import CompositorServices
-import DebugTraceServer
 import GameController
 import SwiftUI
 import DebugTrace
@@ -267,7 +266,9 @@ struct LambdaVisionApp: App {
 
     init() {
         AppLog.configureDebugTrace()
-        DebugTraceServer.startIfRequested()
+        // DebugTrace's start rule plus Settings › Advanced › Debug server,
+        // on ports clear of the Wi-Fi manager's (DebugEndpoints).
+        LambdaDebugServer.apply(AppSettingsStore.debugServer)
     }
 
     var body: some Scene {

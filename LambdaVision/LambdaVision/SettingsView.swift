@@ -212,6 +212,14 @@ struct SettingsView: View {
 
                     Toggle("Developer mode", isOn: $settings.developerMode)
 
+                    // The debug API for a Mac (DebugEndpoints). Development
+                    // builds only; App Store builds never serve it.
+                    if LambdaDebugServer.available {
+                        Picker("Debug server", selection: $settings.debugServer) {
+                            ForEach(DebugServerMode.allCases) { Text($0.label).tag($0) }
+                        }
+                    }
+
                     HStack {
                         TextField("Console command", text: $consoleText)
                             .textInputAutocapitalization(.never)
@@ -227,7 +235,10 @@ struct SettingsView: View {
                     Text((settings.isEngineReady
                           ? "The menu buttons open the stock Half-Life menu inside the immersive space — use it for Configuration, Multiplayer, and other tabs not surfaced here."
                           : "Start the game (Show Immersive Space) to enable the menu and console.")
-                         + " “Developer mode” shows a debug panel over your off-hand palm when you turn it to face you: frame time and a few render toggles to look at and pinch with your other hand. It stays away while that hand is driving the movement joystick. It also turns on the engine’s verbose developer messages in the log; with it off they stay quiet.")
+                         + " “Developer mode” shows a debug panel over your off-hand palm when you turn it to face you: frame time and a few render toggles to look at and pinch with your other hand. It stays away while that hand is driving the movement joystick. It also turns on the engine’s verbose developer messages in the log; with it off they stay quiet."
+                         + (LambdaDebugServer.available
+                            ? " “Debug server” serves screenshots, game state and console commands to a Mac on your network (scripts/avp-screenshot.sh, the apps MCP). Automatic serves in builds signed by build-and-sign; On also serves an Xcode run; Off serves only when a launch asks for it explicitly."
+                            : ""))
                 }
             }
             .navigationTitle("Settings")
