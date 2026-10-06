@@ -23,7 +23,7 @@
 //  cannot cover, like the barrel swinging across. Drawing on top alone would
 //  put a panel that is behind the arm in front of it — a depth conflict the
 //  eyes cannot fuse. Built on the render thread from the client's published HUD state
-//  (cl_dll/hud_redraw.cpp g_vr_hud_state) and the live hand skeleton.
+//  (VisionPort/hlsdk-vr/cl_dll/vr/vr_hud.cpp g_vr_hud_state) and the live hand skeleton.
 //
 
 import CoreFoundation

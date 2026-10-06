@@ -148,6 +148,13 @@ if (( ${#missing_xash[@]} )); then
         if (( ${#games[@]} )); then
             fetch_release "$xash_key" "$XASH_DIR/games" "${games[@]}"
         fi
+        # The release's libxash.a holds Half-Life only; fold the ports into
+        # the archives the app force-loads and regenerate the compiled-games
+        # table (pack_libxash.sh is a no-op for a missing archive).
+        if compgen -G "$XASH_DIR/games/libgame-*.a" > /dev/null; then
+            ./VisionPort/pack_libxash.sh || say "packing game ports into libxash.a failed"
+            XR_SIM=1 ./VisionPort/pack_libxash.sh || say "packing game ports into libxash-sim.a failed"
+        fi
     fi
 fi
 exit 0

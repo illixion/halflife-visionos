@@ -157,6 +157,13 @@ jobs:
           GAME_URL: ${{ matrix.url }}
           GAME_BRANCH: ${{ matrix.branch }}
         run: ./VisionPort/build_game.sh "$GAME_URL" "$GAME_BRANCH"
+      - name: Build ${{ matrix.title }} (simulator)
+        if: steps.guard.outputs.run == 'true'
+        env:
+          GAME_URL: ${{ matrix.url }}
+          GAME_BRANCH: ${{ matrix.branch }}
+          XR_SIM: '1'
+        run: ./VisionPort/build_game.sh "$GAME_URL" "$GAME_BRANCH"
       - if: steps.guard.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
