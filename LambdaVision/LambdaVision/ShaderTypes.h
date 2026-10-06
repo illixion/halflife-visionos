@@ -194,8 +194,11 @@ typedef struct
     simd_uint4 glassKinds[2][2];
     // Per eye, sharp water (Shaders.metal ssprScatter): x = the plane row it
     // mirrors in, y = that plane's height (xash z), z = 1 on / 0 off, w = the
-    // target's size divisor against the engine image (0 = 2, half size).
+    // target's size divisor against the engine image (0 = 3).
     simd_float4 sspr[2];
+    // x = Settings → Diagnostics "Water mirror view": 0 off, 1 the mirror on
+    // water, 2 its confidence, 3 the mirror target over the whole view.
+    simd_float4 waterDebug;
 } DisplayParams;
 
 #ifdef __METAL_VERSION__

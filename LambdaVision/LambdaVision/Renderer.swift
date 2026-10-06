@@ -71,7 +71,7 @@ extension LayerRenderer.Clock.Instant {
 enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
     /// The GPU-execution columns (GPUPassTimer), logged on their own line.
-    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
+    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gMirror", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
                            "gProbe", "probeCPU"]   // glass probe face (GlassProbe), on frames that draw one
 
     static let shared: RAVEFrameProfiler = {
@@ -336,10 +336,14 @@ actor Renderer {
     nonisolated(unsafe) static var waterRipples: Float = 1.0
     /// Sharp water (SharpWater, screen-space planar reflection) under
     /// waterReflections; off leaves the probe-only look. Live.
-    nonisolated(unsafe) static var sharpWaterReflections: Bool = true
-    /// The sharp-water target's size divisor against the engine image: 2 =
-    /// half size, one point per four engine pixels; 4 quarters the cost.
-    static let sharpWaterDivisor = 2
+    nonisolated(unsafe) static var sharpWaterReflections: Bool = false
+    /// The sharp-water target's size divisor against the engine image: 3 =
+    /// a third of each side (one texel per nine engine pixels); 4 is cheaper
+    /// and softer, 2 sharper and dearer.
+    static let sharpWaterDivisor = 3
+    /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
+    /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
+    nonisolated(unsafe) static var waterMirrorView: Int = 0
     /// Water's share of the strength: seen at grazing angles it reflects far
     /// more than a pane and washed its own colour out at the glass setting.
     static let waterStrengthScale: Float = 0.6
@@ -2999,6 +3003,7 @@ actor Renderer {
                         sharpWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineDepth: engineDepth,
                                           paramsAddress: displayParamsBuffer.gpuAddress
                                               + UInt64(Self.displayParamsStride * uniformBufferIndex))
+                        if timed { gpuTimer.mark(.mirror, commandBuffer) }
                     }
                 } else {
                     ssprPlanes = (.zero, .zero)
@@ -3112,6 +3117,7 @@ actor Renderer {
                 params.probeMix = probe.mix
                 Self.setGlassEyes(&params, glassEyes)
                 params.sspr = ssprPlanes
+                params.waterDebug = SIMD4(Float(Renderer.waterMirrorView), 0, 0, 0)
                 if let color = sharpWater?.color, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                     self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
                 }

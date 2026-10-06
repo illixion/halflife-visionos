@@ -13,7 +13,7 @@
 //    column is NOT this: it is the CPU wall time from eye submission to the
 //    frame-end event firing, so it adds ANGLE's work, queueing and listener
 //    latency (Oneiros found the same trap in its own `[FT]` numbers).
-//  - Per pass inside that command buffer (composite, arms, weapon + body,
+//  - Per pass inside that command buffer (sharp-water mirror, composite, arms, weapon + body,
 //    HUD holograms, reprojection depth): Metal 4 counter-heap timestamps at
 //    pass boundaries, while Settings → Diagnostics → "GPU pass timing" is on.
 //    The HUD split sits inside the weapon encoder and needs a precise
@@ -36,12 +36,13 @@ final class GPUPassTimer {
     /// mark after `start` closes the pass named by its key; a pass that
     /// did not run this frame writes no mark and records nothing.
     enum Mark: Int, CaseIterable {
-        case start = 0, composite, arms, weapon, hud, depth
+        case start = 0, mirror, composite, arms, weapon, hud, depth
 
         /// FrameTimingStats column for the pass this mark closes.
         var key: String? {
             switch self {
             case .start:     return nil
+            case .mirror:    return "gMirror"     // sharp water (SharpWater), before the composite
             case .composite: return "gComposite"
             case .arms:      return "gArms"
             case .weapon:    return "gWeapon"

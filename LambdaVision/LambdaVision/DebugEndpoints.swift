@@ -543,6 +543,7 @@ enum DebugEndpoints {
         .flag("sharpWaterReflections", \.sharpWaterReflections),
         .number("waterRipples", \.waterRipples, 0...3),
         .number("reflectionStrength", \.reflectionStrength, 0.5...4),
+        .choice("waterMirrorView", \.waterMirrorView, note: "not stored; needs waterReflections + sharpWaterReflections"),
         .choice("hdrTest", \.hdrTest, note: "not stored"),
         .flag("gpuPassTiming", \.gpuPassTiming, note: "not stored; fills the gpu columns of GET /perf"),
         .number("gamma", \.gamma, 1.8...3.6),

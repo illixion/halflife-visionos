@@ -340,6 +340,12 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
                                 texture2d_array<half> sharpWater,
                                 sampler s, constant DisplayParams &p)
 {
+    // Settings → Diagnostics "Water mirror view" 3: the sharp-water target
+    // over the whole view (magenta = empty), to see what the mirror holds
+    if (p.waterDebug.x > 2.5) {
+        const half4 c = sharpWater.sample(s, uv, eye);
+        return c.a > 0.004h ? float3(c.rgb) / float(c.a) : float3(0.3, 0.0, 0.3);
+    }
     const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
     const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
     if (code < 16 || code > 239)
@@ -420,6 +426,10 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float3 cur = probeLookup(probeColor, probeDepth, s, P, r, p.probe[1], clip, steps);
         env = mix(older, cur, w);
     }
+    // "Water mirror view" 1: the mirror where the water is (magenta = the
+    // probe fills in); 2: its confidence
+    if (water && p.waterDebug.x > 0.5)
+        return p.waterDebug.x < 1.5 ? (sharpWeight > 0.0 ? sharp : float3(1, 0, 1)) : float3(sharpWeight);
     env = mix(env, sharp, sharpWeight);
     const float amount = min(F * k.x, k.z);
     if (water) {
@@ -438,84 +448,96 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // ---- Sharp water: screen-space planar reflection (Renderer.sharpWaterReflections)
 // For horizontal water (one plane per eye, DisplayParams.sspr: the highest
 // water row below the eye), each eye's own engine image mirrored in that
-// plane, drawn as points: one per half-resolution texel, from the engine
-// depth to its world point W, mirrored to W' = (W.x, W.y, 2h − W.z) and
-// projected back into the same eye. The depth test keeps the nearest mirrored
-// point, as the mirror would show it. Each eye mirrors its own image, so the
-// per-eye parallax is exactly a mirror's. Colour is premultiplied by a
+// plane, in two compute passes at a fraction of the engine's resolution
+// (sspr.w, default 1/3) — a projection-hash SSPR in the manner of Remedy's
+// and Far Cry 5's. The first point-splat version measured 5.4 ms on the
+// headset; this does two light dispatches instead.
+//
+// ssprProject: every target texel stands for a source point: engine depth →
+// world point W; W below the plane (the water, what is under it), the flat
+// viewmodel or anything mirrored behind the eye is dropped; W is mirrored to
+// W' = (W.x, W.y, 2h − W.z) and projected back into the same eye, and the
+// texel it lands on keeps, by atomic min, the key of the nearest such point:
+// its mirrored distance (12 bits, log scale) over its source texel (10 + 10).
+// ssprResolve: each target texel decodes its key (or, if empty, the nearest
+// of its four neighbours', filling the gaps a forward projection leaves),
+// samples the engine image at the source and writes it premultiplied by a
 // confidence that falls off as the source nears the frame's edge, where the
-// next head turn would cut it off, so the composite blends to the probe over
-// a wide band instead of popping. Points below the plane (the water, what is
-// under it), the flat viewmodel and anything mirrored behind the eye are
-// dropped. Cost: one point per half-resolution texel per eye.
-struct SSPRPoint
+// next head turn cuts it off, so the composite blends to the probe there.
+// Each eye mirrors its own image: the parallax is exactly a mirror's.
+static inline uint3 ssprSize(texture2d_array<half> colorMap, constant DisplayParams &p, ushort eye)
 {
-    float4 position [[position]];
-    float  size [[point_size]];
-    half4  color;
-};
+    const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 3;
+    return uint3((colorMap.get_width() + div - 1) / div, (colorMap.get_height() + div - 1) / div, div);
+}
 
-struct SSPRFragment
+kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
+                        constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
+                        device atomic_uint *keys [[ buffer(0) ]],
+                        texture2d_array<half> colorMap [[ texture(0) ]],
+                        depth2d_array<float> engineDepth [[ texture(1) ]])
 {
-    float4 position [[position]];
-    half4  color;
-};
-
-vertex SSPRPoint ssprScatter(uint vid [[vertex_id]],
-                             ushort eye [[amplification_id]],
-                             constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
-                             texture2d_array<half> colorMap [[ texture(0) ]],
-                             depth2d_array<float> engineDepth [[ texture(1) ]])
-{
-    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
-    SSPRPoint o;
-    o.size = 2.0;                    // covers the gaps the scatter leaves
-    o.color = 0.0h;
-    o.position = float4(2.0, 2.0, 2.0, 1.0);   // outside the view: dropped
-    if (p.sspr[eye].z < 0.5)
-        return o;
-    // one point per texel of the target: half the engine's size unless sspr.w says
-    const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 2;
-    const uint w = (colorMap.get_width() + div - 1) / div, h = (colorMap.get_height() + div - 1) / div;
-    const uint2 xy = uint2(vid % w, vid / w);
-    if (xy.y >= h)
-        return o;
-    const float2 uv = (float2(xy) + 0.5) / float2(w, h);
+    const ushort eye = ushort(gid.z);
+    const uint3 size = ssprSize(colorMap, p, eye);
+    if (gid.x >= size.x || gid.y >= size.y || p.sspr[eye].z < 0.5)
+        return;
+    const float2 uv = (float2(gid.xy) + 0.5) / float2(size.xy);
     const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
     const float ndc = engineDepth.read(min(uint2(uv * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
     const float zn = p.probeMix.y, zf = p.probeMix.z;
     const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
     if (z < 6.0)                     // the flat viewmodel
-        return o;
+        return;
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
     const float3 d = glassViewRay(uv, eye, p);
     const float3 W = E + d * (z / dot(d, F));
     const float height = p.sspr[eye].y;
     if (W.z < height + 1.0)
-        return o;
+        return;
     const float3 q = float3(W.xy, 2.0 * height - W.z) - E;
     const float qz = dot(q, F);
     if (qz < 4.0)
-        return o;
+        return;
     const float4 t = p.eyeTangents[eye];
     const float2 uv2 = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
-    if (any(uv2 < -0.01) || any(uv2 > 1.01))
-        return o;
-    const float2 edge = min(uv, 1.0 - uv);
-    const float confidence = smoothstep(0.0, 0.15, min(edge.x, edge.y));
-    if (confidence <= 0.0)
-        return o;
-    const half3 c = colorMap.sample(s, uv, eye).rgb;
-    o.color = half4(c * half(confidence), half(confidence));
-    // uv2.y = 0 is the bottom row in the engine's convention; Metal NDC +y is row 0
-    o.position = float4(uv2.x * 2.0 - 1.0, 1.0 - uv2.y * 2.0, saturate(length(q) / zf), 1.0);
-    return o;
+    if (any(uv2 < 0.0) || any(uv2 >= 1.0))
+        return;
+    const uint2 target = min(uint2(uv2 * float2(size.xy)), size.xy - 1);
+    const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 4095.0);
+    const uint key = (dist << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
+    atomic_fetch_min_explicit(&keys[(uint(eye) * size.y + target.y) * size.x + target.x], key, memory_order_relaxed);
 }
 
-fragment half4 ssprWrite(SSPRFragment in [[stage_in]])
+kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
+                        constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
+                        device const uint *keys [[ buffer(0) ]],
+                        texture2d_array<half> colorMap [[ texture(0) ]],
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
 {
-    return in.color;
+    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    const ushort eye = ushort(gid.z);
+    const uint3 size = ssprSize(colorMap, p, eye);
+    if (gid.x >= size.x || gid.y >= size.y)
+        return;
+    const uint base = uint(eye) * size.y * size.x;
+    uint key = keys[base + gid.y * size.x + gid.x];
+    if (key == 0xFFFFFFFFu) {
+        const int2 n[4] = { int2(0, 1), int2(0, -1), int2(1, 0), int2(-1, 0) };
+        for (int i = 0; i < 4; i++) {
+            const int2 c = int2(gid.xy) + n[i];
+            if (c.x < 0 || c.y < 0 || c.x >= int(size.x) || c.y >= int(size.y)) continue;
+            key = min(key, keys[base + uint(c.y) * size.x + uint(c.x)]);
+        }
+    }
+    half4 out = 0.0h;
+    if (key != 0xFFFFFFFFu && p.sspr[eye].z > 0.5) {
+        const float2 src = (float2(key & 1023u, (key >> 10) & 1023u) + 0.5) / float2(size.xy);
+        const float2 edge = min(src, 1.0 - src);
+        const float confidence = smoothstep(0.0, 0.15, min(edge.x, edge.y));
+        out = half4(colorMap.sample(s, src, eye).rgb * half(confidence), half(confidence));
+    }
+    mirror.write(out, gid.xy, gid.z);
 }
 
 // Test hook for Tools/DepthProbe: what the probe shows along each pixel's

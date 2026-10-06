@@ -5,14 +5,17 @@
 //  Sharp water reflections (Renderer.sharpWaterReflections, under
 //  Renderer.waterReflections): a screen-space planar reflection for
 //  horizontal water. The probe alone gives a soft room; this mirrors each
-//  eye's own engine image in the exact water plane (Shaders.metal
-//  ssprScatter), at half resolution, and the composite reads it at water
-//  pixels and falls back to the probe where it is empty or its source was
-//  near the frame's edge (glassShade). Each eye mirrors its own image, so the
-//  stereo parallax is exactly a mirror's, and the depth test keeps the
-//  nearest mirrored point. One draw of points (one per half-resolution
-//  texel) into a 2-slice colour + depth target, before the composite, only
-//  on frames where an eye has horizontal water below it in its plane table.
+//  eye's own engine image in the exact water plane and the composite reads
+//  it at water pixels, falling back to the probe where it is empty or its
+//  source was near the frame's edge (glassShade). Each eye mirrors its own
+//  image, so the stereo parallax is exactly a mirror's.
+//
+//  Two compute dispatches at 1/3 of the engine's resolution (Shaders.metal
+//  ssprProject: projection with an atomic-min key per target texel;
+//  ssprResolve: decode, gap fill, write), both eyes in one grid, before the
+//  composite, only on frames where an eye has horizontal water below it.
+//  The first version splatted one point per half-resolution texel through
+//  the rasteriser and measured 5.4 ms on the headset. Timed as gMirror.
 //
 
 import Metal
@@ -20,57 +23,46 @@ import simd
 
 final class SharpWater {
     let device: MTLDevice
-    private let pipeline: MTLRenderPipelineState
-    private let depthState: MTLDepthStencilState
+    private let project: MTLComputePipelineState
+    private let resolve: MTLComputePipelineState
     private let argumentTable: MTL4ArgumentTable
     private(set) var color: MTLTexture?
-    private var depth: MTLTexture?
+    private var keys: MTLBuffer?
+    private var size = (w: 0, h: 0)
 
     init?(device: MTLDevice, library: MTLLibrary) {
         self.device = device
-        let d = MTLRenderPipelineDescriptor()
-        d.label = "SharpWater"
-        d.vertexFunction = library.makeFunction(name: "ssprScatter")
-        d.fragmentFunction = library.makeFunction(name: "ssprWrite")
-        d.colorAttachments[0].pixelFormat = .rgba16Float
-        d.depthAttachmentPixelFormat = .depth32Float
-        d.inputPrimitiveTopology = .point
-        d.maxVertexAmplificationCount = 2
-        guard d.vertexFunction != nil, d.fragmentFunction != nil,
-              let pipeline = try? device.makeRenderPipelineState(descriptor: d) else { return nil }
-        self.pipeline = pipeline
-        let ds = MTLDepthStencilDescriptor()
-        ds.depthCompareFunction = .less
-        ds.isDepthWriteEnabled = true
-        guard let depthState = device.makeDepthStencilState(descriptor: ds) else { return nil }
-        self.depthState = depthState
+        guard let pf = library.makeFunction(name: "ssprProject"),
+              let rf = library.makeFunction(name: "ssprResolve"),
+              let project = try? device.makeComputePipelineState(function: pf),
+              let resolve = try? device.makeComputePipelineState(function: rf) else { return nil }
+        self.project = project
+        self.resolve = resolve
         let at = MTL4ArgumentTableDescriptor()
-        at.maxBufferBindCount = 3        // DisplayParams @ BufferIndexUniforms
-        at.maxTextureBindCount = 2       // colorMap @ 0, engine depth @ 1
+        at.maxBufferBindCount = 3        // keys @ 0, DisplayParams @ BufferIndexUniforms
+        at.maxTextureBindCount = 3       // colorMap @ 0, engine depth @ 1, mirror @ 2
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
     }
 
-    /// The targets for this colour map size (divided by divisor, as
-    /// DisplayParams.sspr.w tells the shader), made on first use or when it
-    /// changes. Returns the new allocations for the residency set.
+    /// The target and key buffer for this colour map size (divided by
+    /// divisor, as DisplayParams.sspr.w tells the shaders), made on first use
+    /// or when it changes. Returns the new allocations for the residency set.
     func ensureTargets(colorMap: MTLTexture, divisor: Int) -> [MTLAllocation] {
         let w = (colorMap.width + divisor - 1) / divisor, h = (colorMap.height + divisor - 1) / divisor
-        if let color, color.width == w, color.height == h { return [] }
-        func target(_ format: MTLPixelFormat) -> MTLTexture? {
-            let d = MTLTextureDescriptor()
-            d.textureType = .type2DArray
-            d.pixelFormat = format
-            d.width = w; d.height = h; d.arrayLength = 2
-            d.usage = format == .depth32Float ? [.renderTarget] : [.renderTarget, .shaderRead]
-            d.storageMode = .private
-            return device.makeTexture(descriptor: d)
-        }
-        color = target(.rgba16Float)
-        depth = target(.depth32Float)
-        color?.label = "SharpWaterColor"
-        depth?.label = "SharpWaterDepth"
-        return [color, depth].compactMap { $0 }
+        if color != nil, size.w == w, size.h == h { return [] }
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray
+        d.pixelFormat = .rgba16Float
+        d.width = w; d.height = h; d.arrayLength = 2
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .private
+        color = device.makeTexture(descriptor: d)
+        color?.label = "SharpWaterMirror"
+        keys = device.makeBuffer(length: w * h * 2 * 4, options: .storageModePrivate)
+        keys?.label = "SharpWaterKeys"
+        size = (w, h)
+        return [color, keys].compactMap { $0 as MTLAllocation? }
     }
 
     /// Mirrors both eyes' images. paramsAddress: this frame's DisplayParams
@@ -78,34 +70,27 @@ final class SharpWater {
     /// the command buffer is committed.
     func encode(commandBuffer: MTL4CommandBuffer, colorMap: MTLTexture, engineDepth: MTLTexture,
                 paramsAddress: UInt64) {
-        guard let color, let depth else { return }
-        let rpd = MTL4RenderPassDescriptor()
-        rpd.colorAttachments[0].texture = color
-        rpd.colorAttachments[0].loadAction = .clear
-        rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        rpd.colorAttachments[0].storeAction = .store
-        rpd.depthAttachment.texture = depth
-        rpd.depthAttachment.loadAction = .clear
-        rpd.depthAttachment.clearDepth = 1
-        rpd.depthAttachment.storeAction = .dontCare
-        rpd.renderTargetArrayLength = 2
-        guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        guard let color, let keys, let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.label = "SharpWater"
-        // ANGLE's colour and depth (ordered by the queue's wait on its fence)
-        enc.barrier(afterQueueStages: .all, beforeStages: .vertex, visibilityOptions: .device)
-        enc.setRenderPipelineState(pipeline)
-        enc.setDepthStencilState(depthState)
-        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(color.width),
-                                    height: Double(color.height), znear: 0, zfar: 1))
-        enc.setVertexAmplificationCount((0..<2).map {
-            MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: 0, renderTargetArrayIndexOffset: UInt32($0))
-        })
+        // ANGLE's colour and depth (ordered by the queue's wait on its fence),
+        // and last frame's composite reading the mirror
+        enc.barrier(afterQueueStages: .all, beforeStages: [.dispatch, .blit], visibilityOptions: .device)
+        enc.fill(buffer: keys, range: 0..<keys.length, value: 0xFF)
+        enc.barrier(afterEncoderStages: .blit, beforeEncoderStages: .dispatch, visibilityOptions: .device)
+        argumentTable.setAddress(keys.gpuAddress, index: 0)
+        argumentTable.setAddress(paramsAddress, index: BufferIndex.uniforms.rawValue)
         argumentTable.setTexture(colorMap.gpuResourceID, index: 0)
         argumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
-        argumentTable.setAddress(paramsAddress, index: BufferIndex.uniforms.rawValue)
-        enc.setArgumentTable(argumentTable, stages: .vertex)
-        enc.drawPrimitives(primitiveType: .point, vertexStart: 0, vertexCount: color.width * color.height)
-        enc.barrier(afterStages: .fragment, beforeQueueStages: .all, visibilityOptions: .device)
+        argumentTable.setTexture(color.gpuResourceID, index: 2)
+        enc.setArgumentTable(argumentTable)
+        let grid = MTLSize(width: size.w, height: size.h, depth: 2)
+        let group = MTLSize(width: 16, height: 8, depth: 1)
+        enc.setComputePipelineState(project)
+        enc.dispatchThreads(threadsPerGrid: grid, threadsPerThreadgroup: group)
+        enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: .device)
+        enc.setComputePipelineState(resolve)
+        enc.dispatchThreads(threadsPerGrid: grid, threadsPerThreadgroup: group)
+        enc.barrier(afterStages: .dispatch, beforeQueueStages: .all, visibilityOptions: .device)
         enc.endEncoding()
     }
 

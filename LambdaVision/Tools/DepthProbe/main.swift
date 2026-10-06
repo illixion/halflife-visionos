@@ -408,16 +408,9 @@ let probes = try probePaths.map { ProbeTextures(try Probe(path: $0)) }
 let plainPipeline = try glassPipeline(false)
 let glassOnPipeline = try glassPipeline(true)
 let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
-// Sharp water (ssprScatter): the app's scatter pass, one eye (amplification 0).
-let sharpPipeline: MTLRenderPipelineState = try {
-    let d = MTLRenderPipelineDescriptor()
-    d.vertexFunction = library.makeFunction(name: "ssprScatter")
-    d.fragmentFunction = library.makeFunction(name: "ssprWrite")
-    d.colorAttachments[0].pixelFormat = .rgba16Float
-    d.depthAttachmentPixelFormat = .depth32Float
-    d.inputPrimitiveTopology = .point
-    return try device.makeRenderPipelineState(descriptor: d)
-}()
+// Sharp water (ssprProject + ssprResolve): the app's two dispatches, one eye.
+let sharpProject = try device.makeComputePipelineState(function: library.makeFunction(name: "ssprProject")!)
+let sharpResolve = try device.makeComputePipelineState(function: library.makeFunction(name: "ssprResolve")!)
 let sharp = ProcessInfo.processInfo.environment["SHARP"] != "0"
 
 /// The highest horizontal water row below the eye (SharpWater.planes).
@@ -432,39 +425,32 @@ func sharpPlane(_ dump: Dump) -> SIMD4<Float> {
     return SIMD4(Float(best.0), best.1, 1, 0)
 }
 
-/// The scatter into a half-resolution colour target (one slice).
+/// The mirror target (one slice, shared for read-back), as the app makes it.
 func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture) -> MTLTexture {
-    let div = max(Int(params.sspr.0.w), 2) == 2 && params.sspr.0.w < 0.5 ? 2 : Int(params.sspr.0.w)
+    let div = params.sspr.0.w > 0.5 ? Int(params.sspr.0.w) : 3
     let w = (color.width + div - 1) / div, h = (color.height + div - 1) / div
-    func target(_ format: MTLPixelFormat) -> MTLTexture {
-        let d = MTLTextureDescriptor()
-        d.textureType = .type2DArray
-        d.pixelFormat = format
-        d.width = w; d.height = h
-        d.usage = [.renderTarget, .shaderRead]
-        d.storageMode = format == .depth32Float ? .private : .shared   // the colour is read back
-        return device.makeTexture(descriptor: d)!
-    }
-    let out = target(.rgba16Float), depth = target(.depth32Float)
-    let rpd = MTLRenderPassDescriptor()
-    rpd.colorAttachments[0].texture = out
-    rpd.colorAttachments[0].loadAction = .clear
-    rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-    rpd.colorAttachments[0].storeAction = .store
-    rpd.depthAttachment.texture = depth
-    rpd.depthAttachment.loadAction = .clear
-    rpd.depthAttachment.clearDepth = 1
+    let d = MTLTextureDescriptor()
+    d.textureType = .type2DArray
+    d.pixelFormat = .rgba16Float
+    d.width = w; d.height = h
+    d.usage = [.shaderRead, .shaderWrite]
+    d.storageMode = .shared
+    let out = device.makeTexture(descriptor: d)!
+    let keys = device.makeBuffer(bytes: [UInt32](repeating: .max, count: w * h * 2), length: w * h * 8)!
     let cb = queue.makeCommandBuffer()!
-    let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
-    enc.setRenderPipelineState(sharpPipeline)
-    let ds = MTLDepthStencilDescriptor()
-    ds.depthCompareFunction = .less
-    ds.isDepthWriteEnabled = true
-    enc.setDepthStencilState(device.makeDepthStencilState(descriptor: ds))
-    enc.setVertexBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
-    enc.setVertexTexture(color, index: 0)
-    enc.setVertexTexture(engineDepth, index: 1)
-    enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: w * h)
+    let enc = cb.makeComputeCommandEncoder()!
+    let pb = paramsBuffer(params)
+    enc.setBuffer(pb, offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setBuffer(keys, offset: 0, index: 0)
+    enc.setTexture(color, index: 0)
+    enc.setTexture(engineDepth, index: 1)
+    enc.setTexture(out, index: 2)
+    let grid = MTLSize(width: w, height: h, depth: 1), group = MTLSize(width: 16, height: 8, depth: 1)
+    enc.setComputePipelineState(sharpProject)
+    enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+    enc.memoryBarrier(scope: .buffers)
+    enc.setComputePipelineState(sharpResolve)
+    enc.dispatchThreads(grid, threadsPerThreadgroup: group)
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
     return out
 }
@@ -834,7 +820,10 @@ func compareSharp(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float, basel
 for (i, a) in glassViews.enumerated() {
     for b in glassViews[(i + 1)...] {
         let apart = simd_distance(a.dump.origin, b.dump.origin)
-        if apart < 4, let m = compareSharp(a, b) {
+        // an eye apart means the same gaze too: a pair that differs in both
+        // mixes the mirror's frame dependence into the stereo check
+        let sameGaze = simd_distance(a.dump.angles, b.dump.angles) < 0.01
+        if apart < 4, apart < 0.01 || sameGaze, let m = compareSharp(a, b) {
             print(String(format: "%@ vs %@ sharp mirror (%@): %d mirrored points both hold, mean difference %.1f/255 (the same points unmirrored in the engine images: %.1f/255)",
                          a.name, b.name, apart < 0.01 ? "same origin" : "an eye apart", m.n, m.mean, m.baseline))
             if apart >= 0.01, m.mean > m.baseline * 1.5 + 2 { failures += 1 }

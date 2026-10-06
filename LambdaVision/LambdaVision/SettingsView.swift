@@ -85,6 +85,9 @@ struct SettingsView: View {
                 }
 
                 Section("Diagnostics") {
+                    Picker("Water mirror view", selection: $settings.waterMirrorView) {
+                        ForEach(WaterMirrorView.allCases) { Text($0.label).tag($0) }
+                    }
                     Picker("HDR headroom test", selection: $settings.hdrTest) {
                         ForEach(HDRTestPattern.allCases) { Text($0.label).tag($0) }
                     }

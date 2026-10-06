@@ -95,7 +95,7 @@ enum AppSettingsStore {
     /// The screen-space mirror on horizontal water (Renderer.sharpWaterReflections),
     /// under Water reflections. On by default; off is the probe-only look.
     static var sharpWaterReflections: Bool {
-        get { bool(sharpWaterKey, true) }
+        get { bool(sharpWaterKey, false) }   // off until it measures well on device
         set { defaults.set(newValue, forKey: sharpWaterKey) }
     }
     /// Ripple slope multiplier (Renderer.waterRipples), 0–3×.

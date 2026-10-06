@@ -171,6 +171,10 @@ final class GameSettings {
     }
     /// HDR headroom test pattern over the whole view. Not stored: a
     /// diagnostic, and a black screen on the next launch would look broken.
+    /// Sharp-water debug view (needs Water reflections on). Not stored.
+    var waterMirrorView: WaterMirrorView = .off {
+        didSet { Renderer.waterMirrorView = waterMirrorView.rawValue }
+    }
     var hdrTest: HDRTestPattern = .off {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
                  AppLog.render.log("[HDR] test pattern \(hdrTest.label, privacy: .public), thermal state \(ProcessInfo.processInfo.thermalState.label, privacy: .public)") }
@@ -481,6 +485,21 @@ final class GameSettings {
 }
 
 /// Settings → Diagnostics: the HDR headroom test (Shaders.metal hdrTestPattern).
+/// Settings → Diagnostics: what the sharp-water mirror holds
+/// (Renderer.waterMirrorView, Shaders.metal glassShade). Not stored.
+enum WaterMirrorView: Int, CaseIterable, Identifiable {
+    case off = 0, onWater = 1, confidence = 2, whole = 3
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .onWater: "Mirror on water"
+        case .confidence: "Mirror confidence"
+        case .whole: "Whole mirror"
+        }
+    }
+}
+
 enum HDRTestPattern: Int, CaseIterable, Identifiable {
     case off = 0, dots = 1, patches = 2
     var id: Int { rawValue }
