@@ -180,6 +180,12 @@ final class WeaponPass {
     // Per-eye depth, sized to the drawable. Recreated on size change.
     private var depth: MTLTexture?
     private var depthW = 0, depthH = 0, depthSlices = 0
+    /// Store the depth for the reprojection-depth merge (ReprojectionDepth)
+    /// instead of discarding it. Set by the caller each frame.
+    var keepsDepth = false
+    /// The depth the last encode stored (keepsDepth), when the gun or body
+    /// actually drew into it — what the merge copies to the drawable.
+    private(set) var storedDepth: MTLTexture?
 
     // Per in-flight frame: one WeaponUniforms array + one bone palette for
     // each skinned model, and the ring slots.
@@ -317,6 +323,7 @@ final class WeaponPass {
     /// Per-frame: poll the extractor — upload a freshly baked model if the
     /// generation moved, then refresh the bone palette from the latest pose.
     func update() {
+        storedDepth = nil   // until this frame's encode stores one
         uploadIfNeeded()
         uploadWorldIfNeeded()
         updateAlignment()
@@ -447,7 +454,7 @@ final class WeaponPass {
         td.pixelFormat = depthFormat
         td.width = width; td.height = height
         td.arrayLength = max(1, slices)
-        td.usage = .renderTarget
+        td.usage = [.renderTarget, .shaderRead]   // read by the reprojection-depth merge
         td.storageMode = .private
         depth = device.makeTexture(descriptor: td)
         depth?.label = "WeaponDepth"
@@ -495,6 +502,7 @@ final class WeaponPass {
                 arcs: [Arc] = [],
                 fade: (color: SIMD4<Float>, modulate: Bool)? = nil,
                 hud: ((MTL4RenderCommandEncoder) -> Void)? = nil) {
+        storedDepth = nil
         guard let depth else { return }
 
         let eye0 = eyePositions.first ?? .zero
@@ -522,12 +530,15 @@ final class WeaponPass {
         rpd.depthAttachment.texture = depth
         rpd.depthAttachment.loadAction = .clear
         rpd.depthAttachment.clearDepth = 0.0    // reverse-Z far
-        rpd.depthAttachment.storeAction = .dontCare
+        let drawingSkinned = (drawWeapon && mesh != nil) || body != nil
+        let storesDepth = keepsDepth && drawingSkinned && layered
+        rpd.depthAttachment.storeAction = storesDepth ? .store : .dontCare
         rpd.rasterizationRateMap = drawable.rasterizationRateMaps.first
         if layered { rpd.renderTargetArrayLength = drawable.views.count }
 
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
         enc.label = "Weapon Encoder"
+        if storesDepth { storedDepth = depth }
         // Order this pass's colour load after the fullscreen engine pass's
         // colour writes on the same queue (MTL4 = no hazard tracking).
         enc.barrier(afterQueueStages: .all, beforeStages: .fragment, visibilityOptions: .device)
@@ -547,7 +558,6 @@ final class WeaponPass {
                                   index: BufferIndex.viewProjection.rawValue)
         fragmentArgTable.setAddress(ub.gpuAddress, index: BufferIndex.uniforms.rawValue)
 
-        let drawingSkinned = (drawWeapon && mesh != nil) || body != nil
         if drawingSkinned {
             enc.setRenderPipelineState(pipeline)
             enc.setDepthStencilState(depthState)

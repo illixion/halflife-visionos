@@ -257,3 +257,96 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
     return displayOutput(float3(rgb), float(colorSample.a), uv, in.position.xy, params);
 }
+
+// ---- Per-pixel reprojection depth (Renderer.reprojectionDepth) ------------
+// The compositor re-warps each frame from the pose it was drawn at to the
+// pose at display time, using the drawable's depth for the positional part.
+// The constant far depth (fullscreenVertexShader) makes that a pure rotation:
+// right for distant walls, wrong for anything near when the head moves. These
+// variants give every pixel the engine's own depth instead, converted from
+// its GL window depth (standard Z, the projection Lambda_Bridge.c builds from
+// the same frustum tangents, near/far in DisplayParams.engineClip) to the
+// distance along the eye's forward axis and back through the compositor's
+// projection, so both name the same point in the room.
+//
+// Kept inside the layer's depth range: exactly 0 (the far plane) displayed
+// pure black on device in Oneiros, so sky, empty texels and anything past the
+// compositor's far plane get depthLimits.x, the old constant. A pixel the
+// engine puts nearer than depthLimits.z is its own flat viewmodel (the stock
+// one is squeezed into the front 30% of the depth range, so it decodes a few
+// centimetres from the eye) and gets the far depth too, as it always had: a
+// head-locked image has no right depth, and the near one would warp it hard.
+struct CompositeDepthOut
+{
+    float4 color [[color(0)]];
+    float  depth [[depth(any)]];
+};
+
+static inline float compositorDepth(depth2d_array<float> engineDepth, float2 uv, ushort eye,
+                                    constant DisplayParams &p)
+{
+    const uint2 size = uint2(engineDepth.get_width(), engineDepth.get_height());
+    const uint2 texel = min(uint2(uv * float2(size)), size - 1);
+    const float ndc = engineDepth.read(texel, eye) * 2.0 - 1.0;
+    const float distance = p.engineClip.x / (p.engineClip.y - ndc * p.engineClip.z);
+    if (distance < p.depthLimits.z)
+        return p.depthLimits.x;
+    const float4 P = p.depthProjection[eye];
+    const float z = -distance;
+    const float depth = (P.x * z + P.y) / (P.z * z + P.w);
+    return clamp(depth, p.depthLimits.x, p.depthLimits.y);
+}
+
+fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
+                                               constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
+                                               texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                                               depth2d_array<float> engineDepth [[ texture(1) ]])
+{
+    constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
+                                   min_filter::linear, address::clamp_to_edge);
+    const float2 uv = in.texCoord;
+    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    CompositeDepthOut out;
+    out.color = displayOutput(float3(colorSample.rgb), float(colorSample.a), uv, in.position.xy, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    return out;
+}
+
+fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
+                                                   constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
+                                                   texture2d_array<half> colorMap [[ texture(TextureIndexColor) ]],
+                                                   depth2d_array<float> engineDepth [[ texture(1) ]])
+{
+    constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
+                                   min_filter::linear, address::clamp_to_edge);
+    const float2 uv = in.texCoord;
+    const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
+    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    const half3 rgb = fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb);
+    CompositeDepthOut out;
+    out.color = displayOutput(float3(rgb), float(colorSample.a), uv, in.position.xy, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    return out;
+}
+
+// The gun and body draw over the engine image with their own depth buffer
+// (WeaponPass), so the drawable's depth still holds the engine's under them.
+// This copies their depth over it wherever they drew: the drawable texel and
+// the weapon depth texel are the same physical pixel (same size, same rate
+// map), and both are the compositor's reverse-Z already. Untouched texels
+// (the clear value, 0) keep the engine's depth.
+struct DepthOnlyOut
+{
+    float depth [[depth(any)]];
+};
+
+fragment DepthOnlyOut reprojectionDepthMerge(ColorInOut in [[stage_in]],
+                                             depth2d_array<float> overlayDepth [[ texture(0) ]])
+{
+    const float d = overlayDepth.read(uint2(in.position.xy), in.eye);
+    if (d <= 0.0)
+        discard_fragment();
+    DepthOnlyOut out;
+    out.depth = d;
+    return out;
+}

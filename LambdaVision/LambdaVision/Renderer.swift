@@ -145,6 +145,12 @@ actor Renderer {
     // shader — the default. Selected per frame from Renderer.compositeFXAA,
     // so the Settings toggle is live without adding a pass or a uniform.
     let fullscreenFXAAPipelineState: MTLRenderPipelineState
+    // The same two composites writing per-pixel reprojection depth
+    // (Renderer.reprojectionDepth; Shaders.metal compositorDepth).
+    let fullscreenDepthPipelineState: MTLRenderPipelineState
+    let fullscreenFXAADepthPipelineState: MTLRenderPipelineState
+    // Copies the gun and body's depth over the drawable's (ReprojectionDepth).
+    let reprojectionDepthPass: ReprojectionDepth
     let fxaaPipelineState: MTLRenderPipelineState
     let fxaaArgumentTable: MTL4ArgumentTable
     let depthState: MTLDepthStencilState
@@ -275,6 +281,16 @@ actor Renderer {
     // chain above). Read on the render thread every frame, so the Settings
     // toggle applies live — it only picks between two pipeline states.
     nonisolated(unsafe) static var compositeFXAA: Bool = true
+    /// Give the compositor every pixel's real depth for reprojection
+    /// (ReprojectionDepth) instead of one constant far depth. Settings →
+    /// Graphics, default off until judged on device. Live.
+    nonisolated(unsafe) static var reprojectionDepth: Bool = false
+    /// The engine's projection near/far, xash units (HL inches ≈ 39.37/m).
+    /// zFar matches the engine's culling far clip (R_GetFarClip floors zmax
+    /// at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era maps)
+    /// clips into view as gray in long halls like the tram ride.
+    static let engineZNear: Float = 4.0
+    static let engineZFar: Float = 16384.0 * 1.73
     /// Exponent that decodes the engine's gamma-encoded colours into the
     /// linear drawable (displayLinearize, ShaderTypes.h): a plain power, as
     /// the game was lit and textured for a CRT. 0 = write them as they are.
@@ -979,7 +995,7 @@ actor Renderer {
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
-        argTableDesc.maxTextureBindCount = 1
+        argTableDesc.maxTextureBindCount = 2    // colour@0, engine depth@1 (reprojection depth)
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
         // GPU state, so sharing one table across two encoders that bind
@@ -1028,6 +1044,12 @@ actor Renderer {
             fullscreenFXAAPipelineState = try Self.buildFullscreenPipeline(device: device,
                                                                           layerRenderer: layerRenderer,
                                                                           fxaa: true)
+            fullscreenDepthPipelineState = try Self.buildFullscreenPipeline(device: device,
+                                                                           layerRenderer: layerRenderer,
+                                                                           fxaa: false, depth: true)
+            fullscreenFXAADepthPipelineState = try Self.buildFullscreenPipeline(device: device,
+                                                                               layerRenderer: layerRenderer,
+                                                                               fxaa: true, depth: true)
         } catch {
             fatalError("Unable to compile fullscreen pipeline state. Error info: \(error)")
         }
@@ -1040,6 +1062,7 @@ actor Renderer {
 
         self.depthState = Self.buildDepthStencilState(device: device)
         self.gpuTimer = GPUPassTimer(device: device, slots: maxBuffersInFlight)
+        self.reprojectionDepthPass = ReprojectionDepth(device: device, layerRenderer: layerRenderer)
         self.loadSnapshot = LoadSnapshot(device: device, layerRenderer: layerRenderer,
                                          slots: maxBuffersInFlight + 1)
 
@@ -1184,12 +1207,14 @@ actor Renderer {
     // composite with the FXAA kernel folded in (zero extra passes — just the
     // neighbourhood taps at the sampled texture's texel size). Everything
     // else about the two pipelines is identical.
+    // `depth` picks the variant that also writes each pixel's reprojection
+    // depth (fragmentShaderDepth / fragmentShaderFXAADepth).
     static func buildFullscreenPipeline(device: MTLDevice,
                                         layerRenderer: LayerRenderer,
-                                        fxaa: Bool) throws -> MTLRenderPipelineState {
+                                        fxaa: Bool, depth: Bool = false) throws -> MTLRenderPipelineState {
         let library = device.makeDefaultLibrary()
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.label = fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline"
+        pipelineDescriptor.label = (fxaa ? "FullscreenFXAAPipeline" : "FullscreenPipeline") + (depth ? "Depth" : "")
         pipelineDescriptor.vertexFunction = library?.makeFunction(name: "fullscreenVertexShader")
         let format = layerRenderer.configuration.colorFormat
         let output = outputQuantization(format)
@@ -1198,8 +1223,8 @@ actor Renderer {
         constants.setConstantValue(&srgb, type: .bool, index: 20)
         constants.setConstantValue(&lsb, type: .float, index: 21)
         pipelineDescriptor.fragmentFunction = try library?.makeFunction(
-            name: fxaa ? "fragmentShaderFXAA" : "fragmentShader", constantValues: constants)
-        if !fxaa {
+            name: (fxaa ? "fragmentShaderFXAA" : "fragmentShader") + (depth ? "Depth" : ""), constantValues: constants)
+        if !fxaa && !depth {
             AppLog.render.log("[LambdaVision] drawable colorFormat=\(format.rawValue) (\(format, privacy: .public)) → composite dither srgb=\(srgb) lsb=\(lsb)")
         }
         pipelineDescriptor.rasterSampleCount = device.rasterSampleCount
@@ -1729,8 +1754,8 @@ actor Renderer {
         // zFar matches the engine's culling far clip (R_GetFarClip floors
         // zmax at 16384 × 1.73): worldspawn MaxRange (4096 on GoldSrc-era
         // maps) clips into view as gray in long halls like the tram ride.
-        let zNear: Float = 4.0
-        let zFar:  Float = 16384.0 * 1.73
+        let zNear = Renderer.engineZNear
+        let zFar  = Renderer.engineZFar
         // Use the first drawable's tangents (built-in target). Capture
         // target may have different tangents but for now match builtIn.
         let primary = drawables.first { $0.target == .builtIn } ?? drawables[0]
@@ -2568,11 +2593,21 @@ actor Renderer {
         // MetalFX chain is live: that path already ran a dedicated FXAA pass
         // into fxaaMap, and displayMap is what we'd be filtering here.
         let compositeFXAA = Renderer.compositeFXAA && spatialScalers.isEmpty
-        renderEncoder.setRenderPipelineState(compositeFXAA ? fullscreenFXAAPipelineState
-                                                           : fullscreenPipelineState)
+        // Per-pixel reprojection depth (ReprojectionDepth), unless there is
+        // no engine depth to read (ANGLE refused our texture), the menu owns
+        // the view, or the HDR test pattern replaces it: those keep the
+        // constant far depth.
+        let perPixelDepth = Renderer.reprojectionDepth && engineDepth != nil
+            && lambda_gl_depth_target_ok() != 0 && lambda_menu_active() == 0
+            && Renderer.hdrTestMode == 0 && displayMap == nil
+        weaponPass.keepsDepth = perPixelDepth
+        renderEncoder.setRenderPipelineState(perPixelDepth
+            ? (compositeFXAA ? fullscreenFXAADepthPipelineState : fullscreenDepthPipelineState)
+            : (compositeFXAA ? fullscreenFXAAPipelineState : fullscreenPipelineState))
         // Depth must still be set since the pass has a depth attachment;
-        // fullscreen triangle outputs z=1 which wins under reverse-Z
-        // (drawable cleared to 0, compareFunction = greater).
+        // the fullscreen triangle's depth (the constant far one, or each
+        // pixel's with perPixelDepth) is above the clear value 0, so it
+        // passes under reverse-Z (compareFunction = greater).
         renderEncoder.setDepthStencilState(depthState)
 
         let viewports = drawable.views.map { $0.textureMap.viewport }
@@ -2594,10 +2629,24 @@ actor Renderer {
             self.fragmentArgumentTable.setTexture(displayTexture.gpuResourceID, index: TextureIndex.color.rawValue)
             let paramsOffset = Self.displayParamsStride * uniformBufferIndex
             let vp = viewports.first
-            var params = DisplayParams(decodeGamma: Renderer.displayDecodeGamma,
-                                       hdrTest: Float(Renderer.hdrTestMode),
-                                       aspect: vp.map { Float($0.width / max($0.height, 1)) } ?? 1,
-                                       pad: 0)
+            var params = DisplayParams()
+            params.decodeGamma = Renderer.displayDecodeGamma
+            params.hdrTest = Float(Renderer.hdrTestMode)
+            params.aspect = vp.map { Float($0.width / max($0.height, 1)) } ?? 1
+            if perPixelDepth {
+                self.fragmentArgumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
+                let n = Renderer.engineZNear / 39.37, f = Renderer.engineZFar / 39.37
+                params.engineClip = SIMD4(2 * n * f, f + n, f - n, 0)
+                let rows = drawable.views.indices.map { i -> SIMD4<Float> in
+                    let p = drawable.computeProjection(viewIndex: i)
+                    return SIMD4(p.columns.2.z, p.columns.3.z, p.columns.2.w, p.columns.3.w)
+                }
+                params.depthProjection = (rows[0], rows[min(1, rows.count - 1)])
+                // Far = the old constant; nearest = the near plane; flat
+                // viewmodel cut-off 16 cm (its squeezed depth decodes at most
+                // 1.43 × the 10 cm near plane — see compositorDepth).
+                params.depthLimits = SIMD4(0.0001, 1, 0.16, 0)
+            }
             memcpy(displayParamsBuffer.contents() + paramsOffset, &params, MemoryLayout<DisplayParams>.size)
             self.fragmentArgumentTable.setAddress(displayParamsBuffer.gpuAddress + UInt64(paramsOffset),
                                                   index: BufferIndex.uniforms.rawValue)
@@ -2836,6 +2885,12 @@ actor Renderer {
                                   } })
                 if timed { gpuTimer.mark(hudScene != nil ? .hud : .weapon, commandBuffer) }
             }
+        }
+        // The gun and body's depth over the engine's, where they drew.
+        if perPixelDepth, let overlayDepth = weaponPass.storedDepth {
+            reprojectionDepthPass.encodeMerge(commandBuffer: commandBuffer, drawable: drawable,
+                                              overlayDepth: overlayDepth)
+            if timed { gpuTimer.mark(.depth, commandBuffer) }
         }
 
         // The palm debug panel's buttons into the tracking-areas texture: its

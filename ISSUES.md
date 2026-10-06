@@ -177,8 +177,6 @@ instead of deleting them.
   room (c1a0 cafeteria) and a firefight, with the thermal state, into
   `docs/plans/modern-lighting.md`; check `gpuQueue` ≈ the sum of our
   passes (if it is much larger, commit feedback counts the wait on ANGLE).
-- **Per-pixel reprojection depth.** We submit a constant depth; real
-  depth would reduce jelly artifacts during head motion.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored
@@ -440,6 +438,26 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~Per-pixel reprojection depth~~ — Settings → Graphics "Per-pixel
+  reprojection depth" (default off, live; `Renderer.reprojectionDepth`,
+  `ReprojectionDepth.swift`) gives the compositor each pixel's real depth
+  instead of one constant far value. The composite converts the engine's GL
+  window depth to distance and back through `drawable.computeProjection`
+  (`Shaders.metal` `compositorDepth`), clamped inside the layer's range
+  (far = the old 0.0001, since depth 0 drew black in Oneiros); the gun and
+  body's own depth is then copied over it where they drew
+  (`reprojectionDepthMerge`). The stock flat viewmodel (squeezed into the
+  front 30% of GL depth, decoding under 16 cm) keeps the far depth, as do
+  the menu, the HDR test, the level-load snapshot (its parallax is drawn in)
+  and a frame without engine depth. HUD holograms, arcs and the wireframe
+  arms write none and inherit what is behind them. `Tools/DepthProbe` runs
+  the real shaders on Mac `r_vrdump` frames: every pixel unprojects to
+  within 3e-4 of the GL point for infinite and finite reverse-Z
+  projections, and the merge replaces exactly the overlay's texels. On
+  device: A/B while leaning toward a near wall and a crate, and with the gun
+  held close; look for jelly at depth edges (door frames) and for the HUD
+  numbers swimming (device check pending).
 
 - ~~`tangents` API deprecation~~ — `View.tangents` (deprecated since
   visionOS 2) is gone from Renderer and LoadSnapshot: the frustum tangents

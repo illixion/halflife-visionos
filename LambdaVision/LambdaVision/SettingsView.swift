@@ -58,6 +58,7 @@ struct SettingsView: View {
                     // the toggle below, folded into the composite pass.
                     Toggle("Edge smoothing (FXAA)", isOn: $settings.fxaaEnabled)
                     Toggle("Linear colour", isOn: $settings.linearColor)
+                    Toggle("Per-pixel reprojection depth", isOn: $settings.reprojectionDepth)
                     slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
                         String(format: "%.1f", $0)
                     }
@@ -70,7 +71,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft. Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it.")
+                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft. Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it. Per-pixel reprojection depth tells the headset how far away each pixel is, so near walls and the gun hold still when you move your head between frames; off treats the whole image as distant, as before.")
                 }
 
                 Section("Diagnostics") {

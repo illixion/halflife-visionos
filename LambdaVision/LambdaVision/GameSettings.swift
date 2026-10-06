@@ -127,6 +127,12 @@ final class GameSettings {
         didSet { AppSettingsStore.linearColor = linearColor
                  Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0 }
     }
+    /// Hand the compositor each pixel's real depth (engine, gun and body)
+    /// for reprojection instead of one constant far depth. Live.
+    var reprojectionDepth: Bool = AppSettingsStore.reprojectionDepth {
+        didSet { AppSettingsStore.reprojectionDepth = reprojectionDepth
+                 Renderer.reprojectionDepth = reprojectionDepth }
+    }
     /// HDR headroom test pattern over the whole view. Not stored: a
     /// diagnostic, and a black screen on the next launch would look broken.
     var hdrTest: HDRTestPattern = .off {
@@ -267,6 +273,7 @@ final class GameSettings {
         Renderer.useMetalFXChain   = metalFXEnabled
         Renderer.compositeFXAA     = fxaaEnabled
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
+        Renderer.reprojectionDepth = reprojectionDepth
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
