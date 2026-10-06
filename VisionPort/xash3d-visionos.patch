@@ -3517,45 +3517,48 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..468e590 100644
+index e6e7712..c6188da 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,9 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,10 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
 +#if !XASH_VISIONOS
 +extern convar_t	r_vrdump;
 +#endif
++extern convar_t	r_vrglass;
  extern convar_t	r_nocull;
  extern convar_t	r_lockpvs;
  extern convar_t	r_lockfrustum;
 diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
-index 05a130f..4779935 100644
+index 05a130f..ab677af 100644
 --- a/ref/gl/gl_opengl.c
 +++ b/ref/gl/gl_opengl.c
-@@ -26,6 +26,9 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
+@@ -26,6 +26,10 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
  CVAR_DEFINE_AUTO( r_lighting_ambient, "0.3", FCVAR_GLCONFIG, "map ambient lighting scale" );
  CVAR_DEFINE_AUTO( r_detailtextures, "1", FCVAR_GLCONFIG, "enable detail textures support" );
  CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
 +#if !XASH_VISIONOS
 +CVAR_DEFINE_AUTO( r_vrdump, "0", 0, "dump the next 3D view's colour, depth and matrices to vrdump.bin (visionOS snapshot tuning)" );
 +#endif
++CVAR_DEFINE_AUTO( r_vrglass, "0", 0, "mark glass brush surfaces in the stencil buffer with their view-space normal (visionOS glass pass)" );
  CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
  CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
  CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
-@@ -1151,6 +1154,9 @@ static void GL_InitCommands( void )
+@@ -1151,6 +1155,10 @@ static void GL_InitCommands( void )
  {
  	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
  	gEngfuncs.Cvar_RegisterVariable( &r_novis );
 +#if !XASH_VISIONOS
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrdump );
 +#endif
++	gEngfuncs.Cvar_RegisterVariable( &r_vrglass );
  	gEngfuncs.Cvar_RegisterVariable( &r_nocull );
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..2a954e5 100644
+index 0568486..328d5ed 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3626,7 +3629,7 @@ index 0568486..2a954e5 100644
  	RI.farClip = R_GetFarClip();
  
  	zNear = 4.0f;
-@@ -1087,6 +1129,56 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -1087,6 +1129,65 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3642,12 +3645,16 @@ index 0568486..2a954e5 100644
 +head poses. The value of r_vrdump is the file's index (vrdump<N>.bin).
 +===============
 +*/
++#ifndef GL_STENCIL_INDEX
++#define GL_STENCIL_INDEX 0x1901
++#endif
 +static void R_DumpViewForVR( void )
 +{
 +	int *vp = RI.rvp.viewport, w, h, n = (int)r_vrdump.value;
 +	float proj[16], view[16];
 +	byte *rgba;
 +	float *depth;
++	byte *stencil;
 +	char name[64];
 +	FILE *f;
 +
@@ -3657,6 +3664,9 @@ index 0568486..2a954e5 100644
 +	depth = malloc( (size_t)w * h * sizeof( float ));
 +	pglReadPixels( vp[0], vp[1], w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba );
 +	pglReadPixels( vp[0], vp[1], w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depth );
++	// version 2 appends the stencil (r_vrglass codes), one byte per pixel
++	stencil = malloc( (size_t)w * h );
++	pglReadPixels( vp[0], vp[1], w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencil );
 +	Matrix4x4_ToArrayFloatGL( RI.projectionMatrix, proj );
 +	Matrix4x4_ToArrayFloatGL( RI.worldviewMatrix, view );
 +
@@ -3664,7 +3674,7 @@ index 0568486..2a954e5 100644
 +	f = fopen( name, "wb" );
 +	if( f )
 +	{
-+		int header[4] = { 0x44525656 /* VVRD */, 1, w, h };
++		int header[4] = { 0x44525656 /* VVRD */, 2, w, h };
 +		fwrite( header, sizeof( header ), 1, f );
 +		fwrite( proj, sizeof( proj ), 1, f );
 +		fwrite( view, sizeof( view ), 1, f );
@@ -3672,18 +3682,20 @@ index 0568486..2a954e5 100644
 +		fwrite( RI.rvp.viewangles, sizeof( float ), 3, f );
 +		fwrite( rgba, (size_t)w * h * 4, 1, f );
 +		fwrite( depth, (size_t)w * h * sizeof( float ), 1, f );
++		fwrite( stencil, (size_t)w * h, 1, f );
 +		fclose( f );
 +		gEngfuncs.Con_Printf( "wrote %s (%dx%d)\n", name, w, h );
 +	}
 +	free( rgba );
 +	free( depth );
++	free( stencil );
 +}
 +#endif
 +
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1118,6 +1210,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1118,6 +1219,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  
  	tr.realframecount++; // right called after viewmodel events
  	R_RenderScene();
@@ -3695,7 +3707,7 @@ index 0568486..2a954e5 100644
  	return;
  }
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..6959ddd 100644
+index df6f012..411a47d 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -3831,6 +3843,99 @@ index df6f012..6959ddd 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
+@@ -1830,6 +1939,62 @@ static void R_SetRenderMode( cl_entity_t *e )
+ 	}
+ }
+ 
++/*
++=================
++R_VRGlass
++
++visionOS glass pass (r_vrglass): which brush surfaces are glass, and their
++stencil code. Glass is a translucent-texture brush entity (how GoldSrc maps
++make windows: func_breakable / func_wall, rendermode Texture) or any non-
++additive brush surface whose texture is named *glass*, so a mod's windows
++qualify by the same rules and anything else is left alone. The code is the
++surface's eye-space normal (GL axes, turned toward the viewer), quantised to
++15 x 15 steps of x and y and offset by 16: the engine's own stencil users
++(clipped decals, alias shadows) write small counts, never 16 or more. The app
++reads the stencil aspect of the depth texture it gave the engine and adds a
++Fresnel reflection there (Shaders.metal glassShade).
++=================
++*/
++static qboolean R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
++{
++	if( e->curstate.rendermode == kRenderTransAdd || FBitSet( fa->flags, SURF_DRAWSKY|SURF_DRAWTURB ))
++		return false;
++	if( e->curstate.rendermode == kRenderTransTexture )
++		return true;
++	return fa->texinfo && fa->texinfo->texture && Q_stristr( fa->texinfo->texture->name, "glass" ) != NULL;
++}
++
++static int R_VRGlassCode( const msurface_t *fa )
++{
++	vec3_t n, v;
++	int ix, iy;
++
++	VectorCopy( fa->plane->normal, n );
++	if( FBitSet( fa->flags, SURF_PLANEBACK ))
++		VectorNegate( n, n );
++	Matrix4x4_VectorRotate( RI.modelviewMatrix, n, v );
++	VectorNormalize( v );
++	if( v[2] < 0.0f )
++		VectorNegate( v, v );
++	ix = bound( 0, (int)floorf(( v[0] + 1.0f ) * 7.0f + 0.5f ), 14 );
++	iy = bound( 0, (int)floorf(( v[1] + 1.0f ) * 7.0f + 0.5f ), 14 );
++	return 16 + ix * 15 + iy;
++}
++
++static void R_VRGlassBegin( const msurface_t *fa )
++{
++	pglEnable( GL_STENCIL_TEST );
++	pglStencilMask( 0xFF );
++	pglStencilFunc( GL_ALWAYS, R_VRGlassCode( fa ), 0xFF );
++	pglStencilOp( GL_KEEP, GL_KEEP, GL_REPLACE );
++}
++
++static void R_VRGlassEnd( void )
++{
++	pglStencilOp( GL_KEEP, GL_KEEP, GL_KEEP );
++	pglDisable( GL_STENCIL_TEST );
++}
++
+ static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
+ {
+ 	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
+@@ -1959,6 +2124,11 @@ void R_DrawBrushModel( cl_entity_t *e )
+ 	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
+ 		allow_vbo = false;
+ 
++	// glass surfaces are drawn one by one, each with its own stencil code
++	qboolean vr_glass = r_vrglass.value != 0.0f;
++	if( vr_glass && allow_vbo )
++		allow_vbo = false;
++
+ 	if( !allow_vbo )
+ 		GL_SetupFogColorForSurfaces ();
+ 
+@@ -1972,8 +2142,15 @@ void R_DrawBrushModel( cl_entity_t *e )
+ 	// draw sorted translucent surfaces
+ 	for( int i = 0; i < num_sorted; i++ )
+ 	{
+-		if( !allow_vbo || !R_AddSurfToVBO( gpGlobals->draw_surfaces[i].surf, true ))
+-			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
++		msurface_t *surf = gpGlobals->draw_surfaces[i].surf;
++		qboolean glass = vr_glass && R_VRGlassSurface( e, surf );
++
++		if( glass )
++			R_VRGlassBegin( surf );
++		if( !allow_vbo || !R_AddSurfToVBO( surf, true ))
++			R_RenderBrushPoly( surf, gpGlobals->draw_surfaces[i].cull );
++		if( glass )
++			R_VRGlassEnd();
+ 	}
+ 
+ 	R_DrawVBO( R_HasLightmap(), true );
 diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c
 index cfa7835..32bcb26 100644
 --- a/ref/gl/gl_warp.c

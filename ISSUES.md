@@ -177,6 +177,22 @@ instead of deleting them.
   room (c1a0 cafeteria) and a firefight, with the thermal state, into
   `docs/plans/modern-lighting.md`; check `gpuQueue` ≈ the sum of our
   passes (if it is much larger, commit feedback counts the wait on ANGLE).
+- **Modern lighting tier 1 (glass): prototype, device check pending.**
+  Settings → Graphics "Glass reflections (prototype)" (default off, live;
+  `Renderer.glassReflections` + the engine's `r_vrglass`). The engine marks
+  glass in the stencil of the depth texture the app owns: translucent-texture
+  brush entities (GoldSrc windows) and non-additive brush surfaces named
+  `*glass*`, each with a code holding its eye-space normal (ref/gl
+  `gl_rsurf.c` `R_VRGlass*`, in `xash3d-visionos.patch`; glass writes no
+  depth, so the normal cannot come from the depth buffer). The composite adds
+  Schlick Fresnel with the frame itself as a distant environment (reflected
+  ray projected back into the eye's frustum, room light where it leaves the
+  frame) — `Shaders.metal` `glassShade`, one stencil read per pixel, no pass.
+  Mods get it by the same rules or not at all. Verified on the Mac build
+  (c1a0 windows: mask exactly on the panes, normal codes match the wall;
+  `Tools/DepthProbe --png` renders plain vs glass from a version-2
+  `r_vrdump`). Needs a libxash rebuild to reach the device. Left: see
+  `docs/plans/modern-lighting.md` (tier 1 status).
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored

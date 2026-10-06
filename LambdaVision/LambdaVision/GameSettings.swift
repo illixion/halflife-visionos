@@ -133,6 +133,13 @@ final class GameSettings {
         didSet { AppSettingsStore.reprojectionDepth = reprojectionDepth
                  Renderer.reprojectionDepth = reprojectionDepth }
     }
+    /// Modern lighting tier 1: Fresnel reflections on the glass the engine
+    /// marks (r_vrglass, pushed with it). Live.
+    var glassReflections: Bool = AppSettingsStore.glassReflections {
+        didSet { AppSettingsStore.glassReflections = glassReflections
+                 Renderer.glassReflections = glassReflections
+                 cvar("r_vrglass", glassReflections ? 1 : 0) }
+    }
     /// HDR headroom test pattern over the whole view. Not stored: a
     /// diagnostic, and a black screen on the next launch would look broken.
     var hdrTest: HDRTestPattern = .off {
@@ -274,6 +281,7 @@ final class GameSettings {
         Renderer.compositeFXAA     = fxaaEnabled
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
         Renderer.reprojectionDepth = reprojectionDepth
+        Renderer.glassReflections = glassReflections
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
@@ -322,6 +330,7 @@ final class GameSettings {
         cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0)
         cvar("vr_weapon_external", weaponExternal ? 1 : 0)
         cvar("crosshair", stockCrosshair)
+        cvar("r_vrglass", glassReflections ? 1 : 0)
     }
 
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
