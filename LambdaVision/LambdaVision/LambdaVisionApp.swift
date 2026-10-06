@@ -290,6 +290,7 @@ struct LambdaVisionApp: App {
         Window("Lambda VisionPro", id: "main") {
             ContentView()
                 .environment(appModel)
+                .capturesDebugApprovalActions()
                 // Route gamepad input to the app instead of system focus
                 // navigation — without this, polled GCController values
                 // freeze after a stick release (a known GCController quirk).
@@ -307,6 +308,7 @@ struct LambdaVisionApp: App {
         Window("Console", id: "console") {
             RAVEConsoleScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
+                .capturesDebugApprovalActions()
         }
         .defaultLaunchBehavior(.suppressed)
 
@@ -315,7 +317,17 @@ struct LambdaVisionApp: App {
         Window("Performance", id: "performance") {
             PerformanceHUDScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
+                .capturesDebugApprovalActions()
         }
+        .defaultLaunchBehavior(.suppressed)
+
+        // DebugTrace's "Allow debug access?" prompt, opened by the server's
+        // approval handler (DebugApprovalWindow): over the immersive space
+        // there is no UIKit window for DebugTrace's own alert.
+        Window("Debug Access", id: DebugApprovalCenter.windowID) {
+            DebugApprovalView()
+        }
+        .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {

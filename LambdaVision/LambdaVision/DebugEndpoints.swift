@@ -112,7 +112,11 @@ enum LambdaDebugServer {
         #if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
         if wanted(mode) {
             guard server == nil else { return }
-            let s = DebugTraceServer(configuration: .init(ports: ports))
+            // .custom: DebugTrace's default alert needs a frontmost UIKit window,
+            // which the immersive space lacks (DebugApprovalWindow).
+            let s = DebugTraceServer(configuration: .init(
+                ports: ports,
+                approval: .custom { await DebugApprovalCenter.shared.ask($0) }))
             server = s
             s.startInBackground()
             AppLog.app.log("[DebugServer] starting (\(mode.rawValue, privacy: .public)), ports \(ports.lowerBound)-\(ports.upperBound)")
