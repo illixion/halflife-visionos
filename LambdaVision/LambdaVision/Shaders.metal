@@ -524,6 +524,15 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
     if (z < 6.0)                     // the flat viewmodel
         return;
+    // Glass and water are the probe's to reflect, not the mirror's: their
+    // pixels hold the pane's colour over what is behind it (they write no
+    // depth), and the warped water texture mirrored at the grid's rate came
+    // out as moiré on the headset (the c1a2 sink's water box in the flood).
+    {
+        const uint2 ssize = uint2(engineStencil.get_width(), engineStencil.get_height());
+        if (engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r >= 16)
+            return;
+    }
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
     const float3 d = glassViewRay(uv, eye, p);
@@ -557,6 +566,23 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
 #define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
 #endif
 
+// The engine image at half resolution, each texel the mean of a 2 × 2
+// block (one bilinear tap at the block's centre). The resolve's sub-rays sit
+// two engine pixels apart, so it samples this instead of the full image:
+// point-sampling the full image at that spacing aliased fine source detail
+// into moiré.
+kernel void ssprPrefilter(uint3 gid [[thread_position_in_grid]],
+                          texture2d_array<half> colorMap [[ texture(0) ]],
+                          texture2d_array<half, access::write> prefiltered [[ texture(4) ]])
+{
+    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    const uint2 size = uint2(prefiltered.get_width(), prefiltered.get_height());
+    if (gid.x >= size.x || gid.y >= size.y)
+        return;
+    const float2 uv = (float2(gid.xy) + 0.5) / float2(size);
+    prefiltered.write(colorMap.sample(s, uv, gid.z), gid.xy, gid.z);
+}
+
 // The key buffer's reset to "empty", four keys per thread (a compute pass
 // rather than a buffer fill, so the GPU timer can bracket it).
 kernel void ssprClear(uint gid [[thread_position_in_grid]],
@@ -578,7 +604,8 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
                         depth2d_array<float> engineDepth [[ texture(1) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]],
+                        texture2d_array<half> prefiltered [[ texture(4) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
@@ -673,7 +700,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             if (bestSrc.x < 0.0) continue;
             const float2 edge = min(bestSrc, 1.0 - bestSrc);
             const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));
-            sum += colorMap.sample(s, bestSrc, eye).rgb * half(c);
+            sum += prefiltered.sample(s, bestSrc, eye).rgb * half(c);
             conf += c;
         }
     }

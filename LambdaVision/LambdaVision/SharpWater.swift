@@ -10,8 +10,8 @@
 //  source was near the frame's edge (glassShade). Each eye mirrors its own
 //  image, so the stereo parallax is exactly a mirror's.
 //
-//  Three compute dispatches at 1/4 of the engine's resolution (Shaders.metal
-//  ssprClear: reset the keys; ssprProject: projection with an atomic-min key
+//  Four compute dispatches (Shaders.metal ssprPrefilter: the engine image at
+//  half size for the resolve to sample; ssprClear: reset the keys; ssprProject: projection with an atomic-min key
 //  per target texel; ssprResolve: decode, gap fill, write), both eyes in one grid, before the
 //  composite, only on frames where an eye has horizontal water below it.
 //  The first version splatted one point per half-resolution texel through
@@ -23,29 +23,34 @@ import simd
 
 final class SharpWater {
     let device: MTLDevice
+    private let prefilter: MTLComputePipelineState
     private let clear: MTLComputePipelineState
     private let project: MTLComputePipelineState
     private let resolve: MTLComputePipelineState
     private let argumentTable: MTL4ArgumentTable
     private(set) var color: MTLTexture?
     private var keys: MTLBuffer?
+    private var prefiltered: MTLTexture?   // the engine image at half size, 2×2 means
     private var keyCount4: MTLBuffer?   // the clear's uint4 count
     private var size = (w: 0, h: 0)
 
     init?(device: MTLDevice, library: MTLLibrary) {
         self.device = device
-        guard let cf = library.makeFunction(name: "ssprClear"),
+        guard let ff = library.makeFunction(name: "ssprPrefilter"),
+              let prefilter = try? device.makeComputePipelineState(function: ff),
+              let cf = library.makeFunction(name: "ssprClear"),
               let clear = try? device.makeComputePipelineState(function: cf),
               let pf = library.makeFunction(name: "ssprProject"),
               let rf = library.makeFunction(name: "ssprResolve"),
               let project = try? device.makeComputePipelineState(function: pf),
               let resolve = try? device.makeComputePipelineState(function: rf) else { return nil }
+        self.prefilter = prefilter
         self.clear = clear
         self.project = project
         self.resolve = resolve
         let at = MTL4ArgumentTableDescriptor()
         at.maxBufferBindCount = 3        // keys @ 0, DisplayParams @ BufferIndexUniforms
-        at.maxTextureBindCount = 4       // colorMap @ 0, engine depth @ 1, mirror @ 2, engine stencil @ 3
+        at.maxTextureBindCount = 5       // colorMap @ 0, engine depth @ 1, mirror @ 2, engine stencil @ 3, prefiltered @ 4
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
     }
@@ -55,7 +60,7 @@ final class SharpWater {
     /// or when it changes. Returns the new allocations for the residency set.
     func ensureTargets(colorMap: MTLTexture, divisor: Int) -> [MTLAllocation] {
         let w = (colorMap.width + divisor - 1) / divisor, h = (colorMap.height + divisor - 1) / divisor
-        if color != nil, size.w == w, size.h == h { return [] }
+        if color != nil, size.w == w, size.h == h, prefiltered?.width == (colorMap.width + 1) / 2 { return [] }
         let d = MTLTextureDescriptor()
         d.textureType = .type2DArray
         d.pixelFormat = .rgba16Float
@@ -64,12 +69,16 @@ final class SharpWater {
         d.storageMode = .private
         color = device.makeTexture(descriptor: d)
         color?.label = "SharpWaterMirror"
+        d.width = (colorMap.width + 1) / 2
+        d.height = (colorMap.height + 1) / 2
+        prefiltered = device.makeTexture(descriptor: d)
+        prefiltered?.label = "SharpWaterSource"
         var count4 = UInt32((w * h * 2 + 3) / 4)
         keys = device.makeBuffer(length: Int(count4) * 16, options: .storageModePrivate)
         keys?.label = "SharpWaterKeys"
         keyCount4 = device.makeBuffer(bytes: &count4, length: 4, options: .storageModeShared)
         size = (w, h)
-        return [color, keys, keyCount4].compactMap { $0 as MTLAllocation? }
+        return [color, keys, keyCount4, prefiltered].compactMap { $0 as MTLAllocation? }
     }
 
     /// Mirrors both eyes' images. paramsAddress: this frame's DisplayParams
@@ -80,7 +89,8 @@ final class SharpWater {
     func encode(commandBuffer: MTL4CommandBuffer, colorMap: MTLTexture, engineDepth: MTLTexture,
                 engineStencil: MTLTexture, paramsAddress: UInt64,
                 mark: (GPUPassTimer.Mark, MTL4ComputeCommandEncoder) -> Void) {
-        guard let color, let keys, let keyCount4, let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let color, let keys, let keyCount4, let prefiltered,
+              let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.label = "SharpWater"
         // ANGLE's colour and depth (ordered by the queue's wait on its fence),
         // and last frame's composite reading the mirror
@@ -92,11 +102,15 @@ final class SharpWater {
         argumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
         argumentTable.setTexture(color.gpuResourceID, index: 2)
         argumentTable.setTexture(engineStencil.gpuResourceID, index: 3)
+        argumentTable.setTexture(prefiltered.gpuResourceID, index: 4)
         enc.setArgumentTable(argumentTable)
         enc.setComputePipelineState(clear)
         enc.dispatchThreads(threadsPerGrid: MTLSize(width: keys.length / 16, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
-        mark(.mirrorFill, enc)
+        enc.setComputePipelineState(prefilter)
+        enc.dispatchThreads(threadsPerGrid: MTLSize(width: prefiltered.width, height: prefiltered.height, depth: 2),
+                            threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
+        mark(.mirrorFill, enc)     // the key reset and the prefilter
         enc.barrier(afterEncoderStages: .dispatch, beforeEncoderStages: .dispatch, visibilityOptions: .device)
         let grid = MTLSize(width: size.w, height: size.h, depth: 2)
         let group = MTLSize(width: 16, height: 8, depth: 1)

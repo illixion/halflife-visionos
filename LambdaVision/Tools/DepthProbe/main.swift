@@ -411,6 +411,7 @@ let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
 // Sharp water (ssprProject + ssprResolve): the app's two dispatches, one eye.
 let sharpProject = try device.makeComputePipelineState(function: library.makeFunction(name: "ssprProject")!)
 let sharpResolve = try device.makeComputePipelineState(function: library.makeFunction(name: "ssprResolve")!)
+let sharpPrefilter = library.makeFunction(name: "ssprPrefilter").flatMap { try? device.makeComputePipelineState(function: $0) }
 let sharp = ProcessInfo.processInfo.environment["SHARP"] != "0"
 
 /// The highest horizontal water row below the eye (SharpWater.planes).
@@ -447,6 +448,19 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
     enc.setTexture(engineDepth, index: 1)
     enc.setTexture(out, index: 2)
     enc.setTexture(stencil, index: 3)
+    if let sharpPrefilter {                              // older shaders have none
+        let pd = MTLTextureDescriptor()
+        pd.textureType = .type2DArray
+        pd.pixelFormat = .rgba16Float
+        pd.width = (color.width + 1) / 2; pd.height = (color.height + 1) / 2
+        pd.usage = [.shaderRead, .shaderWrite]
+        let pre = device.makeTexture(descriptor: pd)!
+        enc.setTexture(pre, index: 4)
+        enc.setComputePipelineState(sharpPrefilter)
+        enc.dispatchThreads(MTLSize(width: pd.width, height: pd.height, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
+        enc.memoryBarrier(scope: .textures)
+    }
     let grid = MTLSize(width: w, height: h, depth: 1), group = MTLSize(width: 16, height: 8, depth: 1)
     enc.setComputePipelineState(sharpProject)
     enc.dispatchThreads(grid, threadsPerThreadgroup: group)
@@ -561,6 +575,57 @@ for path in args {
             }
             return sum / Float(max(n, 1))
         }
+        // where the mirror shows glass or water (the c1a2 sink's water box):
+        // each marked pixel's point on its plane, mirrored in the water and
+        // projected back, dilated by two pixels
+        var mirroredGlass = [Bool](repeating: false, count: w * h)
+        if let planes = dump.planes {
+            let (f, r, u) = dump.axes
+            let p = dump.projection
+            let tg = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                           (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+            let height = params.sspr.0.y
+            for y in 0..<h {
+                for x in 0..<w {
+                    let code = Int(stencil[y * w + x])
+                    guard code >= 16, code - 16 < planes.count, code - 16 != Int(params.sspr.0.x) else { continue }
+                    let pl = planes[code - 16], n = SIMD3(pl.x, pl.y, pl.z)
+                    let uu = (Float(x) + 0.5) / Float(w), vv = (Float(y) + 0.5) / Float(h)
+                    let d = simd_normalize(f + (-tg.x + (tg.x + tg.y) * uu) * r + (-tg.w + (tg.z + tg.w) * vv) * u)
+                    let nd = simd_dot(n, d)
+                    guard abs(nd) > 1e-3 else { continue }
+                    let P = dump.origin + d * ((pl.w - simd_dot(n, dump.origin)) / nd)
+                    guard P.z > height + 1 else { continue }
+                    let q = SIMD3(P.x, P.y, 2 * height - P.z) - dump.origin
+                    let qz = simd_dot(q, f)
+                    guard qz > 4 else { continue }
+                    let mx = Int((simd_dot(q, r) / qz + tg.x) / (tg.x + tg.y) * Float(w))
+                    let my = Int((simd_dot(q, u) / qz + tg.w) / (tg.z + tg.w) * Float(h))
+                    guard mx >= 2, mx < w - 2, my >= 2, my < h - 2 else { continue }
+                    for yy in (my - 2)...(my + 2) { for xx in (mx - 2)...(mx + 2) { mirroredGlass[yy * w + xx] = true } }
+                }
+            }
+        }
+        // measured on a composite at twice the engine's resolution per axis,
+        // as on the headset (the drawable is ~2.3× the engine image at the
+        // centre), where the mirror's texels are magnified most
+        func hatchingInMirroredGlass(_ img: [UInt8]) -> (Float, Int) {
+            let W = w * 2, H = h * 2
+            var sum: Float = 0, n = 0
+            for row in 6..<(H - 6) {
+                for x in 6..<(W - 6) {
+                    let sy = h - 1 - row / 2, sx = x / 2
+                    guard sy >= 3, sy < h - 3 else { continue }
+                    let c = Int(stencil[sy * w + sx])
+                    guard mirroredGlass[sy * w + sx], c == Int(params.sspr.0.x) + 16,
+                          Int(stencil[(sy + 3) * w + sx]) == c, Int(stencil[(sy - 3) * w + sx]) == c else { continue }
+                    let i = (row * W + x) * 4
+                    for k in 0..<3 { sum += abs(2 * Float(img[i + k]) - Float(img[i - W * 4 + k]) - Float(img[i + W * 4 + k])) }
+                    n += 3
+                }
+            }
+            return (sum / Float(max(n, 1)), n / 3)
+        }
         var still = params
         still.water.w = 0
         let calm = hatching(render(glassOnPipeline, w, h, still, textures))
@@ -571,6 +636,19 @@ for path in args {
         print(String(format: "%@ hatching: ripple 0× %.2f, 1× %.2f, 3× %.2f /255", name, calm, at1, at3))
         // d7868d3 at the c1a2 device view: 0× 1.77, 1× 2.10, 3× 3.18 (fails)
         if at1 > calm + 0.2 || at3 > calm + 0.6 { failures += 1 }
+        // in the mirrored glass/water, sharp against soft (probe only), both
+        // with the ripple off: the mirror must add no fine lines there
+        var soft = still
+        soft.sspr = (.zero, .zero)
+        let (hSharp, nPx) = hatchingInMirroredGlass(render(glassOnPipeline, w * 2, h * 2, still, textures))
+        let (hSoft, _) = hatchingInMirroredGlass(render(glassOnPipeline, w * 2, h * 2, soft, textures))
+        if let dir = pngDir {
+            writePNG(render(glassOnPipeline, w * 2, h * 2, still, textures), w * 2, h * 2, "\(dir)/mirror2x-\(name).png")
+        }
+        if nPx > 200 {
+            print(String(format: "%@ mirrored glass/water: %d px, hatching sharp %.2f vs soft %.2f /255 (ripple off)", name, nPx, hSharp, hSoft))
+            if hSharp > hSoft + 0.5 { failures += 1 }
+        }
     }
     if sharp, params.sspr.0.z > 0 {
         func shifted(_ dx: Float, _ dy: Float, dt: Float = 0) -> (DisplayParams, [Int: MTLTexture], [UInt8]) {
