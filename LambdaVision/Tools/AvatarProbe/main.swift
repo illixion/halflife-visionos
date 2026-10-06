@@ -17,7 +17,7 @@ import simd
 func die(_ m: String) -> Never { print("FAIL: \(m)"); exit(1) }
 
 let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }
-let path = args.first
+let path = args.last   // build.sh passes gordon.mdl first, then any model given to it
     ?? NSString(string: "~/Projects/halflife-visionos/HalfLifeAssets/valve/models/player/gordon/gordon.mdl").expandingTildeInPath
 let dumpOBJ = CommandLine.arguments.contains("--obj")
 
@@ -655,6 +655,9 @@ do {
     runWorldModelChecks(rig: rig, gordon: gordon, modelsDir: models, dumpDir: dump)
     if FileManager.default.fileExists(atPath: hd) {
         runWorldModelChecks(rig: rig, gordon: gordon, modelsDir: hd, dumpDir: dump.map { $0 + "/hd" })
+    }
+    for arg in CommandLine.arguments where arg.hasPrefix("--anchor=") {
+        runAnchorChecks(modelsDir: String(arg.dropFirst("--anchor=".count)))
     }
 }
 

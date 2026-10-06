@@ -9,6 +9,8 @@
 #                         world models, aligned_v_<weapon>.tri the viewmodel with
 #                         its toe-in taken out; render_tri.py turns one into a PNG
 #   ./build.sh path/to/other.mdl   probe a different player model
+#   ./build.sh --anchor=path/to/models   also report which of another
+#                         game's viewmodels hold in the hand, which draw flat
 #
 # Needs RAVEEngine checked out beside this repo (the app's own package
 # dependency) — it is built in release once and linked directly.

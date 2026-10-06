@@ -125,6 +125,12 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
             synthNote += String(format: " synth-vs-%@ %.0f°", name.hasSuffix(" L Hand") ? "L" : "R", d)
         }
 
+        // Every stock and HD viewmodel must stay hand-anchored; only a mod's
+        // unreadable one falls back to the flat viewmodel.
+        if !ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: vm.restPose,
+                                          gunVertexCount: vm.triangles.count - cut) {
+            die("\(file) would fall back to the flat viewmodel")
+        }
         guard let grip else {
             print(String(format: "  %-20@ cut %3d/%3d tris  grip: none%@", file, cut, vm.triangles.count, synthNote))
             if CommandLine.arguments.contains("--measure") {
@@ -232,4 +238,32 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
 
 extension SIMD4 where Scalar == Float {
     var xyz3: SIMD3<Float> { SIMD3(x, y, z) }
+}
+
+/// `--anchor=<models dir>`: which viewmodels in another game's models dir
+/// the weapon pass would hold in the hand and which it would draw flat
+/// (ViewmodelGrip.canAnchorInHand). Reports only; mods may fail.
+func runAnchorChecks(modelsDir: String) {
+    print("\n— hand anchoring in \((modelsDir as NSString).abbreviatingWithTildeInPath) —")
+    let files = ((try? FileManager.default.contentsOfDirectory(atPath: modelsDir)) ?? [])
+        .filter { $0.lowercased().hasPrefix("v_") && $0.lowercased().hasSuffix(".mdl") }.sorted()
+    for file in files {
+        guard (modelsDir + "/" + file).withCString({ lambda_body_load($0, 0) }) != 0 else {
+            print("  \(file): failed to load (external textures?)"); continue
+        }
+        let vm = ProbeModel.fromBodySlot()
+        let isHand = ViewmodelGrip.handTriangleFilter(textureNames: vm.textureNames, boneNames: vm.boneNames)
+        let cut = vm.triangles.filter { isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }.count
+        let geometry = ViewmodelGrip.boneGeometry(
+            boneCount: vm.boneNames.count, textureNames: vm.textureNames,
+            vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+        let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
+                                      extractorChoice: vm.handBone, geometry: geometry)
+        let ok = ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: vm.restPose,
+                                               gunVertexCount: vm.triangles.count - cut)
+        let hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: vm.restPose) == .aimed ? "aimed" : "held" } ?? "-"
+        print(String(format: "  %-24@ cut %4d/%4d  grip %@  %@  → %@", file, cut, vm.triangles.count,
+                     grip.map { vm.boneNames[$0.bone] + ($0.fingerPrefix == nil ? " (synth)" : "") } ?? "none",
+                     hold, ok ? "hand" : "FLAT"))
+    }
 }
