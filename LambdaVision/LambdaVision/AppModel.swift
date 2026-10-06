@@ -70,6 +70,10 @@ class AppModel {
             await WeaponWarmup.run(gameDirectory: dir, game: game) { [weak self] done, total in
                 self?.preparationProgress = (done, total)
             }
+            // The weapon wheel's HUD icons (milliseconds).
+            await Task.detached(priority: .userInitiated) {
+                HUDIconWarmup.run(gameDirectory: dir, game: game)
+            }.value
             warmedFor = key
         }
     }

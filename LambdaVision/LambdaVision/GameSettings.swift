@@ -198,6 +198,17 @@ final class GameSettings {
         didSet { AppSettingsStore.armSwingSensitivity = armSwingSensitivity
                  HandMovement.armSwingSensitivity = Float(armSwingSensitivity) }
     }
+    /// A jump gesture at a run, with the long jump module, presses duck
+    /// first so the module fires (JumpSequencer). Off: always a crouch-jump.
+    var handLongJump: Bool = AppSettingsStore.handLongJump {
+        didSet { AppSettingsStore.handLongJump = handLongJump
+                 HandMovement.longJumpEnabled = handLongJump }
+    }
+    /// The weapon wheel's flashlight, quick save and quick load sectors.
+    var wheelUtilities: Bool = AppSettingsStore.wheelUtilities {
+        didSet { AppSettingsStore.wheelUtilities = wheelUtilities
+                 Renderer.weaponWheelUtilities = wheelUtilities }
+    }
     var fastWeaponSwitch: Bool = AppSettingsStore.fastWeaponSwitch {
         didSet { AppSettingsStore.fastWeaponSwitch = fastWeaponSwitch
                  cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0) }
@@ -299,6 +310,8 @@ final class GameSettings {
         HandMovement.armSwingEnabled = armSwingEnabled
         HandMovement.armSwingFollowsHands = (armSwingDirection == .hands)
         HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
+        HandMovement.longJumpEnabled = handLongJump
+        Renderer.weaponWheelUtilities = wheelUtilities
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style

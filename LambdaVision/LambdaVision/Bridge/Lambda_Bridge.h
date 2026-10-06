@@ -403,6 +403,28 @@ void lambda_set_use_offset(float pitch_deg, float yaw_deg, int active);
 void lambda_set_train_gear(int gear);
 int  lambda_train_state(void);
 
+// Hand-tracking weapon wheel: the weapon slots the player owns anything in,
+// as the client publishes them (cl_dll/vr/vr_hud.cpp g_vr_wheel), in slot
+// order. `name` is the classname a pick selects (send it as a console
+// command); `flags` bit 1 = the weapon in hand is in this slot, bit 2 =
+// nothing in it has ammo. lambda_wheel_state copies up to `max` entries and
+// returns the count; *allowed = 0 while weapon selection is off (no suit,
+// dead, weapons HUD hidden). -1 if the client kept rewriting it (try again
+// next frame).
+typedef struct {
+    int slot;          // 0-based
+    int weapon_id;
+    int pick_index;    // the pick's position among the slot's owned weapons
+    int owned_count;
+    int flags;
+    char name[64];
+} lambda_wheel_slot_t;
+int lambda_wheel_state(lambda_wheel_slot_t *out, int max, int *allowed);
+
+// The long jump module: 1 when the server's "slj" physinfo is set, 0 when
+// not, -1 before the client has published it.
+int lambda_has_longjump(void);
+
 // Hand-anchored weapon: tracked hand pose, CAMERA-local in xash axes
 // (x forward, y left, z up). Position in xash units (39.37/m), forward/up
 // unit vectors. While set, the client draws the current weapon's p_ model

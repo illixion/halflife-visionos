@@ -70,6 +70,13 @@ nonisolated final class HandMovement {
     // plain up-flick performs a full crouch-jump.
     nonisolated(unsafe) static var autoCrouchJump = true
     nonisolated(unsafe) static var autoDuckDelay: TimeInterval = 0.06
+    // Long jump: at a run with the module, the jump gesture presses +duck
+    // first and +jump a beat later instead (JumpSequencer has the why and
+    // the thresholds). Settings "Long jump at a run".
+    nonisolated(unsafe) static var longJumpEnabled = true
+    /// Arm-swing speed (0…1) that counts as a run for a long jump; the
+    /// pinch stick uses JumpSequencer's deflection threshold.
+    nonisolated(unsafe) static var swingLongJumpIntent: Float = 0.75
 
     // Immersive +use tuning. "Reach" is the fingertip's FORWARD distance
     // from the head (projected on head-forward, so hands hanging at the
@@ -119,7 +126,7 @@ nonisolated final class HandMovement {
         fullScaleMeters: 0.18,                 // wrist 18cm from anchor = full speed
         deadzoneMeters: HandMovement.deadzoneM
     )
-    private var jumpStart: TimeInterval = 0
+    private var jumpSequence = JumpSequencer()
     private var clutchHeld = false
     private var jumpHeld = false
     private var duckHeld = false
@@ -208,16 +215,17 @@ nonisolated final class HandMovement {
         axesActive = true
 
         // A flick holds +jump briefly; the same auto crouch-jump as the
-        // joystick's up-flick adds +duck once airborne.
+        // joystick's up-flick adds +duck once airborne, or at a run with the
+        // module the long jump's duck-first order.
         if swing.jumpBegan {
             swingJumpUntil = now + HandMovement.swingJumpHold
-            jumpStart = now
         }
-        let wantJump = now < swingJumpUntil
-        let autoDuck = HandMovement.autoCrouchJump && wantJump
-                     && (now - jumpStart) >= HandMovement.autoDuckDelay
-        setHold(&jumpHeld, want: wantJump, cmd: "jump")
-        setHold(&duckHeld, want: autoDuck, cmd: "duck")
+        // The swing's speed on the stick's scale: swingLongJumpIntent maps
+        // onto the sequencer's threshold.
+        let intent = swing.speed01 * jumpTuning().longJumpIntent / max(HandMovement.swingLongJumpIntent, 0.01)
+        let buttons = sequenceJump(want: now < swingJumpUntil, intent: intent, now: now)
+        setHold(&jumpHeld, want: buttons.jump, cmd: "jump")
+        setHold(&duckHeld, want: buttons.duck, cmd: "duck")
 
         Renderer.aimDiag.moveClutch = false
         Renderer.aimDiag.joyX = x
@@ -363,13 +371,13 @@ nonisolated final class HandMovement {
         // a jump also holds +duck after a short delay (once airborne) so a
         // plain up-flick clears ledges the way a manual crouch-jump would.
         // Read off the raw delta, which the horizontal deadzone must not eat.
+        // At a run with the long jump module the order reverses (duck, then
+        // jump with the duck held) so the module fires; see JumpSequencer.
         let dy = stick.delta.y
-        let wantJump = dy > HandMovement.jumpRiseM
-        if wantJump && !jumpHeld { jumpStart = now }   // rising edge
-        let autoDuck = HandMovement.autoCrouchJump && wantJump
-                     && (now - jumpStart) >= HandMovement.autoDuckDelay
-        setHold(&jumpHeld, want: wantJump, cmd: "jump")
-        setHold(&duckHeld, want: (dy < -HandMovement.duckDropM) || autoDuck, cmd: "duck")
+        let buttons = sequenceJump(want: dy > HandMovement.jumpRiseM,
+                                   intent: simd_length(stick.vector), now: now)
+        setHold(&jumpHeld, want: buttons.jump, cmd: "jump")
+        setHold(&duckHeld, want: (dy < -HandMovement.duckDropM) || buttons.duck, cmd: "duck")
 
         Renderer.aimDiag.moveClutch = true
         Renderer.aimDiag.joyX = x
@@ -389,6 +397,7 @@ nonisolated final class HandMovement {
             lambda_joy_set_axis(1, 0)
             axesActive = false
         }
+        jumpSequence.reset()
         setHold(&jumpHeld, want: false, cmd: "jump")
         setHold(&duckHeld, want: false, cmd: "duck")
         Renderer.aimDiag.moveClutch = false
@@ -420,6 +429,33 @@ nonisolated final class HandMovement {
         releaseThrottle()
         setHold(&useHeld, want: false, cmd: "use")
         Renderer.aimDiag.useHeld = false
+    }
+
+    private func jumpTuning() -> JumpSequencer.Tuning {
+        var t = JumpSequencer.Tuning()
+        t.autoCrouchJump = HandMovement.autoCrouchJump
+        t.autoDuckDelay = HandMovement.autoDuckDelay
+        t.longJump = HandMovement.longJumpEnabled
+        return t
+    }
+
+    /// The jump gesture through the sequencer, with the player's ground
+    /// speed and the module as the client last published them.
+    private func sequenceJump(want: Bool, intent: Float, now: TimeInterval) -> (jump: Bool, duck: Bool) {
+        var speed: Float = 0
+        if want {
+            var body = lambda_body_state_t()
+            lambda_body_state(&body)
+            speed = (body.velocity.0 * body.velocity.0 + body.velocity.1 * body.velocity.1).squareRoot()
+        }
+        let before = jumpSequence.kind
+        let out = jumpSequence.update(jump: want, intent: intent, groundSpeed: speed,
+                                      hasModule: lambda_has_longjump() == 1, now: now, tuning: jumpTuning())
+        if before == .idle, jumpSequence.kind != .idle {
+            AppLog.input.debug("[HM] jump: \(jumpSequence.kind == .longJump ? "long" : "crouch", privacy: .public) intent \(intent, format: .fixed(precision: 2)) speed \(speed, format: .fixed(precision: 0)) module \(lambda_has_longjump())")
+        }
+        Renderer.aimDiag.jumpKind = jumpSequence.kind == .longJump ? "long" : (jumpSequence.kind == .crouchJump ? "crouch" : "—")
+        return out
     }
 
     private func setHold(_ held: inout Bool, want: Bool, cmd: String) {

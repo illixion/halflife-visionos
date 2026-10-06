@@ -54,50 +54,42 @@ instead of deleting them.
   `selectionRay` with hand drift after the pinch starts (privacy: gaze is
   revealed at tap). Automatic fire tracks the pinch-start gaze, not the
   eyes. Acceptable for now; hand-anchored aim supersedes it.
-- **No flashlight toggle with hand tracking.** The flashlight is toggled by
-  `impulse 100`, sent only by the keyboard (F, a first-run bind in
-  `Lambda_Bridge.c`) and the gamepad (D-pad up, `GamepadInput.swift`). No
-  hand gesture sends it: the weapon wheel covers slot1–slot5 only and a poke
-  is `+use`, so a hand-tracking-only player can't turn it on and the
-  gun-mounted beam (see "Gun-mounted flashlight" under rendering) never
-  shows for them. Likely fix: a sixth weapon-wheel sector for `impulse 100`
-  (reuses the wheel's hysteresis and release-to-pick), or an off-hand
-  toggle gesture. (The README Controls section now lists the keyboard and
-  gamepad flashlight binds.)
-- **Long jump unreachable with hand tracking.** The module fires in
-  `PM_Jump` (`pm_shared.c`) only when `+duck` is already held and its timer
-  is open (`flDuckTime > 0`) as `+jump` goes down, moving faster than 50 u/s
-  (and the server's `slj` physinfo is set). Keyboard (Ctrl, then Space) and
-  gamepad (B, then A) can do it. Hand tracking can't: jump and duck share
-  the wrist's vertical axis, so the duck is released before the jump
-  threshold is reached, and the auto crouch-jump and the swing flick both
-  press jump first and duck ~0.06 s later (`HandMovement.autoDuckDelay`),
-  the reverse order. Plan: when the jump gesture arrives at running speed
-  (swing speed or stick deflection past a threshold), press `+duck` first and
-  `+jump` a beat later with the duck still held, so a running jump becomes a
-  long jump. Open points: this replaces the auto crouch-jump at speed, so
-  pick the threshold with ledge jumps in mind; and without the module a
-  duck-then-jump is just a crouched jump, so ideally only do it once the
-  player has picked the module up (the client may need a signal for that).
-  Not checked whether the campaign requires the module.
 - **No alt-fire with hand tracking.** `+attack2` (MP5 grenades, crossbow
   and Python zoom, shotgun double barrel, gauss charge) now has the mouse's
   right button, K on the keyboard (J/Enter fire without a mouse) and the
   gamepad's left trigger. A hand gesture for it is still to be designed; it
   must not clash with finger-gun fire, reload (thumb curl), the weapon wheel
   (all-fingertip pinch) or the movement pinch.
-- **Weapon wheel is fixed at five sectors and has no icons.** It covers
-  slot1–slot5 only (`Renderer.swift`, 12 o'clock = slot1, clockwise). It
-  should become dynamic: sector count and contents from the slots the
-  player's weapons actually occupy (mods use more than five), so it can also
-  carry non-weapon entries such as the flashlight. It should also show
-  per-slot icons (from the `640hud*.spr` sprites listed in `weapon_*.txt`,
-  see "HEV HUD next steps" under rendering).
-- **No quick save / quick load with hand tracking.** Keyboard: F5/F6 save,
-  F9/F7 load (`savequick`/`loadquick`; F6/F7 were the engine's defaults all
-  along, F5/F9 come with bind set v2). Gamepad: View/Options tap saves,
-  holding it 1 s loads. Hands still need a route (a menu or wheel entry, or
-  a gesture).
+  *Hand gesture: proposals, owner to pick (2026-10-06).* None is free of
+  clashes, so none is implemented yet. Alt-fire is a press on the MP5
+  (grenade), shotgun (double barrel), crossbow and .357 (zoom toggles), and
+  a hold on the gauss (charge), Glock (rapid fire) and hornet gun.
+  1. *Two-finger pistol.* Extend the middle finger beside the index; then
+     curling both pulls +attack2, and the index curling alone fires as now.
+     The finger gun normally rests with the middle finger curled, so this is
+     a mode the hand enters deliberately, and press and hold both work.
+     Risks: from the headset the middle finger sits behind the index, so
+     ARKit infers it, and a half-curled middle finger flips the mode (needs
+     wide hysteresis and a short settle time before either trigger counts).
+  2. *Support-hand trigger.* Bring the off hand under the gun hand, within
+     about 12 cm of its wrist, and curl its index: +attack2, held as long as
+     the curl. It reads like a foregrip or an under-barrel launcher, and
+     holds work. Risks: it needs both hands, so there's no pinch movement
+     while alt-firing (arm swing still works). A support grip is a fist, and
+     today an off-hand fist stands the gun hand down (`gunHandBusy`, the
+     swing-entry guard), so that rule would need a "hands together"
+     exemption. It also mustn't engage the movement pinch: index curled
+     with the thumb away is no pinch, but the detector would need the
+     proximity gate too.
+  3. *Thumb flick.* A quick thumb curl and release (both thresholds crossed
+     in under 0.25 s, index extended throughout) presses +attack2 for a
+     beat. The held curl stays reload (its ring only starts at 0.25 s and
+     still takes 0.75 s). For weapons with no clip (gauss, hornet gun),
+     where reload means nothing, a held thumb holds +attack2 instead,
+     which covers the gauss charge. It's one-handed and leaves the trigger
+     alone. Risks: it shares reload's motion, so any noise in the thumb
+     ratio that makes a flick fires a grenade. The Glock's rapid fire
+     becomes taps, not a hold.
 
 ## Open — rendering
 
@@ -106,9 +98,9 @@ instead of deleting them.
   stock health, suit, ammo and flashlight readouts: ammo beside the gun hand,
   vitals over the off-hand forearm (fades in as the back of the forearm faces
   the eyes). Panels stand off their anchor toward the eyes and draw over
-  everything. Still stock: pain/damage arrows, pickup history, the weapon
-  wheel (no icons yet — next: per-slot icons from the `640hud*.spr` sprites
-  listed in `weapon_*.txt`), messages, console, menu. Offsets and the fade
+  everything. Still stock: pain/damage arrows, pickup history, messages,
+  console, menu. The hand weapon wheel draws its icons through the same
+  renderer (see Resolved). Offsets and the fade
   angle are first guesses (`HEVHUD.forearmClearance` / `gunClearance`).
 
 - **Gun-mounted flashlight: device check pending.** The flashlight now
@@ -432,6 +424,48 @@ instead of deleting them.
   reaches a full immersive space (and no duplicate pointer clicks), mouse
   turn feel and sensitivity, the flat viewmodel's placement, the menu
   cursor, and the auto switches both ways.
+- ~~No quick save / quick load~~ (device check pending) — hands: the weapon
+  wheel's SAVE and LOAD sectors (LOAD commits after 0.6 s held armed);
+  keyboard: F5/F6 save, F9/F7 load; gamepad: View/Options tap saves, a 1 s
+  hold loads.
+- ~~Weapon wheel is fixed at five sectors and has no icons~~ (device check
+  pending) — the wheel has one sector per weapon slot the player owns
+  anything in, published by the client (`cl_dll/vr/vr_hud.cpp`
+  `g_vr_wheel`, read through `lambda_wheel_state`), so Opposing Force's
+  seven slots and mods' slot counts just work. These follow the weapons:
+  LIGHT (`impulse 100`, once the suit is on), SAVE and LOAD. Settings
+  "Wheel: flashlight, quick save/load" turns those three off. Each weapon
+  sector shows the weapon a pick selects, the way hud_fastswitch's `slotN`
+  cycles a bucket (the next usable weapon after the one in hand). The pick
+  sends that classname, so picking a slot again cycles it, and dots under
+  the icon show the slot's weapons. Icons come from the `640hud*.spr`
+  sprites the `weapon_*.txt` lists name. They are decoded in the warm-up
+  (`HUDIconWarmup`) and vectorized into rectangles (`HUDIcon`), because
+  RAVEHolo draws no textures, then drawn as a hologram over the wedges
+  (`WeaponWheelPanel`); a weapon the warm-up didn't see shows its name.
+  Entries are captured as the wheel opens, and an armed sector holds until
+  the hand is clearly in a neighbour. Logic and real-sprite decoding are
+  checked by `Tools/HandsProbe`. On device: check icon legibility and size,
+  wheel radius (now 4.6–10.4 cm), the LOAD hold, and OF's 10-sector wheel.
+- ~~No flashlight toggle with hand tracking~~ (device check pending) — the
+  weapon wheel's LIGHT sector sends `impulse 100`.
+- ~~Long jump unreachable with hand tracking~~ (device check pending) — the
+  jump gesture now goes through `JumpSequencer`. At a run with the module,
+  it presses `+duck` and then `+jump` 0.1 s later, with the duck held. The
+  stick needs ≥ 0.85 deflection, the arm swing ≥ 0.75 of its speed, and
+  the player ≥ 200 u/s ground speed. Every other jump keeps the old
+  crouch-jump. The client publishes the server's `slj` physinfo
+  (`g_vr_longjump`, `lambda_has_longjump`), so a player without the module
+  never gets the duck-first order. Ledge jumps keep working: a long jump
+  rises higher than a crouch-jump (56 vs 45 units) with the duck held
+  through the flight, so it still clears a ledge, just with ~560 u/s of
+  carry. A ledge approached short of a full run keeps the crouch-jump, and
+  Settings "Long jump at a run" turns it off. No movement value changed.
+  Where the module turns up: Half-Life's campaign hands it out in `c3a2d`
+  (Lambda Core, just before Xen), and the hazard course `t0a0a` has one
+  too. No Opposing Force or Blue Shift campaign map carries an
+  `item_longjump`. Diagnostics: the `ground
+  speed:` line shows the jump kind and whether the module is owned.
 
 - ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
   orientation came from Valve's hand bone, which sits differently on every
