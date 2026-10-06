@@ -1,0 +1,96 @@
+# Unsigned compile check of the visionOS app: no game assets, no signing, no
+# device. Engine archives come from the prebuilt releases matching this commit
+# (scripts/fetch-prebuilts.sh); when no such release exists yet (first run, or
+# a change to the engine sources that the Prebuilt workflows haven't built),
+# the check is skipped with a warning instead of failing. It reruns on main
+# once a Prebuilt workflow finishes.
+#
+# The project references RAVESDK, RAVEEngine and DebugTrace as local packages
+# at ../../<name> from LambdaVision/, so they're checked out next to this repo.
+# They're public; if they ever go private, add a SIBLING_REPOS_TOKEN secret
+# (a fine-grained PAT with read access to them). Without access the check is
+# skipped with a warning.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_run:
+    workflows: [Prebuilt ANGLE, Prebuilt libxash]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: halflife-visionos
+
+      - id: rave_sdk
+        uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          repository: illixion/RAVESDK
+          path: RAVESDK
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+      - id: rave_engine
+        uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          repository: illixion/RAVEEngine
+          path: RAVEEngine
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+      - id: debugtrace
+        uses: actions/checkout@v7
+        continue-on-error: true
+        with:
+          repository: illixion/DebugTrace
+          path: DebugTrace
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+
+      - name: Fetch prebuilt engine archives
+        id: prebuilts
+        working-directory: halflife-visionos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIBLINGS_OK: ${{ steps.rave_sdk.outcome == 'success' && steps.rave_engine.outcome == 'success' && steps.debugtrace.outcome == 'success' }}
+        run: |
+          ./scripts/fetch-prebuilts.sh
+          ready=true
+          if [[ "$SIBLINGS_OK" != true ]]; then
+            echo "::warning::RAVESDK/RAVEEngine/DebugTrace checkout failed (private without SIBLING_REPOS_TOKEN?); skipping the compile check."
+            ready=false
+          fi
+          for f in LambdaVision/Vendor/libxash/libxash.a LambdaVision/Vendor/angle/libANGLE.a LambdaVision/Vendor/angle/include; do
+            if [[ ! -e "$f" ]]; then
+              echo "::warning::$f has no prebuilt release for these sources ($(./scripts/prebuilt-keys.sh | tr '\n' ' ')); skipping the compile check. Run the Prebuilt workflows."
+              ready=false
+            fi
+          done
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+      - name: Compile (Release, unsigned)
+        if: steps.prebuilts.outputs.ready == 'true'
+        working-directory: halflife-visionos
+        run: |
+          xcodebuild -version
+          xcodebuild -project LambdaVision/LambdaVision.xcodeproj -scheme LambdaVision \
+            -destination 'generic/platform=visionOS' -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+            build
