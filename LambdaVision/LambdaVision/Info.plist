@@ -22,7 +22,11 @@
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Used by developer debugging sessions launched from a Mac.</string>
+	<string>Manage over Wi-Fi lets a browser on your network add, choose and delete games. Developer builds also serve a debug API to a Mac.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 	<key>GCSupportsControllerUserInteraction</key>
 	<true/>
 	<key>NSHandsTrackingUsageDescription</key>

@@ -229,6 +229,15 @@ so `Documents/GameData` is empty again and the app shows an on-screen
 warning to re-run `push-assets.sh`. The engine prefers `Documents/GameData`
 as `-rodir` when `valve/liblist.gam` is present there.
 
+Without a cable: open **Manage over Wi-Fi** (the Wi-Fi button in the main
+window), then either open the address it shows in any browser on the same
+network and drop the `HalfLifeAssets` folder onto the page, or run
+`./scripts/push-assets.sh --wifi <host:port>` and type the PIN it shows.
+Both send only the files that differ and resume an interrupted transfer;
+the server stops when the window closes. To try the page on the Mac,
+`swift run library-server <some GameData dir>` in
+`LambdaVision/Packages/GameLibrary`.
+
 `push-assets.sh` also mounts `valve_hd/` for you: if it's present and
 `valve/vfs.cfg` doesn't already exist, it pushes a `vfs.cfg` containing
 `fs_mount_hd "1"` — `FS_LoadGameInfo` execs that before mounting gamedirs,

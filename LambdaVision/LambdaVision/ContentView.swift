@@ -19,6 +19,7 @@ struct ContentView: View {
 
     @State private var showSettings = false
     @State private var showImporter = false
+    @State private var showWiFi = false
     @State private var cheatsEnabled = false
     @State private var bridgeStatus: String = "—"
     @State private var vulkanStatus: String = "—"
@@ -53,7 +54,7 @@ struct ContentView: View {
                 if library.scan == nil {
                     ProgressView("Looking for games…")
                 } else if library.games.isEmpty {
-                    GameOnboarding { showImporter = true }
+                    GameOnboarding(onImport: { showImporter = true }, onWiFi: { showWiFi = true })
                 } else {
                     GameLibraryList()
                     ToggleImmersiveSpaceButton()
@@ -108,6 +109,14 @@ struct ContentView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        showWiFi = true
+                    } label: {
+                        Image(systemName: "wifi")
+                    }
+                    .help("Manage over Wi-Fi")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         showSettings = true
                     } label: {
                         Image(systemName: "gearshape")
@@ -117,6 +126,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView().environment(appModel)
+            }
+            // The server runs exactly as long as this sheet is up.
+            .sheet(isPresented: $showWiFi) {
+                WiFiManageView(library: appModel.library)
             }
             .onAppear { runSmokeTests() }
             // Library scan + weapon warm-up; rerun the warm-up when the
