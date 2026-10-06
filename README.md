@@ -292,7 +292,10 @@ is played with hand tracking:
 | Reload | Curl your thumb down with the index extended, hold until the ring fills |
 | Move | Pinch thumb+index with the other hand and drag like a joystick |
 | Jump / crouch | Raise or drop the pinched hand |
-| Switch weapon | Pinch all fingertips together, move toward a sector, release |
+| Long jump | Jump at a full run once you have the long jump module (Settings → *Long jump at a run*) |
+| Switch weapon | Pinch all fingertips together, move toward a weapon's icon, release; pick a slot again to cycle it |
+| Flashlight | Weapon wheel → LIGHT |
+| Quick save / load | Weapon wheel → SAVE, or LOAD (hold it armed until its outer arc fills) |
 | Use / buttons | Poke with the off-hand index finger; rest an open palm on chargers |
 | Train throttle | Poke the console, then pinch and push/pull; poke again to let go |
 
