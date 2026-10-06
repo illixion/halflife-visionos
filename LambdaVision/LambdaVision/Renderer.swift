@@ -294,14 +294,17 @@ actor Renderer {
     nonisolated(unsafe) static var thumbCurlOff: Float = 0.60  // extension above this → hold cancels
     nonisolated(unsafe) static var reloadHoldSeconds: Double = 0.75
     // 🤌 radial weapon menu (dominant hand): pinch ALL fingertips to the
-    // thumb to open, move the hand toward a sector, release to select
-    // (slot1..slot5, 12 o'clock = slot1, clockwise). Enter/exit hysteresis
-    // on the tip spread; the fist gate keeps a clenched fist from opening
-    // it; the deadzone means release-in-place cancels.
+    // thumb to open, move the hand toward a sector, release to select. One
+    // sector per occupied weapon slot plus the flashlight and quick
+    // save/load (WeaponWheel; 12 o'clock = first, clockwise). Enter/exit
+    // hysteresis on the tip spread; the fist gate keeps a clenched fist
+    // from opening it; the deadzone means release-in-place cancels.
     nonisolated(unsafe) static var menuPinchEnter: Float = 0.055  // max tip↔thumb spread, m
     nonisolated(unsafe) static var menuPinchExit: Float = 0.085
     nonisolated(unsafe) static var menuFistGate: Float = 0.05     // middle tip↔metacarpal must exceed
     nonisolated(unsafe) static var menuDeadzoneM: Float = 0.04    // hand travel before a sector arms
+    /// The wheel's flashlight, quick save and quick load sectors (Settings).
+    nonisolated(unsafe) static var weaponWheelUtilities = true
     // Weapon grip correction (applied in the hand-bone-local frame between the
     // world hand frame and the GoldSrc→metres basis). GoldSrc hand bones and
     // ARKit hand frames don't line up perfectly; these Euler degrees + push
@@ -358,6 +361,8 @@ actor Renderer {
         var menuSpread: Float = 0 // live 🤌 fingertip spread, m
         var menuOpen = false      // radial weapon menu currently up
         var menuSel = -1          // armed sector (0-based; -1 = none/cancel)
+        var menuLabel = "—"       // the armed entry's label
+        var menuCount = 0         // sectors on the open wheel
         var useReach: Float = 0   // off-hand fingertip forward reach, m
         var useHeld = false       // +use currently held by the reach gesture
         var onTrain = false       // server says we're controlling a train
@@ -378,6 +383,7 @@ actor Renderer {
         var offHandFist = false   // off hand is a fist (gun hand stands down)
         var gunBusy = false       // gun-hand gestures suppressed by the swing
         var groundSpeed: Float = 0 // player's horizontal speed, units/s (stock run = 320)
+        var jumpKind = "—"        // hand jump in progress: crouch / long / —
     }
     nonisolated(unsafe) static var aimDiag = AimDiag()
 
@@ -398,8 +404,8 @@ actor Renderer {
             String(format: "reload: thumbExt %.2f  hold %d%%",
                    d.thumbExt, Int(d.reloadProg * 100)),
             String(format: "wpn menu: spread %.3f  %@  sel %@",
-                   d.menuSpread, d.menuOpen ? "OPEN" : "—",
-                   d.menuSel >= 0 ? "slot\(d.menuSel + 1)" : "—"),
+                   d.menuSpread, d.menuOpen ? "OPEN \(d.menuCount)" : "—",
+                   d.menuSel >= 0 ? d.menuLabel : "—"),
             String(format: "use: reach %.2f  %@   train: %@",
                    d.useReach, d.useHeld ? "HELD" : "—",
                    d.onTrain ? "gear \(d.trainGear)" : "—"),
@@ -410,8 +416,30 @@ actor Renderer {
             String(format: "swing: %@ %@ (%@)  speed %.2f  stroke %.2f m/s  offFist %@  gun %@",
                    d.swingEngaged ? "ON" : "off", d.swingArms, d.swingSupport, d.swingSpeed01,
                    d.swingHandSpeed, d.offHandFist ? "Y" : "N", d.gunBusy ? "held" : "free"),
-            String(format: "ground speed: %.0f u/s", d.groundSpeed),
+            String(format: "ground speed: %.0f u/s  jump %@  long jump module %@", d.groundSpeed, d.jumpKind,
+                   lambda_has_longjump() == 1 ? "Y" : "N"),
         ]
+    }
+
+    /// The weapon wheel's entries as the client publishes its slots now
+    /// (WeaponWheel.entries). Asked once, as the wheel opens.
+    nonisolated static func weaponWheelEntries() -> [WeaponWheel.Entry] {
+        var raw = [lambda_wheel_slot_t](repeating: lambda_wheel_slot_t(), count: 16)
+        var allowed: Int32 = 0
+        let n = Int(raw.withUnsafeMutableBufferPointer { lambda_wheel_state($0.baseAddress, 16, &allowed) })
+        let slots: [WeaponWheel.Slot] = (0..<max(0, n)).map { i in
+            let r = raw[i]
+            let name = withUnsafeBytes(of: r.name) { b in
+                String(decoding: b.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            return WeaponWheel.Slot(slot: Int(r.slot), weaponID: Int(r.weapon_id), pickIndex: Int(r.pick_index),
+                                    ownedCount: Int(r.owned_count), holding: r.flags & 1 != 0,
+                                    empty: r.flags & 2 != 0, name: name)
+        }
+        var hud = lambda_hud_state_t()
+        lambda_hud_state(&hud)
+        return WeaponWheel.entries(slots: slots, selectionAllowed: n > 0 && allowed != 0,
+                                   hasSuit: hud.has_suit != 0, utilities: weaponWheelUtilities)
     }
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
@@ -946,12 +974,11 @@ actor Renderer {
     private var reloadHeld = false
     private var reloadRingProgress: Float = 0
 
-    // Radial weapon menu state (render thread). Non-nil anchor = menu open,
-    // holding the wrist position where the 🤌 engaged; selection is the
-    // armed sector index (-1 inside the deadzone). Selection commits on a
-    // clean release (spread past exit); a lost hand or engine menu cancels.
-    private var weaponMenuAnchor: SIMD3<Float>? = nil
-    private var weaponMenuSelected = -1
+    // Radial weapon menu state (render thread): WeaponWheelGesture holds the
+    // point where the 🤌 engaged, the entries captured as it opened and the
+    // armed sector (-1 inside the deadzone). Selection commits on a clean
+    // release (spread past exit); a lost hand or engine menu cancels.
+    private var weaponWheel = WeaponWheelGesture()
 
     init(_ layerRenderer: LayerRenderer, appModel: AppModel) {
         self.layerRenderer = layerRenderer
@@ -1974,45 +2001,34 @@ actor Renderer {
                                                 + body.velocity.1 * body.velocity.1).squareRoot()
             }
 
-            let hadWeaponMenu = weaponMenuAnchor != nil
-            if gesturesLive,
-               !gunHandBusy, let hand = handSample {
+            if gesturesLive, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.menuSpread = hand.pinchAllSpread
-                if !hadWeaponMenu {
-                    if hand.pinchAllSpread < Renderer.menuPinchEnter,
-                       hand.middleCurlM > Renderer.menuFistGate,
-                       !fireGestureDown {
-                        weaponMenuAnchor = hand.worldGrip
-                        weaponMenuSelected = -1
-                    }
-                } else if hand.pinchAllSpread > Renderer.menuPinchExit {
-                    if weaponMenuSelected >= 0 {
-                        _ = "slot\(weaponMenuSelected + 1)".withCString { lambda_gl_worker_cmd($0) }
-                    }
-                    weaponMenuAnchor = nil
-                    weaponMenuSelected = -1
-                } else if let mAnchor = weaponMenuAnchor, let da = frameDeviceAnchor {
-                    let hm = da.originFromAnchorTransform
-                    let hr = SIMD3<Float>(hm.columns.0.x, hm.columns.0.y, hm.columns.0.z)
-                    let hu = SIMD3<Float>(hm.columns.1.x, hm.columns.1.y, hm.columns.1.z)
-                    let d = hand.worldGrip - mAnchor
-                    let dx = simd_dot(d, hr)
-                    let dy = simd_dot(d, hu)
-                    if (dx * dx + dy * dy).squareRoot() > Renderer.menuDeadzoneM {
-                        var ang = atan2f(dx, dy)   // 0 = up, clockwise positive
-                        if ang < 0 { ang += 2 * .pi }
-                        weaponMenuSelected = Int(ang / (2 * .pi / 5)) % 5
-                    } else {
-                        weaponMenuSelected = -1
-                    }
-                }
-            } else if hadWeaponMenu {
-                weaponMenuAnchor = nil     // hand lost / gesture off / swinging → cancel
-                weaponMenuSelected = -1
             }
-            let weaponMenuOpen = weaponMenuAnchor != nil
+            var wheelTuning = WeaponWheelGesture.Tuning()
+            wheelTuning.pinchEnter = Renderer.menuPinchEnter
+            wheelTuning.pinchExit = Renderer.menuPinchExit
+            wheelTuning.fistGate = Renderer.menuFistGate
+            wheelTuning.deadzone = Renderer.menuDeadzoneM
+            let wheelHand = gesturesLive && !gunHandBusy ? handSample : nil
+            let wheelHead = frameDeviceAnchor?.originFromAnchorTransform
+            if let picked = weaponWheel.update(
+                live: wheelHand != nil && wheelHead != nil,
+                spread: wheelHand?.pinchAllSpread ?? 1,
+                middleCurl: wheelHand?.middleCurlM ?? 0,
+                triggerHeld: fireGestureDown,
+                grip: wheelHand?.worldGrip ?? .zero,
+                right: wheelHead.map { SIMD3($0.columns.0.x, $0.columns.0.y, $0.columns.0.z) } ?? SIMD3(1, 0, 0),
+                up: wheelHead.map { SIMD3($0.columns.1.x, $0.columns.1.y, $0.columns.1.z) } ?? SIMD3(0, 1, 0),
+                now: presentTime, tuning: wheelTuning,
+                makeEntries: { Renderer.weaponWheelEntries() }) {
+                _ = WeaponWheel.command(for: picked.action).withCString { lambda_gl_worker_cmd($0) }
+                AppLog.input.debug("[Wheel] picked \(picked.label, privacy: .public)")
+            }
+            let weaponMenuOpen = weaponWheel.isOpen
             Renderer.aimDiag.menuOpen = weaponMenuOpen
-            Renderer.aimDiag.menuSel = weaponMenuSelected
+            Renderer.aimDiag.menuSel = weaponWheel.selected
+            Renderer.aimDiag.menuCount = weaponWheel.entries.count
+            Renderer.aimDiag.menuLabel = weaponWheel.selected >= 0 ? weaponWheel.entries[weaponWheel.selected].label : "—"
 
             // Finger-gun trigger (opt-in). Reconcile the held +attack state
             // with the current index curl each frame: pull below fireCurlOn,
@@ -2358,7 +2374,8 @@ actor Renderer {
         var hudRenderer: RAVEHoloRenderer? = nil
         // The palm debug panel's pinchable buttons (tracking areas) this frame.
         var debugTargets: [UInt64: UInt32] = [:]
-        if Renderer.hevHUDEnabled || Renderer.aimReticle != .off || Renderer.debugPanelEnabled,
+        if Renderer.hevHUDEnabled || Renderer.aimReticle != .off || Renderer.debugPanelEnabled
+            || weaponWheel.isOpen,
            let holo = hevHUD.ensureRenderer(
             device: device, colorFormat: layerRenderer.configuration.colorFormat,
             depthFormat: layerRenderer.configuration.depthFormat,
@@ -2386,10 +2403,21 @@ actor Renderer {
                     debugTargets = RAVEHoloCompositor.registerTargets(of: scene, on: drawable)
                 }
             }
+            if let center = weaponWheel.anchor {
+                let wheel = WeaponWheelPanel.panel(
+                    entries: weaponWheel.entries, selected: weaponWheel.selected, center: center,
+                    right: SIMD3(headM.columns.0.x, headM.columns.0.y, headM.columns.0.z),
+                    up: SIMD3(headM.columns.1.x, headM.columns.1.y, headM.columns.1.z),
+                    font: holo.font, confirm: weaponWheel.confirmProgress(now: drawable.frameTiming.presentationTime.timeInterval),
+                    icon: { HUDIconStore.shared.icon(for: $0) })
+                if hudScene == nil { hudScene = RAVEHoloScene() }
+                hudScene?.panels.append(wheel)
+            }
             if hudScene != nil { hudRenderer = holo }
         }
         if !Renderer.debugPanelEnabled { palmDebug.reset() }
         let supplementalPassActive = weaponActive || joystickVisible || body != nil || hudScene != nil
+            || weaponWheel.isOpen
         if supplementalPassActive {
             weaponPass.ensureDepth(width: drawable.colorTextures[0].width,
                                    height: drawable.colorTextures[0].height,
@@ -2647,6 +2675,37 @@ actor Renderer {
                 ))
             }
 
+            // Radial weapon menu: one wedge per entry around the point where
+            // the 🤌 engaged, the armed one grown and lit; its icons and
+            // labels are a hologram over them (WeaponWheelPanel, in the HUD
+            // scene). A confirm-hold entry (quick load) fills a thin outer
+            // arc while it is held armed.
+            if let mAnchor = weaponWheel.anchor {
+                let n = weaponWheel.entries.count
+                let gap = WeaponWheelPanel.gapTurns
+                for i in 0..<n {
+                    let armed = (i == weaponWheel.selected)
+                    arcs.append(WeaponPass.Arc(center: mAnchor,
+                                               right: headRight, up: headUp,
+                                               innerR: armed ? WeaponWheelPanel.armedInnerR : WeaponWheelPanel.innerR,
+                                               outerR: armed ? WeaponWheelPanel.armedOuterR : WeaponWheelPanel.outerR,
+                                               color: armed ? SIMD4(1.0, 0.78, 0.25, 1)
+                                                            : SIMD4(0.30, 0.31, 0.35, 1),
+                                               startTurns: Float(i) / Float(n) + gap,
+                                               sweepTurns: 1.0 / Float(n) - 2 * gap))
+                }
+                if let confirm = weaponWheel.confirmProgress(now: drawable.frameTiming.presentationTime.timeInterval),
+                   weaponWheel.selected >= 0 {
+                    arcs.append(WeaponPass.Arc(center: mAnchor,
+                                               right: headRight, up: headUp,
+                                               innerR: WeaponWheelPanel.armedOuterR + 0.003,
+                                               outerR: WeaponWheelPanel.armedOuterR + 0.008,
+                                               color: SIMD4(0.95, 0.95, 0.95, 1),
+                                               startTurns: Float(weaponWheel.selected) / Float(n) + gap,
+                                               sweepTurns: (1.0 / Float(n) - 2 * gap) * confirm))
+                }
+            }
+
             // Hand-anchored placement from the LIVE hand frame this frame — no
             // engine round-trip, so head rotation can't shear it (the drift the
             // engine-side path had). Skip drawing when the hand isn't tracked.
@@ -2699,9 +2758,9 @@ actor Renderer {
                 }
 
                 // UI arcs, billboarded to the head so they read from any
-                // angle: the reload-hold ring floats above the weapon; the
-                // radial weapon menu draws five sector wedges around the
-                // point where the 🤌 engaged, the armed one highlighted.
+                // angle: the reload-hold ring floats above the weapon (the
+                // weapon wheel's wedges are drawn above, with or without a
+                // weapon in hand).
                 // A world model has no reload animation, so while one is
                 // held the same ring then follows the reload itself (the
                 // viewmodel's reload sequence, still played underneath), in
@@ -2718,20 +2777,6 @@ actor Renderer {
                                                innerR: 0.022, outerR: 0.030,
                                                color: SIMD4(0.85, 0.92, 1.0, 1),
                                                startTurns: 0, sweepTurns: reload))
-                }
-                if let mAnchor = weaponMenuAnchor {
-                    let gap: Float = 0.012   // turns of separation between sectors
-                    for i in 0..<5 {
-                        let armed = (i == weaponMenuSelected)
-                        arcs.append(WeaponPass.Arc(center: mAnchor,
-                                                   right: headRight, up: headUp,
-                                                   innerR: armed ? 0.050 : 0.055,
-                                                   outerR: armed ? 0.098 : 0.088,
-                                                   color: armed ? SIMD4(1.0, 0.78, 0.25, 1)
-                                                                : SIMD4(0.45, 0.47, 0.52, 1),
-                                                   startTurns: Float(i) / 5 + gap,
-                                                   sweepTurns: 1.0 / 5 - 2 * gap))
-                    }
                 }
                 // Train-throttle gear ladder: five rings stacked above the
                 // grab point (R at the bottom, full speed on top); the ring

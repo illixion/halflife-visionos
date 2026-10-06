@@ -106,6 +106,8 @@ enum AppSettingsStore {
     private static let armSwingEnabledKey     = "lambdavision.settings.armSwingEnabled"
     private static let armSwingDirectionKey   = "lambdavision.settings.armSwingDirection"
     private static let armSwingSensitivityKey = "lambdavision.settings.armSwingSensitivity"
+    private static let longJumpKey            = "lambdavision.settings.handLongJump"
+    private static let wheelUtilitiesKey      = "lambdavision.settings.wheelUtilities"
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
     private static let avatarBodyKey          = "lambdavision.settings.avatarBody"
     private static let avatarLegsKey          = "lambdavision.settings.avatarLegs"
@@ -169,6 +171,14 @@ enum AppSettingsStore {
     static var armSwingSensitivity: Double {
         get { double(armSwingSensitivityKey, 1.0) }
         set { defaults.set(newValue, forKey: armSwingSensitivityKey) }
+    }
+    static var handLongJump: Bool {
+        get { bool(longJumpKey, true) }
+        set { defaults.set(newValue, forKey: longJumpKey) }
+    }
+    static var wheelUtilities: Bool {
+        get { bool(wheelUtilitiesKey, true) }
+        set { defaults.set(newValue, forKey: wheelUtilitiesKey) }
     }
     static var fastWeaponSwitch: Bool {
         get { bool(fastWeaponSwitchKey, true) }  // engine startup sets hud_fastswitch 1

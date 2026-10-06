@@ -48,7 +48,7 @@ final class WeaponPass {
         var startTurns: Float
         var sweepTurns: Float
     }
-    static let maxArcs = 16
+    static let maxArcs = 24   // a full weapon wheel (up to ~12 sectors) beside the other rings
     private static let arcSlotStride = 256   // constant-buffer slot alignment
 
     /// A second skinned model drawn alongside the weapon: the player body.
