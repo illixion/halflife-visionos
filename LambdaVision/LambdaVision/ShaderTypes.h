@@ -196,7 +196,9 @@ typedef struct
     // target's size divisor against the engine image (0 = 3).
     simd_float4 sspr[2];
     // x = Settings → Diagnostics "Water mirror view": 0 off, 1 the mirror on
-    // water, 2 its confidence, 3 the mirror target over the whole view.
+    // water, 2 its confidence, 3 the mirror target over the whole view;
+    // y = sharp water's underside brightness ("waterUnderside", a share of
+    // the occluder's top; 0 = leave those rays to the probe).
     simd_float4 waterDebug;
 } DisplayParams;
 

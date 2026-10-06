@@ -228,7 +228,18 @@ instead of deleting them.
   height and 4 units under it) and shows the nearest surface short of that,
   or the probe. DepthProbe's new see-through check (fine trace, 3% rule)
   fails b2e7e18 at the table's -5…33° pitch series (6–19%); now 1.5–2.2%,
-  every view ≤ 2.9%. Handoff: `docs/plans/sharp-water-handoff.md`.
+  every view ≤ 2.9%. Confirmed on device: the jagged see-through is gone
+  (resolve 1.25 ms there, total 1.72).
+- **Sharp water, round 12: device check pending.** Blocked rays show an
+  underside (the top above the point reached, darkened by the debug key
+  `waterUnderside`, 0.35) instead of the probe's blur of the cabinet.
+  Close and crouched (eye level with the top), occluders now claim the
+  mirror out to the top's edges and the resolve gathers them four ways:
+  DepthProbe view 91 see-through 9.5% → 0.05%, no stairs. New checks:
+  rolled-head stereo pairs and both eye slices (pass on round 11 too; the
+  right-eye-only stipple was not reproduced). Resolve ×0.9 of round 11
+  offline (≈1.1 ms expected), total ≈1.65 ms, still a little over budget.
+  Handoff: `docs/plans/sharp-water-handoff.md`.
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

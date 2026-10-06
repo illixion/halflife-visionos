@@ -1,4 +1,4 @@
-# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 11)
+# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 12)
 
 Self-contained state of the glass/water reflection work for the next agent.
 Longer history: `docs/plans/modern-lighting.md` sections 3–3l, `ISSUES.md`.
@@ -57,21 +57,33 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
      water-marked sources (stencil ≥ 16) keep only occluders (the counter
      under the sink's water box). atomic_min key = 11-bit log distance |
      occluder flag | 10-bit src y | 10-bit src x (a surface wins a tie).
-     Timer `gMirrorProject`.
-  3. `ssprResolve` — candidates: own key, the **nearest** (by distance)
-     surface key and the nearest occluder key up and down within `SSPR_FILL`
-     (8) rows, left/right; surfaces merged if same distance, occluders if same
-     height (≤ 5 surfaces, ≤ 2 occluder heights). `SSPR_SUB_X×Y` (2×2) exact
-     mirrored rays per texel: each surface's depth → exact source coord →
-     verify with engine depth (smallest miss wins; single surface skips
-     verify; none → first surface's own source). **Occluder test**, only
-     short of the chosen sample's real distance: where the ray climbs to the
-     occluder's height − `SSPR_SLAB` (4) and to its height, a surface on
-     screen on or in front of that point and no higher than the occluder →
-     blocked; then the nearest-checking surface short of the block, else the
-     sub-ray is empty (probe). Colour = 4 bilinear taps ±0.5 px (2×2 box);
-     confidence = edge fade (15%) of the **mean exact projection of all
-     surfaces**. Timer `gMirror`.
+     **Occluder claims** (round 12): an occluder also writes its key along
+     the line to its +y source neighbour's image (and to its ±x neighbour's
+     at the top's side edges); past the top's edge that neighbour is taken
+     where its ray meets the top's plane (≤ 256 units), at most `SSPR_SPAN`
+     (48) texels. Timer `gMirrorProject`.
+  3. `ssprResolve` (threadgroups of 16 × 8, which the tile below assumes) —
+     the group's keys plus `SSPR_FILL` (6) texels around are loaded into
+     threadgroup memory once. Candidates: own key, the **nearest** (by
+     distance) surface key up and down within 6, left/right; the nearest
+     occluder key in each of the four directions within 6; surfaces merged
+     if same distance, occluders if same height (≤ 5 surfaces, ≤ 3 occluder
+     heights). **Occluder test** (`ssprOcclude`) once per texel on its centre
+     ray: where the ray climbs to an occluder's height − `SSPR_SLAB` (4) and
+     to its height, a surface on screen on or in front of that point, at the
+     occluder's height (between hz − 5 and hz + 1: the top or rim, not a leg)
+     → blocked; results shared through threadgroup memory. `SSPR_SUB_X×Y`
+     (2×2) exact mirrored rays per texel: each surface's depth → exact source
+     coord → verify with engine depth (smallest miss wins; single surface
+     skips verify unless a block is near; surfaces whose real distance lies
+     past the texel's block skipped; none → first surface's own source,
+     unless blocked). A sub-ray whose texel and three neighbours toward it
+     agree takes the texel's block; at an outline it runs its own test.
+     Blocked nearer than the shown surface → **underside**: the top right
+     above the point reached, × `waterDebug.y` ("waterUnderside", 0.35; 0 =
+     probe), confidence from that sample's frame edge. Surface colour = 4
+     bilinear taps ±0.5 px (2×2 box); confidence = edge fade (15%) of the
+     **mean exact projection of all surfaces**. Timer `gMirror`.
   Plane choice: `SharpWater.planes` = highest horizontal water row below the
   eye. Renderer encodes it before the composite only when an eye has one.
 - GPU timers: `GPUPassTimer` marks start, mirrorFill, mirrorProject, mirror,
@@ -91,8 +103,12 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Moiré in mirrored sink water box | fixed on device per first capture (glass/water sources rejected + 2×2 box) |
 | Prefilter pass 1.75 ms | fixed (box taps in resolve) |
 | Wavy lines following ripple (comb) | reduced in 96c7ddc (composite neighbour search removed, 8-row fill); **b2e7e18 untested on device**: smooth confidence + ripple-free coverage |
-| Comb across the whole mirrored table underside | b2e7e18 failed on device (rows of locker); **round 11 untested**: occluders, see below |
-| Underside looks transparent, depends on head pitch | b2e7e18 failed on device; **round 11 untested**: see-through 1.5–2.2% over −5…33° offline (b2e7e18 6–19%) |
+| Comb across the whole mirrored table underside | fixed on device by round 11 (3c8241d) |
+| Underside looks transparent, depends on head pitch | jagged see-through fixed on device by round 11 |
+| Underside a blur showing the cabinet (probe fallback) | **round 12 untested**: underside fill (`waterUnderside`) |
+| Close, crouched: row of blocks at the table's mirrored edge, stair-stepped rim/underside outline | **round 12 untested**: occluder claims to the top's edges, 4-way occluder gather, outline tests per sub-ray; view 91 see-through 9.5% → 0.05% |
+| Right eye only: dark stipple near the far legs (strong roll) | **not reproduced offline**; round 12's both-eye and rolled-stereo checks pass on 3c8241d and now; see round 12 |
+| Both eyes: blocky occluder edges under the near table | **round 12 untested**: as the close-up row |
 
 ### Round 11: why the table was transparent, and the fix
 The eye sees the steel table's top; the reflected ray always climbs, so it
@@ -124,6 +140,53 @@ counter's shadow band at view 62.
 
 If it still shows: `SSPR_SLAB` (4) is the assumed thickness (thicker tops
 need more); `SSPR_BACKFACE` (0.1) decides what counts as a top.
+
+### Round 12: underside, close-up stairs, roll, cost
+Device on 3c8241d: see-through gone; resolve 1.25 ms (project 0.44, fill
+0.03, total 1.72). Four reports and what came of them:
+1. *Underside a blur showing the cabinet.* The probe is a world-fixed cube
+   that knows nothing of the table. A blocked sub-ray now shows the top
+   right above the point it reached (on screen, continuous, the same world
+   spot for either test height, so stereo-consistent) at `waterUnderside`
+   (0.35) of its brightness; the debug API key A/Bs it live (0 = round 11's
+   probe). The first try sampled the occluder's own source pixel or the
+   crossing's screen point: bands, since rim and top alternated per texel.
+2. *Close, crouched (view 91: eye level with the top).* The top is a few
+   source rows seen edge-on that mirror across dozens of rows; the resolve's
+   8-row fill missed most, and the room behind won (see-through 9.5%). The
+   occluder claims (project) fill between rows; the first version stopped a
+   source row short of the top's edge at every row, so the claimed patch,
+   and with it the underside, was a staircase. Claims now run to where the
+   neighbour's ray meets the top's plane, the resolve gathers occluders four
+   ways, and the occluder hit must be a surface at the occluder's height (a
+   leg in front had produced stripes beside the table). The underside's
+   confidence comes from its own sample (the surfaces' projections ran off
+   the frame and the probe showed through in steps).
+3. *Right eye only, strong roll: dark stipple.* Not reproduced. New checks:
+   rolled stereo pairs (93/94 @+30°, 93/95 @−30°, @±55° by hand) and both
+   eye slices dispatched together; both pass on 3c8241d and on round 12. The
+   both-eye check did catch one real slip during this round (the key tile
+   loaded with a fixed thread stride; groups at the grid's edge have fewer
+   threads, garbage differed per slice) — fixed before commit. An early
+   roll synthesis with nearest-sampled depth made a grazing top's facing
+   flip in rows (stripes like the report); natively rendered depth does not
+   do that, so if the stipple returns, check `waterMirrorView=onWater` in
+   that eye and the occluder keys (`SSPR_KEYS`) with a dump of that pose.
+4. *Blocky occluder edges under the near table.* Same family as 2.
+Cost: per-sub-ray occluder tests were half the resolve; now one test per
+texel plus outline sub-rays, the key tile in threadgroup memory, and
+`SSPR_FILL` 8 → 6 (4 fails the comb check at 91: +2.67). Per-surface
+arrays for re-choosing were dropped (register pressure: the whole sub-ray
+loop slowed with them even when nothing was blocked).
+
+What to look at on the headset: under the table (81–88 pose, 963 −471
+−542) a darker, slightly textured underside instead of the locker blur;
+`waterUnderside` 0…1 on the debug API to taste. Crouched close (1023 −479,
+eye −543.5, pitch 13, yaw −10.5): one smooth underside between the legs,
+no row of blocks at the mirrored edge, no stairs. Rolled head: no stipple
+in either eye. Residuals offline: stretched side-rim texels beside the
+underside at view 91 (dark, reads as underside), a few light dots near the
+far edge there.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror
@@ -157,11 +220,19 @@ Runs the real shaders on Mac dumps. Env: `SHARP=0` (probe only), `RIPPLE=x`
   behind a table's edge does not count); of the rays that meet a hidden
   underside first, the confidence-weighted share the mirror shows clearly
   farther (> 1.05·hit + 8; the resolve's `SSPR_DEBUG` record) must be ≤ 3%.
-  b2e7e18: 81–88 6–19%, 41 12%, 71–73 4–6.5%, 33 4%; round 11 ≤ 2.9%.
-Tool switches: `SHADERS=path` runs another Shaders.metal (A/B; add the
-`SSPR_DEBUG` blocks to an old one), `SSPR_TIMING=1` times project/resolve on
-the Mac GPU (50 dispatches per command buffer; only ratios carry over),
-`SSPR_KEYS=prefix` dumps the key buffer and the debug record.
+  b2e7e18: 81–88 6–19%, 41 12%, 71–73 4–6.5%, 33 4%; round 11 ≤ 2.9% but
+  91 9.5%; round 12 ≤ 0.9% everywhere (91 0.05%).
+- **both eyes** (round 12): project + resolve dispatched as the app does
+  (grid depth 2, the same view in both slices): slices identical.
+- **rolled heads** (round 12): `vrdumpN.bin@deg` re-renders a dump rolled
+  about its forward axis; 93/94@30 and 93/95@−30 are stereo pairs an eye
+  apart along the rolled right vector (stereo rule as above).
+Tool switches: `SHADERS=path/Shaders.metal` runs another version (A/B; the
+file must end in .metal; add the `SSPR_DEBUG` blocks to an old one),
+`SSPR_DEFINES=-D…` overrides shader constants, `SSPR_TIMING=1` times
+project/resolve on the Mac GPU (50 dispatches per command buffer; only
+ratios carry over), `SSPR_KEYS=prefix` dumps the key buffer and the debug
+record, `UNDERSIDE=x` the underside brightness (0.35), `MIRRORVIEW=1|2|3`.
 Known failing, not regressions: gaze pairs that differ in pitch/yaw at
 views 62/63, 71–74 and 81–88 (4–7/255; the mirror holds only what is on
 screen) and the probe view at 63 (13.0, probe from 62's origin).
@@ -179,8 +250,13 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
 - 71–74 (1230 −400, yaw 199, pitch 0/12/25/37: steel table, pitch series).
 - 81–88 (eye 963 −471 −514 = origin z −542, yaw 15.2: the device's
   transparent-table view; pitch −2/3/8/15/23/33, 87 −5, 88 11.6); probe 81.
+- 91 (eye 1023.4 −479.1 −543.5 = origin z −571.5, yaw 349.5, pitch 13: the
+  device's close, crouched capture; eye level with the table top); probe 91.
+- 93 (eye 1023 −479 −514, yaw 349.5, pitch 35), 94 / 95 (2.5 units along
+  the right vector of that view rolled +30° / −30°); probe 93.
   Groups as run: 9 10 11 +probe9; 31 32 33 +31; 41 +41; 51 +51; 61 +61;
-  62 63 +62; 71–74 +71; 81–88 +81 (one probe per run: the first).
+  62 63 +62; 71–74 +71; 81–88 +81; 91 +91; 93 94 93@30 94@30 93@-30 95@-30
+  +93 (one probe per run: the first).
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
 Each dump needs its own probe (`r_vrprobedump`) from the same origin.
 
@@ -216,6 +292,16 @@ viewmodel.
   project 0.39 / resolve 0.77 / fill 0.03: expect ≈0.5 + ≈0.9 + 0.03 ≈
   1.45 ms. A first version that tested occluders on every sub-ray cost
   resolve ×2.2.
+- round 11 on device (3c8241d, table): fill 0.03, project 0.44, resolve
+  1.25, gComposite 4.62, gpuQueue 7.36 (total mirror 1.72; the Mac ratio
+  had predicted ≈0.9 for the resolve).
+- round 12 vs round 11 on the Mac GPU: resolve ×0.88–0.93 (31 0.065/0.070,
+  62 0.063/0.069, 84 0.070/0.080, 88 0.073/0.085, 91 0.070/0.077 ms),
+  project ×1.1–1.45 (claims; 91 is the worst). Expected device: project
+  ≈0.5–0.6, resolve ≈1.1, total ≈1.65 ms — still over 1.6. The next cut,
+  `SSPR_CANDIDATES` 3 (no left/right surface candidates), saves ≈12% of the
+  resolve but takes view 91's comb to +1.93 (limit 2.0) and costs stability;
+  not taken.
 
 ## Rules that bit before
 - Mac engine runs must use the background/no-mouse flags above.

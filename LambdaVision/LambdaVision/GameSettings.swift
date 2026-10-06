@@ -175,6 +175,12 @@ final class GameSettings {
     var waterMirrorView: WaterMirrorView = .off {
         didSet { Renderer.waterMirrorView = waterMirrorView.rawValue }
     }
+    /// Sharp water: an object's underside in the mirror, as a share of its
+    /// top's brightness (Renderer.waterUnderside); 0 = the probe. Not stored:
+    /// a tuning knob for the debug API until a value is settled.
+    var waterUnderside: Double = Double(Renderer.waterUnderside) {
+        didSet { Renderer.waterUnderside = Float(waterUnderside) }
+    }
     var hdrTest: HDRTestPattern = .off {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
                  AppLog.render.log("[HDR] test pattern \(hdrTest.label, privacy: .public), thermal state \(ProcessInfo.processInfo.thermalState.label, privacy: .public)") }

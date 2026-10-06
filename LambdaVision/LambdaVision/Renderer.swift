@@ -344,6 +344,12 @@ actor Renderer {
     /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
     /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
     nonisolated(unsafe) static var waterMirrorView: Int = 0
+    /// Sharp water: what a reflected ray shows where it runs into an object
+    /// from below (a table's underside, never on screen) — the top right
+    /// above that point at this share of its brightness; 0 leaves those rays
+    /// to the probe (round 11's look). DisplayParams.waterDebug.y. Debug
+    /// API `waterUnderside`, live, not stored.
+    nonisolated(unsafe) static var waterUnderside: Float = 0.35
     /// Water's share of the strength: seen at grazing angles it reflects far
     /// more than a pane and washed its own colour out at the glass setting.
     static let waterStrengthScale: Float = 0.6
@@ -3118,7 +3124,7 @@ actor Renderer {
                 params.probeMix = probe.mix
                 Self.setGlassEyes(&params, glassEyes)
                 params.sspr = ssprPlanes
-                params.waterDebug = SIMD4(Float(Renderer.waterMirrorView), 0, 0, 0)
+                params.waterDebug = SIMD4(Float(Renderer.waterMirrorView), Renderer.waterUnderside, 0, 0)
                 if let color = sharpWater?.color, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                     self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
                 }
