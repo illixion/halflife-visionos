@@ -31,42 +31,6 @@ instead of deleting them.
   `selectionRay` with hand drift after the pinch starts (privacy: gaze is
   revealed at tap). Automatic fire tracks the pinch-start gaze, not the
   eyes. Acceptable for now; hand-anchored aim supersedes it.
-- **No alt-fire with hand tracking.** `+attack2` (MP5 grenades, crossbow
-  and Python zoom, shotgun double barrel, gauss charge) now has the mouse's
-  right button, K on the keyboard (J/Enter fire without a mouse) and the
-  gamepad's left trigger. A hand gesture for it is still to be designed; it
-  must not clash with finger-gun fire, reload (thumb curl), the weapon wheel
-  (all-fingertip pinch) or the movement pinch.
-  *Hand gesture: proposals, owner to pick (2026-10-06).* None is free of
-  clashes, so none is implemented yet. Alt-fire is a press on the MP5
-  (grenade), shotgun (double barrel), crossbow and .357 (zoom toggles), and
-  a hold on the gauss (charge), Glock (rapid fire) and hornet gun.
-  1. *Two-finger pistol.* Extend the middle finger beside the index; then
-     curling both pulls +attack2, and the index curling alone fires as now.
-     The finger gun normally rests with the middle finger curled, so this is
-     a mode the hand enters deliberately, and press and hold both work.
-     Risks: from the headset the middle finger sits behind the index, so
-     ARKit infers it, and a half-curled middle finger flips the mode (needs
-     wide hysteresis and a short settle time before either trigger counts).
-  2. *Support-hand trigger.* Bring the off hand under the gun hand, within
-     about 12 cm of its wrist, and curl its index: +attack2, held as long as
-     the curl. It reads like a foregrip or an under-barrel launcher, and
-     holds work. Risks: it needs both hands, so there's no pinch movement
-     while alt-firing (arm swing still works). A support grip is a fist, and
-     today an off-hand fist stands the gun hand down (`gunHandBusy`, the
-     swing-entry guard), so that rule would need a "hands together"
-     exemption. It also mustn't engage the movement pinch: index curled
-     with the thumb away is no pinch, but the detector would need the
-     proximity gate too.
-  3. *Thumb flick.* A quick thumb curl and release (both thresholds crossed
-     in under 0.25 s, index extended throughout) presses +attack2 for a
-     beat. The held curl stays reload (its ring only starts at 0.25 s and
-     still takes 0.75 s). For weapons with no clip (gauss, hornet gun),
-     where reload means nothing, a held thumb holds +attack2 instead,
-     which covers the gauss charge. It's one-handed and leaves the trigger
-     alone. Risks: it shares reload's motion, so any noise in the thumb
-     ratio that makes a flick fires a grenade. The Glock's rapid fire
-     becomes taps, not a hold.
 
 ## Open — rendering
 
@@ -418,6 +382,32 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~No alt-fire with hand tracking~~ (4303092; device check pending). The
+  owner's gesture: touch the dominant thumb tip to the side of the curled
+  middle finger, index still pointing. `+attack2` is held while contact
+  holds (gauss charge, Glock rapid fire; taps zoom or launch a grenade), and
+  a trigger pull while held keeps both buttons down, as in stock HL. Contact
+  is the thumb tip's distance to the middle finger's thumb side (knuckle →
+  PIP → DIP, shifted toward the index). `ThumbGestures.swift` also took over
+  the reload hold, so the separation rules live in one place and
+  `Tools/HandsProbe` checks them on a synthetic finger gun: contact only
+  counts past mid proximal phalanx (a reload curl ends by the knuckle); near
+  or in contact vetoes the reload hold; each gesture locks the other out
+  until the thumb lifts; a reload hold already past 0.3 s when contact
+  starts is ambiguous, so neither fires. Index extended and thumb ≥ 6 cm
+  from the index tip are required to engage (no fist, pinch or 🤌).
+  Settings "Alt-fire: thumb to middle finger" (default on) and "Alt-fire
+  sensitivity" (scales the distances). Diagnostics line `alt-fire:` shows
+  the live contact (cm), on/off thresholds, `along` (0 knuckle, 1 PIP, 2
+  DIP) and the state (settle / HELD / near / index curled / pinch guard /
+  locked / ambiguous). Knobs, all unverified on device:
+  `Renderer.altFireContactOn/Off` (2.0 / 3.2 cm), `altFireSettleSeconds`
+  (0.05), `altFireRadialOffset` (0.8 cm), and `ThumbGestures.Tuning`
+  `minAlong` (0.5), `pinchGuard`, `reloadPathGrace`, `releaseSeconds`,
+  `minHoldSeconds`. On device: read `contact`/`along` for a real reload curl
+  versus a press; if a reload shows `near`, raise `minAlong` or lower the
+  sensitivity.
 
 - ~~Keyboard + mouse and controller play ("flat HL1 in 3D")~~ (79a6bf7, 43a028a; device check
   pending). One input mode (`InputMode.swift`: hands / keyboard+mouse /
