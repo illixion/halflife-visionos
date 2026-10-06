@@ -56,10 +56,11 @@ specifics, and [PLAN.md](PLAN.md) for the full phase history.
 ## First-time setup
 
 ```bash
-# This repo and both RAVE packages must sit in the same parent directory
+# This repo and the three shared packages must sit in the same parent directory
 git clone https://github.com/illixion/halflife-visionos.git
 git clone https://github.com/illixion/RAVESDK.git
 git clone https://github.com/illixion/RAVEEngine.git
+git clone https://github.com/illixion/DebugTrace.git
 
 cd halflife-visionos
 
@@ -69,28 +70,30 @@ open LambdaVision/LambdaVision.xcodeproj
 
 ### RAVE packages
 
-LambdaVision links two shared packages:
+LambdaVision links three shared packages:
 
 | Package | Products used |
 |---|---|
 | [`RAVESDK`](https://github.com/illixion/RAVESDK) | `RAVEConsole` |
-| [`RAVEEngine`](https://github.com/illixion/RAVEEngine) | `RAVEInput`, `RAVEDiagnostics` |
+| [`RAVEEngine`](https://github.com/illixion/RAVEEngine) | `RAVEInput`, `RAVEDiagnostics`, `RAVERig`, `RAVEHolo` |
+| [`DebugTrace`](https://github.com/illixion/DebugTrace) | `DebugTrace`, `DebugTraceServer` |
 
-Both are referenced as **local** Swift packages by relative path —
-`../../RAVESDK` and `../../RAVEEngine`, resolved against the directory holding
+All are referenced as **local** Swift packages by relative path —
+`../../RAVESDK`, `../../RAVEEngine` and `../../DebugTrace`, resolved against the directory holding
 `LambdaVision.xcodeproj` — not as versioned remote dependencies. A clone
-therefore does not fetch them, which is why the commands above clone all three
+therefore does not fetch them, which is why the commands above clone all four
 side by side:
 
 ```
 some-parent/
 ├── RAVESDK/
 ├── RAVEEngine/
+├── DebugTrace/
 └── halflife-visionos/
 ```
 
 The requirement is only that this repo's parent directory also contains
-directories named exactly `RAVESDK` and `RAVEEngine`; this repo's own directory
+directories named exactly `RAVESDK`, `RAVEEngine` and `DebugTrace`; this repo's own directory
 name does not matter. Get it wrong and Xcode fails at package resolution, before
 compiling anything — and before the build phase that fetches xash3d-fwgs runs.
 
@@ -100,21 +103,45 @@ this app and two others — and a path reference keeps "move this into the packa
 and update its callers" a single atomic edit.
 
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
-your team ID. Before the first build, two engine artifacts need to exist —
-Xcode's pre-build hook fetches source (`xash3d-fwgs`, `hlsdk-portable`,
-`MoltenVK.xcframework`) automatically and idempotently, but it only
-_checks_ for these, it doesn't build them:
+your team ID. The app links three prebuilt engine archives that aren't in
+git: `libxash.a` (engine + Half-Life game code), `libANGLE.a` (GLES → Metal)
+and ANGLE's headers. There are two ways to get them.
+
+**Prebuilt (default).** Just build in Xcode. The pre-build hook
+(`scripts/pre-build.sh`) fetches the sources (`xash3d-fwgs`,
+`hlsdk-portable`, `MoltenVK.xcframework`), then `scripts/fetch-prebuilts.sh`
+downloads whichever archive is missing from this repo's GitHub Releases. The
+release tags are content keys (`scripts/prebuilt-keys.sh`: pinned upstream
+revisions plus hashes of the patches and build scripts), so you only ever get
+archives built from exactly the sources in your checkout. Run the script by
+hand to see what it does:
 
 ```bash
-./VisionPort/build_xash_libxash.sh   # libxash.a — pre-build hook errors if this is missing
-./VisionPort/build_angle_visionos.sh # ANGLE (libEGL/libGLESv2) — ~12 GiB gclient sync,
-                                      # first run is slow; pre-build hook does NOT check
-                                      # for this one, so skipping it fails as a linker
-                                      # error instead of a clear message
+./scripts/prebuilt-keys.sh      # the release tags your checkout needs
+./scripts/fetch-prebuilts.sh    # download what's missing (never overwrites)
 ```
 
-Both are idempotent — rerunning after the first successful build is a
-fast no-op. After that, build & run on your AVP from Xcode as normal.
+It never replaces a local file and never fails the build. When there's no
+matching release (you're offline, you've edited a patch, or CI hasn't built
+these sources yet), the hook stops with an error naming the build script to
+run instead. Prebuilt releases include the built-in game ports (Opposing
+Force, Blue Shift) that built successfully in CI; those are best-effort.
+
+**Build locally (full support).** Needed when you change the engine, the
+patches or ANGLE, and for compiling mods. These are the same scripts CI runs:
+
+```bash
+./VisionPort/build_xash_libxash.sh        # libxash.a (needs brew llvm, Python 3)
+XR_SIM=1 ./VisionPort/build_xash_libxash.sh  # libxash-sim.a, simulator builds only
+./VisionPort/build_angle_visionos.sh      # ANGLE at its pinned revision: ~12 GiB
+                                          # gclient sync, slow the first time
+./VisionPort/build_game.sh <git-url-or-path> [branch]
+                                          # a mod's game code → libgame-<gamedir>.a
+```
+
+All are idempotent, and rerunning after a successful build is quick. A local
+build is never overwritten by a fetch; delete an archive to go back to the
+prebuilt one. After that, build & run on your AVP from Xcode as normal.
 
 ## Half-Life assets — pre-25th anniversary build
 
@@ -245,7 +272,8 @@ point, and *Swing sensitivity* (0.5×–2×) sets how hard you need to swing.
 ## Build & run cheat sheet
 
 ```bash
-# One-time engine builds (see First-time setup above for details)
+# One-time engine builds, only if you don't use the prebuilts
+# (see First-time setup above for details)
 ./VisionPort/build_xash_libxash.sh
 ./VisionPort/build_angle_visionos.sh
 
@@ -276,13 +304,15 @@ Find your AVP's UDID with `xcrun xctrace list devices`.
 LambdaVision/      Xcode visionOS app (Swift + C bridge + ANGLE)
 VisionPort/        Engine cross-compile workspace (xash3d-fwgs + hlsdk-portable
                    + patches + setup)
-scripts/           Asset fetch/push scripts and the Xcode pre-build hook
+scripts/           Asset fetch/push scripts, prebuilt fetch and the Xcode pre-build hook
+.github/workflows/ CI compile check and the prebuilt ANGLE / libxash releases
 PLAN.md            Architecture, phase plan, risks
 ISSUES.md          Known problems
 README.md          You are here
 
 ../RAVESDK/        Shared package, cloned as a sibling (see First-time setup)
 ../RAVEEngine/     Shared package, cloned as a sibling (see First-time setup)
+../DebugTrace/     Shared package, cloned as a sibling (see First-time setup)
 ```
 
 ## Licensing
