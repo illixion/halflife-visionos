@@ -526,6 +526,16 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     atomic_fetch_min_explicit(&keys[(uint(eye) * size.y + target.y) * size.x + target.x], key, memory_order_relaxed);
 }
 
+#ifndef SSPR_SUB_X
+#define SSPR_SUB_X 2    // exact mirrored samples per target texel across
+#endif
+#ifndef SSPR_SUB_Y
+#define SSPR_SUB_Y 2    // ... and down (1 × 2 with 3 candidates is cheaper but fails DepthProbe stability)
+#endif
+#ifndef SSPR_CANDIDATES
+#define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
+#endif
+
 // The key buffer's reset to "empty", four keys per thread (a compute pass
 // rather than a buffer fill, so the GPU timer can bracket it).
 kernel void ssprClear(uint gid [[thread_position_in_grid]],
@@ -546,6 +556,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
+                        depth2d_array<float> engineDepth [[ texture(1) ]],
                         texture2d_array<half, access::write> mirror [[ texture(2) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
@@ -555,20 +566,89 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         return;
     const uint base = uint(eye) * size.y * size.x;
     const uint i = base + gid.y * size.x + gid.x;
-    uint key = keys[i];
-    if (key == 0xFFFFFFFFu) {
-        if (gid.y + 1 < size.y) key = min(key, keys[i + size.x]);
-        if (gid.y > 0)          key = min(key, keys[i - size.x]);
-        if (gid.x + 1 < size.x) key = min(key, keys[i + 1]);
-        if (gid.x > 0)          key = min(key, keys[i - 1]);
+    // Candidate surfaces: this texel's key and its four neighbours' (the
+    // texel's footprint can straddle a boundary between surfaces).
+    uint cand[5] = { keys[i], 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+    if (gid.y + 1 < size.y) cand[1] = keys[i + size.x];
+    if (gid.y > 0)          cand[2] = keys[i - size.x];
+    if (gid.x + 1 < size.x) cand[3] = keys[i + 1];
+    if (gid.x > 0)          cand[4] = keys[i - 1];
+    if (min(min(cand[0], cand[1]), min(min(cand[2], cand[3]), cand[4])) == 0xFFFFFFFFu) {
+        mirror.write(half4(0.0h), gid.xy, gid.z);
+        return;
     }
-    half4 out = 0.0h;
-    if (key != 0xFFFFFFFFu) {
-        const float2 src = (float2(key & 1023u, (key >> 10) & 1023u) + 0.5) / float2(size.xy);
-        const float2 edge = min(src, 1.0 - src);
-        const float confidence = smoothstep(0.0, 0.15, min(edge.x, edge.y));
-        out = half4(colorMap.sample(s, src, eye).rgb * half(confidence), half(confidence));
+    // Each candidate's world point (its source texel's depth).
+    const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
+    const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
+    const float height = p.sspr[eye].y;
+    const float4 t = p.eyeTangents[eye];
+    const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
+    const float zn = p.probeMix.y, zf = p.probeMix.z;
+    float3 Wc[5];
+    bool valid[5];
+    int candidates = 0;
+    for (int k = 0; k < 5; k++) {
+        valid[k] = k < SSPR_CANDIDATES && cand[k] != 0xFFFFFFFFu;
+        Wc[k] = 0.0;
+        if (!valid[k]) continue;
+        const float2 src = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
+        const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+        const float3 dk = glassViewRay(src, eye, p);
+        Wc[k] = E + dk * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(dk, F));
+        // a neighbour on the same surface (about the same distance) adds
+        // nothing: one candidate covers it, and needs no check below
+        for (int m = 0; m < k; m++)
+            if (valid[m] && abs(length(Wc[m] - E) - length(Wc[k] - E)) < 2.0 + 0.02 * length(Wc[m] - E))
+                valid[k] = false;
+        if (valid[k]) candidates++;
     }
+    // The texel covers several engine pixels and the boundary between two
+    // mirrored surfaces can cross it: one sample per texel, taken at the
+    // winning source texel, made thin features (the c1a2 vent grate) and
+    // horizontal edges pop by a whole texel as the head moved a fraction of
+    // a pixel. Instead, SSPR_SUB_X × SSPR_SUB_Y exact mirrored rays per texel:
+    // each, from the water point under it, is taken to every candidate's
+    // depth (the point on the ray nearest the candidate's world point),
+    // projected back into the eye, and checked against the engine's depth
+    // there: the candidate whose check lands back on the ray is the surface
+    // that ray really mirrors. Its colour is sampled at that exact,
+    // continuously moving coordinate, and the samples are averaged.
+    half3 sum = 0.0h;
+    float conf = 0.0;
+    for (int sj = 0; sj < SSPR_SUB_Y; sj++) {
+        for (int si = 0; si < SSPR_SUB_X; si++) {
+            const float2 sub = (float2(si, sj) + 0.5) / float2(SSPR_SUB_X, SSPR_SUB_Y);
+            const float3 d = glassViewRay((float2(gid.xy) + sub) / float2(size.xy), eye, p);
+            if (d.z > -1e-4) continue;
+            const float3 P = E + d * ((height - E.z) / d.z);
+            const float3 r = float3(d.x, d.y, -d.z);
+            float best = 1e30;
+            float2 bestSrc = float2(-1.0);
+            for (int k = 0; k < 5; k++) {
+                if (!valid[k]) continue;
+                const float along = max(dot(Wc[k] - P, r), 0.0);
+                const float3 q = P + r * along - E;
+                const float qz = dot(q, F);
+                if (qz < 4.0) continue;
+                const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
+                if (any(src < 0.0) || any(src >= 1.0)) continue;
+                if (candidates == 1) { bestSrc = src; break; }     // one surface: no check needed
+                const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                const float3 ds = glassViewRay(src, eye, p);
+                const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
+                const float3 off = A - P;
+                const float miss = length(off - r * dot(off, r)) + 0.01 * along;   // nearer wins a tie
+                if (A.z > height && miss < best) { best = miss; bestSrc = src; }
+            }
+            if (bestSrc.x < 0.0) continue;
+            const float2 edge = min(bestSrc, 1.0 - bestSrc);
+            const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));
+            sum += colorMap.sample(s, bestSrc, eye).rgb * half(c);
+            conf += c;
+        }
+    }
+    const float n = float(SSPR_SUB_X * SSPR_SUB_Y);
+    const half4 out = half4(sum / half(n), half(conf / n));
     mirror.write(out, gid.xy, gid.z);
 }
 

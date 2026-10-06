@@ -531,6 +531,109 @@ for path in args {
     }
     let plain = render(plainPipeline, w, h, params, textures)
     let glass = render(glassOnPipeline, w, h, params, textures)
+
+    // Temporal stability: a sub-pixel head turn, emulated by shifting the
+    // engine's frame (colour bilinear, depth and stencil nearest) by δ pixels
+    // and widening its frustum to match, must move the final image by δ and
+    // change nothing else. Thin bright features (the c1a2 vent grate)
+    // reflected through an undersampled mirror pop instead. Compared on
+    // water pixels away from the mask's edge: the composite of the shifted
+    // frame against this one resampled by δ, and the same for the plain
+    // composite (the shift's own resampling noise) as the baseline.
+    if sharp, params.sspr.0.z > 0 {
+        func shifted(_ dx: Float, _ dy: Float) -> (DisplayParams, [Int: MTLTexture], [UInt8]) {
+            var rgba = [UInt8](repeating: 0, count: w * h * 4)
+            var depth = [Float](repeating: 1, count: w * h)
+            var st = [UInt8](repeating: 0, count: w * h)
+            for y in 0..<h {
+                for x in 0..<w {
+                    let fx = Float(x) - dx, fy = Float(y) - dy           // bottom-up rows
+                    let x0 = Int(fx.rounded(.down)), y0 = Int(fy.rounded(.down))
+                    let ax = fx - Float(x0), ay = fy - Float(y0)
+                    func c(_ xx: Int, _ yy: Int, _ k: Int) -> Float {
+                        Float(dump.rgba[(min(max(yy, 0), h - 1) * w + min(max(xx, 0), w - 1)) * 4 + k])
+                    }
+                    for k in 0..<4 {
+                        let v = (c(x0, y0, k) * (1 - ax) + c(x0 + 1, y0, k) * ax) * (1 - ay)
+                              + (c(x0, y0 + 1, k) * (1 - ax) + c(x0 + 1, y0 + 1, k) * ax) * ay
+                        rgba[(y * w + x) * 4 + k] = UInt8(min(max(v.rounded(), 0), 255))
+                    }
+                    let nx = min(max(Int(fx.rounded()), 0), w - 1), ny = min(max(Int(fy.rounded()), 0), h - 1)
+                    depth[y * w + x] = dump.depth[ny * w + nx]
+                    st[y * w + x] = stencil[ny * w + nx]
+                }
+            }
+            var pp = params
+            let t = pp.eyeTangents.0
+            let sx = (t.x + t.y) / Float(w), sy = (t.z + t.w) / Float(h)
+            let t2 = SIMD4(t.x + dx * sx, t.y - dx * sx, t.z - dy * sy, t.w + dy * sy)
+            pp.eyeTangents = (t2, t2)
+            let colorT = rgba.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
+            let stT = st.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
+            let depthT = depthTexture(w, h, depth, array: true)
+            var tx: [Int: MTLTexture] = [TextureIndex.color.rawValue: colorT, 1: depthT, 2: stT,
+                                         3: current.color, 4: current.depth]
+            tx[5] = renderSharp(pp, colorT, depthT, stT)
+            return (pp, tx, st)
+        }
+        func sampleShifted(_ img: [UInt8], _ x: Int, _ row: Int, _ dx: Float, _ dy: Float, _ k: Int) -> Float {
+            // img rows are top-down; the shift is in bottom-up rows, so +dy moves up
+            let fx = Float(x) - dx, fr = Float(row) + dy
+            let x0 = Int(fx.rounded(.down)), r0 = Int(fr.rounded(.down))
+            let ax = fx - Float(x0), ar = fr - Float(r0)
+            func c(_ xx: Int, _ rr: Int) -> Float {
+                Float(img[(min(max(rr, 0), h - 1) * w + min(max(xx, 0), w - 1)) * 4 + k])
+            }
+            return (c(x0, r0) * (1 - ax) + c(x0 + 1, r0) * ax) * (1 - ar) + (c(x0, r0 + 1) * (1 - ax) + c(x0 + 1, r0 + 1) * ax) * ar
+        }
+        let waterRow = Int(params.sspr.0.x) + 16
+        var worst: (Float, Float) = (0, 0)
+        for (dx, dy) in [(Float(0.3), Float(0)), (0, 0.3), (0.5, 0.5)] {
+            let (pp, tx, st) = shifted(dx, dy)
+            let g2 = render(glassOnPipeline, w, h, pp, tx)
+            let p2 = render(plainPipeline, w, h, pp, tx)
+            var errs: [Float] = [], base: [Float] = []
+            for row in stride(from: 2, to: h - 2, by: 1) {
+                for x in 2..<(w - 2) {
+                    let sy = h - 1 - row
+                    guard Int(st[sy * w + x]) == waterRow, Int(st[(sy + 2) * w + x]) == waterRow,
+                          Int(st[(sy - 2) * w + x]) == waterRow, Int(st[sy * w + x + 2]) == waterRow,
+                          Int(st[sy * w + x - 2]) == waterRow else { continue }
+                    let i = (row * w + x) * 4
+                    var e: Float = 0, b: Float = 0
+                    for k in 0..<3 {
+                        e = max(e, abs(Float(g2[i + k]) - sampleShifted(glass, x, row, dx, dy, k)))
+                        b = max(b, abs(Float(p2[i + k]) - sampleShifted(plain, x, row, dx, dy, k)))
+                    }
+                    errs.append(e); base.append(b)
+                }
+            }
+            if let dir = pngDir {
+                // where the shifted reflection departs from the resampled one (×8)
+                var img = [UInt8](repeating: 0, count: w * h * 4)
+                for row in 0..<h { for x in 0..<w {
+                    let i = (row * w + x) * 4
+                    var e: Float = 0
+                    for k in 0..<3 { e = max(e, abs(Float(g2[i + k]) - sampleShifted(glass, x, row, dx, dy, k))) }
+                    let v = UInt8(min(e * 8, 255))
+                    img[i] = v; img[i + 1] = UInt8(Float(glass[i + 1]) / 4); img[i + 2] = UInt8(Float(glass[i + 2]) / 4)
+                } }
+                writePNG(img, w, h, String(format: "%@/stability-%@-%.1f-%.1f.png", dir, name, dx, dy))
+            }
+            errs.sort(); base.sort()
+            let p99 = errs.isEmpty ? 0 : errs[errs.count * 99 / 100], b99 = base.isEmpty ? 0 : base[base.count * 99 / 100]
+            let mean = errs.reduce(0, +) / Float(max(errs.count, 1)), bmean = base.reduce(0, +) / Float(max(base.count, 1))
+            print(String(format: "%@ stability, shift (%.1f, %.1f) px: water mean %.1f p99 %.0f /255 (plain image: mean %.1f p99 %.0f) over %d px",
+                         name, dx, dy, mean, p99, bmean, b99, errs.count))
+            worst = (max(worst.0, p99 - b99), max(worst.1, mean - bmean))
+        }
+        // the shifted reflection may differ from the resampled one by the
+        // image's own resampling noise plus a little, not pop
+        // 963b205 / 190007a (one sample at the winning source texel): p99
+        // +21, mean +1.7 over the plain image's own noise; the
+        // depth-verified, supersampled resolve: about +8 to +11 and +0.8
+        if worst.0 > 14 || worst.1 > 1.2 { failures += 1 }
+    }
     var envParams = params                             // the reflection alone
     envParams.glass = SIMD4(100, 0.04, 1, 0)
     envParams.water.x = 100; envParams.water.z = 1
