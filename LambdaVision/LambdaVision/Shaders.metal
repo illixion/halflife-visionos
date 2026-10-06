@@ -468,9 +468,9 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // confidence that falls off as the source nears the frame's edge, where the
 // next head turn cuts it off, so the composite blends to the probe there.
 // Each eye mirrors its own image: the parallax is exactly a mirror's.
-// Both passes skip texels that are not this plane's water in the engine's
-// stencil: a mirrored point landing elsewhere is never read, so it takes no
-// atomic, and the resolve writes nothing there.
+// The projection skips mirrored points that land off this plane's water in
+// the engine's stencil (never read, so no atomic), which also lets the
+// resolve tell water from the rest by its keys alone.
 static inline bool ssprIsWater(texture2d_array<uint> engineStencil, float2 uv, ushort eye,
                                constant DisplayParams &p)
 {
@@ -526,31 +526,41 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     atomic_fetch_min_explicit(&keys[(uint(eye) * size.y + target.y) * size.x + target.x], key, memory_order_relaxed);
 }
 
+// The key buffer's reset to "empty", four keys per thread (a compute pass
+// rather than a buffer fill, so the GPU timer can bracket it).
+kernel void ssprClear(uint gid [[thread_position_in_grid]],
+                      constant uint &count4 [[ buffer(1) ]],
+                      device uint4 *keys [[ buffer(0) ]])
+{
+    if (gid < count4)
+        keys[gid] = uint4(0xFFFFFFFFu);
+}
+
+// No stencil read here (the first version read the engine's stencil per
+// texel and measured 1.23 ms p50 on the headset): ssprProject only stores
+// keys on this plane's water, so a texel with a key is water, and an empty
+// texel takes the nearest of its four neighbours' keys — a hole inside the
+// water, or a texel just outside it that the composite's bilinear read at
+// the water's edge then sees as continuous. Elsewhere it stays empty.
 kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]],
-                        texture2d_array<uint> engineStencil [[ texture(3) ]])
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
     const uint3 size = ssprSize(colorMap, p, eye);
     if (gid.x >= size.x || gid.y >= size.y)
         return;
-    if (p.sspr[eye].z < 0.5 || !ssprIsWater(engineStencil, (float2(gid.xy) + 0.5) / float2(size.xy), eye, p)) {
-        mirror.write(half4(0.0h), gid.xy, gid.z);
-        return;
-    }
     const uint base = uint(eye) * size.y * size.x;
-    uint key = keys[base + gid.y * size.x + gid.x];
+    const uint i = base + gid.y * size.x + gid.x;
+    uint key = keys[i];
     if (key == 0xFFFFFFFFu) {
-        const int2 n[4] = { int2(0, 1), int2(0, -1), int2(1, 0), int2(-1, 0) };
-        for (int i = 0; i < 4; i++) {
-            const int2 c = int2(gid.xy) + n[i];
-            if (c.x < 0 || c.y < 0 || c.x >= int(size.x) || c.y >= int(size.y)) continue;
-            key = min(key, keys[base + uint(c.y) * size.x + uint(c.x)]);
-        }
+        if (gid.y + 1 < size.y) key = min(key, keys[i + size.x]);
+        if (gid.y > 0)          key = min(key, keys[i - size.x]);
+        if (gid.x + 1 < size.x) key = min(key, keys[i + 1]);
+        if (gid.x > 0)          key = min(key, keys[i - 1]);
     }
     half4 out = 0.0h;
     if (key != 0xFFFFFFFFu) {
