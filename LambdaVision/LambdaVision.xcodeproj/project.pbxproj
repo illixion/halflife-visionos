@@ -14,6 +14,7 @@
 		AA09000000000000000000F3 /* RAVEConsole in Frameworks */ = {isa = PBXBuildFile; productRef = AA09000000000000000000F2 /* RAVEConsole */; };
 		AA13000000000000000000D3 /* DebugTrace in Frameworks */ = {isa = PBXBuildFile; productRef = AA13000000000000000000D2 /* DebugTrace */; };
 		BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */ = {isa = PBXBuildFile; productRef = FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */; };
+		AA14000000000000000000E3 /* GameLibrary in Frameworks */ = {isa = PBXBuildFile; productRef = AA14000000000000000000E2 /* GameLibrary */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -70,6 +71,7 @@
 				AA12000000000000000000C3 /* RAVEHolo in Frameworks */,
 				AA13000000000000000000D3 /* DebugTrace in Frameworks */,
 				BE9A2B0354EF91E2EAB95294 /* DebugTraceServer in Frameworks */,
+				AA14000000000000000000E3 /* GameLibrary in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -140,6 +142,7 @@
 				AA12000000000000000000C2 /* RAVEHolo */,
 				AA13000000000000000000D2 /* DebugTrace */,
 				FE29A1C0BC483FFBA668F4B0 /* DebugTraceServer */,
+				AA14000000000000000000E2 /* GameLibrary */,
 			);
 			productName = LambdaVision;
 			productReference = 1DB96E8A2FB0522300F1ADA2 /* LambdaVision.app */;
@@ -200,6 +203,7 @@
 				AA04000000000000000000A1 /* XCLocalSwiftPackageReference "../../RAVEEngine" */,
 				AA09000000000000000000F1 /* XCLocalSwiftPackageReference "../../RAVESDK" */,
 				AA13000000000000000000D1 /* XCLocalSwiftPackageReference "../../DebugTrace" */,
+				AA14000000000000000000E1 /* XCLocalSwiftPackageReference "Packages/GameLibrary" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1DB96E8B2FB0522300F1ADA2 /* Products */;
@@ -620,6 +624,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../../DebugTrace;
 		};
+		AA14000000000000000000E1 /* XCLocalSwiftPackageReference "Packages/GameLibrary" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/GameLibrary;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -659,6 +667,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA13000000000000000000D1 /* XCLocalSwiftPackageReference "../../DebugTrace" */;
 			productName = DebugTraceServer;
+		};
+		AA14000000000000000000E2 /* GameLibrary */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA14000000000000000000E1 /* XCLocalSwiftPackageReference "Packages/GameLibrary" */;
+			productName = GameLibrary;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -9,6 +9,8 @@ import SwiftUI
 import RealityKit
 import RealityKitContent
 import IOSurface
+import GameLibrary
+import UniformTypeIdentifiers
 
 struct ContentView: View {
 
@@ -16,6 +18,7 @@ struct ContentView: View {
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
 
     @State private var showSettings = false
+    @State private var showImporter = false
     @State private var cheatsEnabled = false
     @State private var bridgeStatus: String = "—"
     @State private var vulkanStatus: String = "—"
@@ -25,6 +28,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
+            ScrollView {
             VStack(spacing: 16) {
                 if let message = appModel.engineFailureMessage {
                     engineFailureBanner(message)
@@ -45,9 +49,24 @@ struct ContentView: View {
 
                 Text("Lambda VisionPro").font(.largeTitle)
 
-                ToggleImmersiveSpaceButton()
+                let library = appModel.library
+                if library.scan == nil {
+                    ProgressView("Looking for games…")
+                } else if library.games.isEmpty {
+                    GameOnboarding { showImporter = true }
+                } else {
+                    GameLibraryList()
+                    ToggleImmersiveSpaceButton()
+                }
 
-                cheatsSection
+                if library.isImporting || !library.importLog.isEmpty {
+                    ImportStatusView()
+                }
+
+                // The chapter list and cheats are Half-Life's.
+                if (GameData.runningGame ?? library.selectedGame)?.kind == .base {
+                    cheatsSection
+                }
 
                 DisclosureGroup("Diagnostics") {
                     VStack(alignment: .leading, spacing: 8) {
@@ -76,7 +95,17 @@ struct ContentView: View {
                 .padding(.top, 8)
             }
             .padding()
+            }
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .help("Import a game or mod")
+                    .disabled(appModel.library.isImporting)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showSettings = true
@@ -90,6 +119,16 @@ struct ContentView: View {
                 SettingsView().environment(appModel)
             }
             .onAppear { runSmokeTests() }
+            // Library scan + weapon warm-up; rerun the warm-up when the
+            // selection or the installed games change before the game starts.
+            .task { await appModel.prepare() }
+            .onChange(of: appModel.library.selectionVersion) { Task { await appModel.warmUp() } }
+            .onChange(of: appModel.library.scanVersion) { Task { await appModel.warmUp() } }
+            // Zips (AirDrop'd or in Files) and unpacked folders.
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.zip, .folder],
+                          allowsMultipleSelection: true) { result in
+                if case .success(let urls) = result { appModel.library.importPicked(urls) }
+            }
             // The engine can only fail this way from inside the (full,
             // passthrough-blocking) immersive space, where the player can't
             // see this window's banner. Drop back to it so they do.

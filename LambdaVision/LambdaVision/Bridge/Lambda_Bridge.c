@@ -2296,6 +2296,33 @@ static void lambda_render_size_apply(void) {
     SCR_VidInit();
 }
 
+// ---- Game library contracts (see Lambda_Bridge.h) ----
+
+static lambda_game_change_handler_t g_game_change_handler;
+
+void lambda_set_game_change_handler(lambda_game_change_handler_t handler) {
+    g_game_change_handler = handler;
+}
+
+// Strong, default visibility: the engine's weak_import reference resolves
+// here, whichever stream's change lands first.
+__attribute__((used, visibility("default")))
+void Lambda_RequestGameChange(const char *gamedir) {
+    if (!gamedir || !*gamedir) return;
+    if (g_game_change_handler) g_game_change_handler(gamedir);
+}
+
+// Half-Life only, until the engine's archives bring the real table: theirs
+// is a strong definition and wins at link time (libxash.a is force-loaded).
+static const lambda_compiled_game_t g_compiled_games_fallback[] = {
+    { "valve", "hl", "Half-Life" },
+    { NULL, NULL, NULL },
+};
+__attribute__((weak))
+const lambda_compiled_game_t *Lambda_CompiledGames(void) {
+    return g_compiled_games_fallback;
+}
+
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
                        char *status_out, int status_cap) {
@@ -2398,8 +2425,13 @@ int lambda_engine_init(const char *writable_dir,
         // config.cfg exists (written on pause via host_writeconfig), the
         // engine's `exec config.cfg` restores the player's binds and we must
         // not clobber them. Z/X stay app-side (snap turn) and are unbound.
+        // config.cfg lives in the running game's dir (-game, else valve).
+        const char *gamedir = "valve";
+        for (int i = 0; i + 1 < extra_argc; ++i)
+            if (extra_argv[i] && strcmp(extra_argv[i], "-game") == 0 && extra_argv[i + 1])
+                gamedir = extra_argv[i + 1];
         char cfg_path[1024];
-        snprintf(cfg_path, sizeof cfg_path, "%s/valve/config.cfg", writable_dir);
+        snprintf(cfg_path, sizeof cfg_path, "%s/%s/config.cfg", writable_dir, gamedir);
         int first_run = (access(cfg_path, F_OK) != 0);
         if (first_run) Cbuf_AddText(
             "bind \"w\" \"+forward\"\n"       "bind \"s\" \"+back\"\n"

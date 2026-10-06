@@ -75,6 +75,15 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: snapTurnDegreesKey) }
     }
 
+    // MARK: Game
+    private static let selectedGameKey = "lambdavision.settings.selectedGame"
+
+    /// The gamedir the engine starts with (`-game`); nil = Half-Life.
+    static var selectedGame: String? {
+        get { defaults.string(forKey: selectedGameKey) }
+        set { defaults.set(newValue, forKey: selectedGameKey) }
+    }
+
     // MARK: Audio
     private static let sfxVolumeKey   = "lambdavision.settings.sfxVolume"
     private static let musicVolumeKey = "lambdavision.settings.musicVolume"

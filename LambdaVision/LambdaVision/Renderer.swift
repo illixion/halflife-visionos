@@ -15,6 +15,7 @@ import RAVEHolo
 import RAVEInput
 import simd
 import DebugTrace
+import GameLibrary
 
 // The 256 byte aligned size of our uniform structure
 nonisolated let alignedUniformsSize = (MemoryLayout<Uniforms>.size + 0xFF) & -0x100
@@ -1075,8 +1076,14 @@ actor Renderer {
         }
     }
 
+    /// The game the engine starts with, picked on the main actor as the
+    /// immersive space opens (GameLibraryStore.selectedGame). Read once, at
+    /// engine init; a game already running keeps running.
+    nonisolated(unsafe) static var launchGame: GameEntry?
+
     @MainActor
     static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, arSession: ARKitSession) {
+        launchGame = appModel.library.selectedGame
         Task(executorPreference: RendererTaskExecutor.shared) {
             // Per-source spatial audio. PHASE (PhaseAudioEngine) is the live
             // renderer; the older AVAudioEnvironmentNode path
@@ -1532,18 +1539,32 @@ actor Renderer {
             AppLog.render.log("[LambdaVision] GameData missing (checked Documents/GameData and the app bundle) — skipping engine init")
             Task { @MainActor [appModel] in
                 appModel.engineFailureMessage =
-                    "Half-Life game data not found on this headset. From your Mac, run ./scripts/push-assets.sh (fetch it first with ./scripts/fetch-assets.sh if you haven't already), then relaunch."
+                    "No game found on this headset. Import Half-Life from the main window, then try again."
             }
             return
         }
         AppLog.render.log("[LambdaVision] rodir: \(rodir, privacy: .private)")
+        // The game: what's already running (a reopened immersive space), else
+        // the library's pick, else Half-Life.
+        let game = GameData.runningGame ?? Renderer.launchGame ?? GameData.halfLife
+        GameData.runningGame = game
+        var gameArgs = ["-game", game.gamedir]
+        if let fallback = game.info.fallbackDir, !fallback.isEmpty,
+           PathResolver.shared.resolve(fallback, in: rodir) != nil {
+            gameArgs += ["-fallbackdir", fallback]
+        }
+        // Straight into the game's first map (Half-Life: the tram ride,
+        // c0a0); a game naming none starts at its menu.
+        if let map = game.info.startMap, !map.isEmpty {
+            gameArgs += ["+map", map]
+        }
+        AppLog.render.log("[LambdaVision] game \(game.gamedir, privacy: .private) kind=\(game.kind.rawValue, privacy: .public) fallback=\(game.info.fallbackDir != nil, privacy: .public)")
         // The engine's developer stream (-dev 2: warnings, load spam) is
         // only on in Developer mode; GameSettings.developerMode keeps the
         // `developer` cvar in step when it is toggled later.
         let devArgs = Renderer.debugPanelEnabled ? ["-dev", "2"] : []
         let extra = devArgs + ["-console", "-noip", "-noenginemouse",
-                     "-rodir", rodir, "-game", "valve",
-                     "+map", "c0a0"] // tram ride (Black Mesa Inbound)
+                     "-rodir", rodir] + gameArgs
         // -noenginemouse: no real mouse on AVP. Keeps in_mouseinitialized
         // false so the engine's per-frame IN_MouseMove is a no-op and can't
         // overwrite the synthetic menu cursor we inject (Lambda_Bridge
@@ -1566,15 +1587,13 @@ actor Renderer {
 
         // First-person avatar. Nothing in the engine publishes a player model
         // (you never see yourself in single-player), so load it straight off
-        // the read-only game data. The deathmatch Gordon is the best body we
-        // have: 343 source vertices, a full Bip01 skeleton with both arm
-        // chains, embedded textures, and life-size at 72 units. Body value 1
-        // selects its high-detail submodel over the low-detail one.
+        // the read-only game data: the game's own player (AvatarModel), else
+        // the deathmatch Gordon — 343 source vertices, a full Bip01 skeleton
+        // with both arm chains, embedded textures, and life-size at 72 units.
         // Non-fatal: without it we simply draw no body.
-        let bodyModel = rodir + "/valve/models/player/gordon/gordon.mdl"
-        let bodyLoaded = bodyModel.withCString { lambda_body_load($0, 1) } != 0
-        Renderer.avatarAvailable = bodyLoaded
-        AppLog.render.log("[LambdaVision] avatar model \(bodyLoaded ? "loaded" : "MISSING", privacy: .public): \(bodyModel, privacy: .private)")
+        let avatar = AvatarModel.load(for: game, in: rodir)
+        Renderer.avatarAvailable = avatar != nil
+        AppLog.render.log("[LambdaVision] avatar model \(avatar ?? "MISSING", privacy: .public)")
         if rc == 0 {
             // Engine + GL worker are now up, so cvar commands are safe to post.
             // Flush the archived Graphics/Audio/Input cvars and enable live pushes.

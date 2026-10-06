@@ -177,6 +177,28 @@ int lambda_engine_frame(void);
 // Tears engine down. Idempotent.
 void lambda_engine_shutdown(void);
 
+// ---- Game library contracts with the engine ----
+//
+// Change-game request (engine → app). On XROS the engine's Sys_NewInstance
+// can't execv, so it calls this instead and stays in the current game. The
+// engine declares it weak; the app defines it in Lambda_Bridge.c and hands
+// the gamedir to the handler Swift registers (called on the engine thread).
+void Lambda_RequestGameChange(const char *gamedir);
+typedef void (*lambda_game_change_handler_t)(const char *gamedir);
+void lambda_set_game_change_handler(lambda_game_change_handler_t handler);
+
+// Compiled-games table (engine → app): the games whose code is linked into
+// the app, terminated by an entry with gamedir == NULL, Half-Life first.
+typedef struct {
+    const char *gamedir;  // canonical gamedir, e.g. "valve", "gearbox", "bshift"
+    const char *dll;      // gamedll basename without path/extension: "hl", "opfor", "bshift"
+    const char *title;    // display name, e.g. "Opposing Force"
+} lambda_compiled_game_t;
+// Defined by the engine's archives. The app carries a weak definition
+// returning Half-Life only, which the engine's strong one replaces when it
+// links (an undefined weak_import is a link error in a static link).
+const lambda_compiled_game_t *Lambda_CompiledGames(void);
+
 // ---- ANGLE / EGL bridge ----
 
 // One-shot setup: creates a long-lived EGLDisplay + EGLContext bound to
