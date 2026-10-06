@@ -377,6 +377,10 @@ actor Renderer {
     /// Draw the HEV holograms (Settings > Input); the client's stock 2D
     /// readouts follow the same switch through lambda_hud_set_native.
     nonisolated(unsafe) static var hevHUDEnabled = true
+    /// Outside hands mode, hang the HEV readouts in the view-following
+    /// corners (HEVHUD overlay) rather than on the hands (Settings > Keyboard,
+    /// mouse & gamepad > HEV holograms).
+    nonisolated(unsafe) static var flatHUDFollowsView = true
     /// The holographic aim point (Settings > Input > Aim reticle).
     nonisolated(unsafe) static var aimReticle: HEVHUD.Reticle = .dot
     /// Developer mode (Settings > Advanced): the palm debug panel
@@ -2619,7 +2623,8 @@ actor Renderer {
         weaponPass.hideHands = body != nil && weaponPass.grip != nil && !flatViewmodel
 
         // HEV holograms: ammo by the gun hand (only while a weapon is out),
-        // vitals over the off-hand forearm.
+        // vitals over the off-hand forearm; outside hands mode, by default,
+        // both in the view-following corners instead.
         var hudScene: RAVEHoloScene? = nil
         var hudRenderer: RAVEHoloRenderer? = nil
         // The palm debug panel's pinchable buttons (tracking areas) this frame.
@@ -2641,6 +2646,8 @@ actor Renderer {
                                     aim: weaponActive ? reticleAim(headTransform: headM) : nil,
                                     reticle: Renderer.aimReticle,
                                     head: SIMD3(headM.columns.3.x, headM.columns.3.y, headM.columns.3.z),
+                                    headRotation: simd_quatf(headM),
+                                    overlay: !handsMode && Renderer.flatHUDFollowsView,
                                     ambient: weaponActive ? Self.eyeLightLuma() : nil,
                                     time: drawable.frameTiming.presentationTime.timeInterval)
             if Renderer.debugPanelEnabled,

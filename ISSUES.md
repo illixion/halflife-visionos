@@ -7,11 +7,9 @@ instead of deleting them.
 ## Open — interaction
 
 - **Keyboard/mouse/gamepad follow-ups.** The flat mode is in (see
-  Resolved, device check pending). Still open: the HEV ammo hologram stays
-  anchored beside the tracked gun hand, which outside hands mode is resting
-  on the keyboard, mouse or pad (it could ride the viewmodel, or the stock 2D
-  readouts could come back in flat mode); the body still trails the head's
-  yaw, not the mouse's; the default bindings show in Settings
+  Resolved, device check pending; so is the HEV ammo panel in flat modes,
+  now a view-following overlay). Still open: the body still trails the
+  head's yaw, not the mouse's; the default bindings show in Settings
   (Keyboard, mouse & gamepad > Controls) but nothing shows them on first
   run, and the list doesn't follow in-game rebinds. Mouse look-pitch is
   opt-in because the room-space passes (body, HEV holograms) can't follow a
@@ -74,11 +72,17 @@ instead of deleting them.
   client state from `cl_dll/hud_redraw.cpp` `g_vr_hud_state`) replaces the
   stock health, suit, ammo and flashlight readouts: ammo beside the gun hand,
   vitals over the off-hand forearm (fades in as the back of the forearm faces
-  the eyes). Panels stand off their anchor toward the eyes and draw over
-  everything. Still stock: pain/damage arrows, pickup history, messages,
-  console, menu. The hand weapon wheel draws its icons through the same
-  renderer (see Resolved). Offsets and the fade
-  angle are first guesses (`HEVHUD.forearmClearance` / `gunClearance`).
+  the eyes). Outside hands mode the readouts default to a view-following
+  overlay (see Resolved, device check pending). Panels stand off their anchor
+  toward the eyes and draw over everything. Still stock: pain/damage arrows,
+  pickup history, messages, console, menu. The hand weapon wheel draws its
+  icons through the same renderer (see Resolved). Offsets and the fade
+  angle are first guesses (`HEVHUD.forearmClearance` / `gunClearance`), as
+  are the overlay's (`HEVHUD.overlay*`). The holograms write no depth, so
+  reprojection warps them with whatever is behind; for the overlay at
+  0.85 m that only matters for head translation inside one frame. If its
+  numbers swim at depth edges on device, write the panels' own depth into
+  the reprojection depth (gfx's `reprojectionDepthMerge`).
 
 - **Gun-mounted flashlight: device check pending.** The flashlight now
   rides the weapon hand (`Renderer.flashlightOnGun`, Settings "Gun-mounted
@@ -418,6 +422,27 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~HEV HUD in flat modes: ammo panel stuck at the resting gun hand~~
+  (device check pending). Outside hands mode the HEV readouts become a
+  Half-Life 2 style overlay (`HEVHUD.swift`): vitals 21° left and ammo 21°
+  right of the view centre, 17° down, 0.85 m out at 1.6× scale. They hang
+  off `LazyViewFollower`, a critically damped spring on head orientation
+  (time constant 0.07 s, stepped in closed form so it's framerate
+  independent and never overshoots a stopped head), clamped to 8° of lag so
+  a fast turn drags the panels along rather than leaving them behind.
+  Position stays on the head: translating the panels too would only make
+  them swim in stereo. Mode switches crossfade the hand and overlay
+  placements, the overlay rising 3° into place. Draw-over-everything, no
+  depth writes and the dark-room dimming are unchanged. Settings >
+  Keyboard, mouse & gamepad > HEV holograms: *Follow view (lazy)* (default)
+  or *Attached to hands* (the old behaviour) for A/B.
+  `LambdaVision/Tools/HUDProbe/build.sh` checks the follower on the Mac:
+  the lag cap under 300–400°/s whips and head shakes, no overshoot and
+  convergence after a stop, the 2Ωτ steady lag, and the same motion at
+  30–240 Hz with jittered frame times. On device: judge the angles,
+  distance, lag and cap (`HEVHUD.overlay*`), the crossfade on switching
+  modes, and readability in a dark vent.
 
 - ~~Keyboard + mouse and controller play ("flat HL1 in 3D")~~ (79a6bf7, 43a028a; device check
   pending). One input mode (`InputMode.swift`: hands / keyboard+mouse /
