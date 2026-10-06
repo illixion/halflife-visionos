@@ -154,9 +154,14 @@ XASH_OBJS+=("$FS_OBJ")
 # triggers ~hundreds of duplicate-symbol errors at app link time. We'll
 # wire cl_dll back in once we tackle the renderer (HUD lives there);
 # for now the server is enough to get the engine past entity init.
+# hlsdk-portable cross-compiles through plain compiler flags rather than a
+# waf platform option, so its build scripts stay stock and a mod branch with
+# an older waifulib builds the same way.
 cd "$HERE/hlsdk-portable"
 rm -rf build
-python3 ./waf configure $WAF_PLATFORM
+XFLAGS="-isysroot $(xcrun --show-sdk-path --sdk $SDK_NAME) --target=$CLANG_TARGET"
+CC=clang CXX=clang++ CFLAGS="$XFLAGS" CXXFLAGS="$XFLAGS" LINKFLAGS="$XFLAGS" \
+  python3 ./waf configure
 python3 ./waf build
 # dlls/, game_shared/, pm_shared/ — only the .1.o flavor. waf compiles
 # weapons + pm_shared TWICE (once for dlls without CLIENT_DLL/CLIENT_WEAPONS,

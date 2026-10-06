@@ -149,7 +149,7 @@ Lambda_VisionPro/                   ← this repo
 ├── VisionPort/                     ← engine cross-compile workspace
 │   ├── setup.sh                    ← fetches xash3d-fwgs, hlsdk-portable, MoltenVK
 │   ├── xash3d-visionos.patch       ← waf patch adding --xros / --xros-simulator
-│   ├── hlsdk-visionos.patch        ← VR aim ray + xcompile tweaks
+│   ├── hlsdk-vr/                   ← VR layer for hlsdk-portable games: our sources + a small hook patch (apply.sh)
 │   ├── angle-visionos.patch        ← visionOS target support for ANGLE's gn build
 │   ├── build_xash_libxash.sh       ← builds libxash.a for device
 │   ├── build_angle_visionos.sh     ← builds libEGL/libGLESv2 for device+simulator

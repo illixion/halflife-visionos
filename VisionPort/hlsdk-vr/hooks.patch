@@ -1,0 +1,259 @@
+diff --git a/cl_dll/ammo.cpp b/cl_dll/ammo.cpp
+index 72272b2..406fcd5 100644
+--- a/cl_dll/ammo.cpp
++++ b/cl_dll/ammo.cpp
+@@ -865,6 +865,11 @@ int CHudAmmo::Draw( float flTime )
+ 	// Draw ammo pickup history
+ 	gHR.DrawAmmoHistory( flTime );
+ 
++	// VR: the native HUD shows ammo beside the weapon (cl_dll/vr).
++	extern int VR_HudNative( void );
++	if( VR_HudNative() )
++		return 1;
++
+ 	if( !( m_iFlags & HUD_ACTIVE ) )
+ 		return 0;
+ 
+diff --git a/cl_dll/battery.cpp b/cl_dll/battery.cpp
+index 7cfc3d7..c0dd076 100644
+--- a/cl_dll/battery.cpp
++++ b/cl_dll/battery.cpp
+@@ -74,6 +74,11 @@ int CHudBattery::Draw( float flTime )
+ 	if( gHUD.m_iHideHUDDisplay & HIDEHUD_HEALTH )
+ 		return 1;
+ 
++	// VR: the native HUD shows suit charge on the forearm (cl_dll/vr).
++	extern int VR_HudNative( void );
++	if( VR_HudNative() )
++		return 1;
++
+ 	int r, g, b, x, y, a;
+ 	wrect_t rc;
+ 
+diff --git a/cl_dll/cdll_int.cpp b/cl_dll/cdll_int.cpp
+index ebeb180..1dec462 100644
+--- a/cl_dll/cdll_int.cpp
++++ b/cl_dll/cdll_int.cpp
+@@ -170,6 +170,9 @@ int DLLEXPORT Initialize( cl_enginefunc_t *pEnginefuncs, int iVersion )
+ 		gEngfuncs.pfnFilteredClientCmd = pEnginefuncs->pfnFilteredClientCmd;
+ 	}
+ 
++	extern void VR_ClientInit( void ); // VR: barrel-aimed weapon events (cl_dll/vr)
++	VR_ClientInit();
++
+ 	EV_HookEvents();
+ 
+ 	gEngfuncs.pfnRegisterVariable( "cl_game_build_commit", g_VCSInfo_Commit, 0 );
+diff --git a/cl_dll/entity.cpp b/cl_dll/entity.cpp
+index 3670546..958b647 100644
+--- a/cl_dll/entity.cpp
++++ b/cl_dll/entity.cpp
+@@ -506,6 +506,9 @@ Gives us a chance to add additional entities to the render this frame
+ */
+ void DLLEXPORT HUD_CreateEntities( void )
+ {
++	extern void VR_AddHandWeapon( void ); // VR: hand-anchored weapon (cl_dll/vr)
++	VR_AddHandWeapon();
++
+ 	// e.g., create a persistent cl_entity_t somewhere.
+ 	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
+ 	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
+diff --git a/cl_dll/ev_common.cpp b/cl_dll/ev_common.cpp
+index ebba9cb..3c8a773 100644
+--- a/cl_dll/ev_common.cpp
++++ b/cl_dll/ev_common.cpp
+@@ -126,6 +126,9 @@ void EV_GetGunPosition( event_args_t *args, float *pos, float *origin )
+ 	}
+ 
+ 	VectorAdd( origin, view_ofs, pos );
++
++	extern void VR_EV_GunPosition( event_args_t *args, float *pos ); // VR: muzzle origin (cl_dll/vr)
++	VR_EV_GunPosition( args, pos );
+ }
+ 
+ /*
+diff --git a/cl_dll/flashlight.cpp b/cl_dll/flashlight.cpp
+index 3ec6997..14d7ed0 100644
+--- a/cl_dll/flashlight.cpp
++++ b/cl_dll/flashlight.cpp
+@@ -105,6 +105,11 @@ int CHudFlashlight::Draw( float flTime )
+ 	if( !show )
+ 		return 1;
+ 
++	// VR: the native HUD shows the flashlight charge on the forearm (cl_dll/vr).
++	extern int VR_HudNative( void );
++	if( VR_HudNative() )
++		return 1;
++
+ 	int r, g, b, x, y, a;
+ 	wrect_t rc;
+ 
+diff --git a/cl_dll/health.cpp b/cl_dll/health.cpp
+index 5ca4b97..af1f993 100644
+--- a/cl_dll/health.cpp
++++ b/cl_dll/health.cpp
+@@ -212,8 +212,10 @@ int CHudHealth::Draw( float flTime )
+ 	GetPainColor( r, g, b );
+ 	ScaleColors( r, g, b, a );
+ 
+-	// Only draw health if we have the suit.
+-	if( gHUD.m_iWeaponBits & ( 1 << ( WEAPON_SUIT ) ) )
++	// Only draw health if we have the suit. VR: the native HUD shows it
++	// on the forearm instead; pain and damage indicators still draw.
++	extern int VR_HudNative( void );
++	if( !VR_HudNative() && ( gHUD.m_iWeaponBits & ( 1 << ( WEAPON_SUIT ) ) ) )
+ 	{
+ 		HealthWidth = gHUD.GetSpriteRect( gHUD.m_HUD_number_0 ).right - gHUD.GetSpriteRect( gHUD.m_HUD_number_0 ).left;
+ 		int CrossWidth = gHUD.GetSpriteRect( m_HUD_cross ).right - gHUD.GetSpriteRect( m_HUD_cross ).left;
+diff --git a/cl_dll/hl/hl_weapons.cpp b/cl_dll/hl/hl_weapons.cpp
+index 4f119f0..95715d3 100644
+--- a/cl_dll/hl/hl_weapons.cpp
++++ b/cl_dll/hl/hl_weapons.cpp
+@@ -46,6 +46,7 @@ static CBasePlayer player;
+ static globalvars_t Globals; 
+ 
+ static CBasePlayerWeapon *g_pWpns[MAX_WEAPONS];
++CBasePlayerWeapon **g_vr_client_weapons = g_pWpns; // VR: native HUD clip sizes (cl_dll/vr)
+ 
+ float g_flApplyVel = 0.0;
+ int g_irunninggausspred = 0;
+diff --git a/cl_dll/hud_redraw.cpp b/cl_dll/hud_redraw.cpp
+index 9aecaf7..964d16b 100644
+--- a/cl_dll/hud_redraw.cpp
++++ b/cl_dll/hud_redraw.cpp
+@@ -99,6 +99,9 @@ void CHud::Think( void )
+ // returns 1 if they've changed, 0 otherwise
+ int CHud::Redraw( float flTime, int intermission )
+ {
++	extern void VR_PublishHudState( void ); // VR: native HUD state (cl_dll/vr)
++	VR_PublishHudState();
++
+ 	m_fOldTime = m_flTime;	// save time of previous redraw
+ 	m_flTime = flTime;
+ 	m_flTimeDelta = (double)( m_flTime - m_fOldTime );
+diff --git a/cl_dll/input.cpp b/cl_dll/input.cpp
+index d11abf5..0eb4fda 100644
+--- a/cl_dll/input.cpp
++++ b/cl_dll/input.cpp
+@@ -870,6 +870,10 @@ void DLLEXPORT CL_CreateMove( float frametime, struct usercmd_s *cmd, int active
+ 	// set button and flag bits
+ 	//
+ 	cmd->buttons = CL_ButtonBits( 1 );
++	// VR: the analog stick's directions (cl_dll/vr VR_StickMove).
++	extern int g_vr_stick_buttons;
++	if( active )
++		cmd->buttons |= g_vr_stick_buttons;
+ 
+ #if USE_VGUI
+ 	// If they're in a modal dialog, ignore the attack button.
+diff --git a/cl_dll/input_xash3d.cpp b/cl_dll/input_xash3d.cpp
+index fb70d6b..8190360 100644
+--- a/cl_dll/input_xash3d.cpp
++++ b/cl_dll/input_xash3d.cpp
+@@ -220,7 +220,11 @@ void FWGSInput::IN_Move( float frametime, usercmd_t *cmd )
+ 	}
+ 
+ 	dead_viewangles = viewangles; // keep them actual
+-	if( ac_movecount )
++	// VR: the stick's move is added to the keys' instead of replacing it (cl_dll/vr).
++	extern bool VR_StickMove( usercmd_t *cmd, float ac_forwardmove, float ac_sidemove, int ac_movecount );
++	if( VR_StickMove( cmd, ac_forwardmove, ac_sidemove, ac_movecount ))
++		;
++	else if( ac_movecount )
+ 	{
+ 		IN_ToggleButtons( ac_forwardmove / ac_movecount, ac_sidemove / ac_movecount );
+ 
+diff --git a/cl_dll/view.cpp b/cl_dll/view.cpp
+index 3b3187d..8606b4d 100644
+--- a/cl_dll/view.cpp
++++ b/cl_dll/view.cpp
+@@ -780,6 +780,9 @@ void V_CalcNormalRefdef( struct ref_params_s *pparams )
+ 	lasttime = pparams->time;
+ 
+ 	v_origin = pparams->vieworg;
++
++	extern void VR_HideViewModel( void ); // VR: weapon drawn at the hand (cl_dll/vr)
++	VR_HideViewModel();
+ }
+ 
+ void V_SmoothInterpolateAngles( float * startAngle, float * endAngle, float * finalAngle, float degreesPerSec )
+@@ -1547,6 +1550,8 @@ void DLLEXPORT V_CalcRefdef( struct ref_params_s *pparams )
+ 	else if( !pparams->paused )
+ 	{
+ 		V_CalcNormalRefdef( pparams );
++		extern void VR_NormalRefdefDone( struct ref_params_s *pparams ); // VR: body state, aim hit (cl_dll/vr)
++		VR_NormalRefdefDone( pparams );
+ 	}
+ /*
+ // Example of how to overlay the whole screen with red at 50 % alpha
+diff --git a/dlls/player.cpp b/dlls/player.cpp
+index a31504f..e15d6ab 100644
+--- a/dlls/player.cpp
++++ b/dlls/player.cpp
+@@ -36,6 +36,7 @@
+ #include "game.h"
+ #include "pm_shared.h"
+ #include "hltv.h"
++#include "vr/vr_server.h" // VR: LambdaVision hooks
+ 
+ // #define DUCKFIX
+ 
+@@ -369,6 +370,7 @@ Vector CBasePlayer::GetGunPosition()
+ 	Vector origin;
+ 
+ 	origin = pev->origin + pev->view_ofs;
++	VR_GunPosition( this, origin );
+ 
+ 	return origin;
+ }
+@@ -1546,7 +1548,7 @@ void CBasePlayer::PlayerUse( void )
+ 				}
+ 				return;
+ 			}
+-			else
++			else if( !VR_UseActive() )
+ 			{	// Start controlling the train!
+ 				CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
+ 
+@@ -1576,6 +1578,7 @@ void CBasePlayer::PlayerUse( void )
+ 	float flDot;
+ 
+ 	UTIL_MakeVectors( pev->v_angle );// so we know which way we are facing
++	VR_UseCone( this, &flMaxDot );
+ 
+ 	while( ( pObject = UTIL_FindEntityInSphere( pObject, pev->origin, PLAYER_SEARCH_RADIUS ) ) != NULL )
+ 	{
+@@ -1628,6 +1631,8 @@ void CBasePlayer::PlayerUse( void )
+ 	}
+ 	else
+ 	{
++		if( VR_UseMountTrain( this ) )
++			return;
+ 		if( m_afButtonPressed & IN_USE )
+ 			EMIT_SOUND( ENT( pev ), CHAN_ITEM, "common/wpn_denyselect.wav", 0.4, ATTN_NORM );
+ 	}
+@@ -1930,6 +1935,7 @@ void CBasePlayer::PreThink( void )
+ 		pev->flags &= ~FL_ONTRAIN;
+ 
+ 	// Train speed control
++	VR_TrainReset();
+ 	if( m_afPhysicsFlags & PFLAG_ONTRAIN )
+ 	{
+ 		CBaseEntity *pTrain = CBaseEntity::Instance( pev->groundentity );
+@@ -2007,6 +2013,7 @@ void CBasePlayer::PreThink( void )
+ 				pTrain->Use( this, this, USE_SET, vel );
+ 			}
+ 		}
++		VR_TrainThink( this, pTrain );
+ 		iGearId = TrainSpeed( pTrain->pev->speed, pTrain->pev->impulse );
+ 
+ 		if( iGearId != ( m_iTrain & 0x0F ) )	// Vit_amiN: speed changed
+@@ -3930,7 +3937,7 @@ void CBasePlayer::ItemPostFrame()
+ 	if( !m_pActiveItem )
+ 		return;
+ 
+-	m_pActiveItem->ItemPostFrame();
++	VR_ItemPostFrame( this );
+ }
+ 
+ int CBasePlayer::AmmoInventory( int iAmmoIndex )

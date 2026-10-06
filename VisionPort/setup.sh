@@ -9,7 +9,8 @@
 # silently stop applying (or worse, apply cleanly against different
 # surrounding code) the moment upstream moves — `git clone` of a floating
 # default branch is not reproducible across time. Bump these only alongside
-# re-verifying (and if needed regenerating) both .patch files.
+# re-verifying (and if needed regenerating) xash3d-visionos.patch and
+# hlsdk-vr/hooks.patch.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -27,7 +28,7 @@ if [[ ! -d xash3d-fwgs ]]; then
         && git apply ../xash3d-visionos.patch)
 fi
 
-# 2. Half-Life SDK (+ visionOS patch: VR aim ray, xcompile tweaks)
+# 2. Half-Life SDK (+ the VR layer: hlsdk-vr/ sources and hook calls)
 if [[ ! -d hlsdk-portable ]]; then
     git init hlsdk-portable
     (cd hlsdk-portable \
@@ -35,7 +36,7 @@ if [[ ! -d hlsdk-portable ]]; then
         && git fetch --depth 1 origin "$HLSDK_PORTABLE_COMMIT" \
         && git checkout FETCH_HEAD \
         && git submodule update --init --recursive --depth 1 \
-        && git apply ../hlsdk-visionos.patch)
+        && ../hlsdk-vr/apply.sh .)
 fi
 
 # 3. MoltenVK xcframework into the Xcode project's Vendor/
