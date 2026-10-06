@@ -3618,6 +3618,115 @@ static void ft_commit_row(void) {
     fprintf(stderr, "%s\n", line);
 }
 
+// --- GPU time per eye (GL_EXT_disjoint_timer_query) ---------------------
+// The CPU columns above cannot say how long ANGLE's GPU spends on an eye,
+// and ANGLE runs on its own Metal queue the app cannot timestamp. A GL
+// TIME_ELAPSED query around each display eye's frame can, while the app's
+// "GPU pass timing" diagnostic is on (lambda_gl_set_gpu_timing). Results are
+// read back non-blocking a few frames later; a frame whose query slot is
+// still in flight is simply not timed. Without the extension nothing runs.
+#ifndef GL_TIME_ELAPSED_EXT
+#define GL_TIME_ELAPSED_EXT           0x88BF
+#endif
+#ifndef GL_QUERY_RESULT_EXT
+#define GL_QUERY_RESULT_EXT           0x8866
+#endif
+#ifndef GL_QUERY_RESULT_AVAILABLE_EXT
+#define GL_QUERY_RESULT_AVAILABLE_EXT 0x8867
+#endif
+#ifndef GL_GPU_DISJOINT_EXT
+#define GL_GPU_DISJOINT_EXT           0x8FBB
+#endif
+#define GT_RING 4
+typedef void (*gt_gen_fn)(GLsizei, GLuint *);
+typedef void (*gt_begin_fn)(GLenum, GLuint);
+typedef void (*gt_end_fn)(GLenum);
+typedef void (*gt_getuiv_fn)(GLuint, GLenum, GLuint *);
+typedef void (*gt_getui64v_fn)(GLuint, GLenum, GLuint64 *);
+static gt_gen_fn      gt_gen;
+static gt_begin_fn    gt_begin_q;
+static gt_end_fn      gt_end_q;
+static gt_getuiv_fn   gt_getuiv;
+static gt_getui64v_fn gt_getui64v;
+static _Atomic int    g_gt_enabled = 0;
+static int            g_gt_state = 0;        // 0 untried, 1 ready, -1 unavailable
+static GLuint         g_gt_q[2][GT_RING];
+static int            g_gt_issued[2][GT_RING];
+static int            g_gt_head[2];
+static int            g_gt_active = -1;      // eye whose query is open
+static _Atomic float  g_gt_ms[2];
+static _Atomic int    g_gt_fresh = 0;        // bit per eye: a result not yet taken
+
+void lambda_gl_set_gpu_timing(int enabled) { atomic_store(&g_gt_enabled, enabled ? 1 : 0); }
+
+int lambda_gl_gpu_eye_ms(float out_ms[2]) {
+    int fresh = atomic_exchange(&g_gt_fresh, 0);
+    out_ms[0] = atomic_load(&g_gt_ms[0]);
+    out_ms[1] = atomic_load(&g_gt_ms[1]);
+    return fresh;
+}
+
+static int gt_ready(void) {
+    if (!atomic_load(&g_gt_enabled)) return 0;
+    if (g_gt_state == 0) {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        g_gt_state = -1;
+        if (ext && strstr(ext, "GL_EXT_disjoint_timer_query")) {
+            gt_gen      = (gt_gen_fn)eglGetProcAddress("glGenQueriesEXT");
+            gt_begin_q  = (gt_begin_fn)eglGetProcAddress("glBeginQueryEXT");
+            gt_end_q    = (gt_end_fn)eglGetProcAddress("glEndQueryEXT");
+            gt_getuiv   = (gt_getuiv_fn)eglGetProcAddress("glGetQueryObjectuivEXT");
+            gt_getui64v = (gt_getui64v_fn)eglGetProcAddress("glGetQueryObjectui64vEXT");
+            if (gt_gen && gt_begin_q && gt_end_q && gt_getuiv && gt_getui64v) {
+                gt_gen(2 * GT_RING, &g_gt_q[0][0]);
+                g_gt_state = 1;
+            }
+        }
+        fprintf(stderr, "[FT] GL timer queries %s\n",
+                g_gt_state == 1 ? "on (GL_EXT_disjoint_timer_query)" : "unavailable");
+    }
+    return g_gt_state == 1;
+}
+
+// Takes every finished result for `eye`, oldest first, without blocking.
+static void gt_poll(int eye) {
+    for (int k = 0; k < GT_RING; k++) {
+        int slot = (g_gt_head[eye] + k) % GT_RING;
+        if (!g_gt_issued[eye][slot]) continue;
+        GLuint avail = 0;
+        gt_getuiv(g_gt_q[eye][slot], GL_QUERY_RESULT_AVAILABLE_EXT, &avail);
+        if (!avail) break;
+        GLuint64 ns = 0;
+        gt_getui64v(g_gt_q[eye][slot], GL_QUERY_RESULT_EXT, &ns);
+        g_gt_issued[eye][slot] = 0;
+        GLint disjoint = 0;
+        glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+        if (disjoint) continue;   // the GPU clock jumped: the result is junk
+        atomic_store(&g_gt_ms[eye], (float)((double)ns * 1e-6));
+        atomic_fetch_or(&g_gt_fresh, 1 << eye);
+    }
+}
+
+// Around one display eye's engine frame (a load tick has no fence and is
+// not displayed, so it is not timed).
+static void gt_begin(int eye) {
+    if (!g_frame_fence_event || !gt_ready()) return;
+    gt_poll(eye);
+    int slot = g_gt_head[eye];
+    if (g_gt_issued[eye][slot]) return;
+    gt_begin_q(GL_TIME_ELAPSED_EXT, g_gt_q[eye][slot]);
+    g_gt_active = eye;
+}
+
+static void gt_end(void) {
+    if (g_gt_active < 0) return;
+    int eye = g_gt_active;
+    g_gt_active = -1;
+    gt_end_q(GL_TIME_ELAPSED_EXT);
+    g_gt_issued[eye][g_gt_head[eye]] = 1;
+    g_gt_head[eye] = (g_gt_head[eye] + 1) % GT_RING;
+}
+
 // ---- Engine console commands ----------------------------------------------
 // Queued from any thread and handed to the engine (Cbuf_AddText, which is
 // not thread-safe) on the worker at the start of the next frame — the same
@@ -3701,6 +3810,7 @@ static int worker_engine_frame(void) {
         lambda_cmd_queue_apply();
         lambda_key_queue_apply();
         lambda_menu_input_apply();
+        gt_begin(0);
         double t0 = ft_now_ms();
         lambda_engine_frame();
         double t1 = ft_now_ms();
@@ -3717,6 +3827,7 @@ static int worker_engine_frame(void) {
         if (g_w_have_tangents)
             lambda_engine_clear_projection_override();
         lambda_engine_set_stereo_offset(0.0f);
+        gt_end();
         er = lambda_gl_end_frame();
         g_ft_cur[0] = t1 - t0;
         g_ft_cur[1] = ft_now_ms() - t1;
@@ -3823,6 +3934,7 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[2]);
                 }
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
+                gt_begin(1);
                 double t0 = ft_now_ms();
                 lambda_engine_render_view_only();
                 double t1 = ft_now_ms();
@@ -3831,6 +3943,7 @@ static void *gl_worker_main(void *arg) {
                 if (g_w_have_tangents)
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
+                gt_end();
                 er = lambda_gl_end_frame();
                 g_ft_cur[2] = t1 - t0;
                 g_ft_cur[3] = ft_now_ms() - t1;

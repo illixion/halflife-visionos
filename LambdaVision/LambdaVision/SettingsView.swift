@@ -99,6 +99,10 @@ struct SettingsView: View {
                     Text("Live FPS, frame-time graph, and per-stage breakdown — keep it open in view while playing.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    Toggle("GPU pass timing", isOn: $settings.gpuPassTiming)
+                    Text("Adds the GPU's own time per pass to the Performance HUD: the engine's two eyes, the composite, the arms, the gun and body, the HUD holograms and the reprojection depth, against the 8.3 ms a frame has at 120 Hz. Costs a little itself; leave it off when not measuring.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
 
                 Section("Audio") {

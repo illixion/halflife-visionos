@@ -164,6 +164,19 @@ instead of deleting them.
   state; it sets the tone map's peak for the HDR step (half-float engine
   target + Oneiros-style `tonemapDisplay`).
 
+- **GPU budget: measure on device.** The Performance HUD now shows the
+  GPU's own time per frame against the 8.3 ms a 120 Hz frame has
+  (`GPUPassTimer`): our command buffer from Metal 4 commit feedback
+  (`gpuQueue`, always on), and with Settings → Diagnostics → "GPU pass
+  timing" on, ANGLE's time per eye from GL timer queries (`gEngine0/1`, if
+  ANGLE exposes `GL_EXT_disjoint_timer_query`; the worker logs which) and
+  each of our passes from counter-heap timestamps (composite, arms,
+  gun+body, HUD, depth). The same numbers go to the log as `[FT] gpu(ms)`
+  every 512 frames. The old `angleGPU`/`frameGPU` columns are CPU-observed
+  latencies, not GPU time. Next: record p50/p95 in the tram ride, a dense
+  room (c1a0 cafeteria) and a firefight, with the thermal state, into
+  `docs/plans/modern-lighting.md`; check `gpuQueue` ≈ the sum of our
+  passes (if it is much larger, commit feedback counts the wait on ANGLE).
 - **Per-pixel reprojection depth.** We submit a constant depth; real
   depth would reduce jelly artifacts during head motion.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

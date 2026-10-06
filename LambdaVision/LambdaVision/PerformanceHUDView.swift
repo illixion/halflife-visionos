@@ -37,6 +37,52 @@ struct PerformanceReadout: View {
     }
 }
 
+/// The GPU budget: what the engine's two eyes (ANGLE's queue) and our own
+/// command buffer cost per frame at p50 / p95, summed against the 120 Hz
+/// frame. The two queues mostly run one after the other (ours waits on the
+/// engine's eyes), so the sum is the frame's GPU time; what is left of
+/// 8.3 ms is the headroom new passes can spend.
+struct GPUBudgetReadout: View {
+    let snapshot: RAVEMetricSnapshot
+
+    private static let budgetMs = 1000.0 / 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("GPU budget (120 Hz = 8.3 ms)")
+                .font(.headline)
+            Text(line(\.p50, "p50"))
+            Text(line(\.p95, "p95"))
+            Text(passes)
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 13, design: .monospaced))
+    }
+
+    private func value(_ key: String, _ path: KeyPath<RAVEMetricStat, Double>) -> Double? {
+        snapshot[key].map { $0[keyPath: path] }
+    }
+
+    private func line(_ path: KeyPath<RAVEMetricStat, Double>, _ label: String) -> String {
+        guard let queue = value("gpuQueue", path) else { return "\(label): —" }
+        let engine = (value("gEngine0", path) ?? 0) + (value("gEngine1", path) ?? 0)
+        let total = engine + queue
+        let engineText = snapshot["gEngine0"] == nil ? "engine —" : String(format: "engine %.2f", engine)
+        return String(format: "%@: %@ + ours %.2f = %.2f ms, headroom %.2f",
+                      label, engineText, queue, total, Self.budgetMs - total)
+    }
+
+    private var passes: String {
+        let names = [("gComposite", "composite"), ("gArms", "arms"), ("gWeapon", "gun+body"),
+                     ("gHUD", "HUD"), ("gDepth", "depth")]
+        let parts = names.compactMap { key, name in
+            value(key, \.p50).map { String(format: "%@ %.2f", name, $0) }
+        }
+        return parts.isEmpty ? "per pass: turn on Settings → Diagnostics → GPU pass timing"
+                             : "per pass p50: " + parts.joined(separator: " · ")
+    }
+}
+
 /// Headline readout, scrolling frame-time graph, and the per-stage breakdown
 /// (wait0/wait1/eyes/angleGPU/frameGPU/total) Lambda's eye-submit pipeline
 /// already collects — polled on the same TimelineView cadence as the
@@ -51,6 +97,7 @@ struct PerformanceHUDScreen: View {
                         PerformanceReadout(stats: snapshot["total"])
                         RAVEFrameTimeGraph(periodsMs: Array(FrameTimingStats.livePeriods().suffix(180)))
                             .frame(height: 90)
+                        GPUBudgetReadout(snapshot: snapshot)
                         RAVEMetricTable(snapshot: snapshot, warnThresholdMs: 1000 / 90)
                     }
                     .padding()

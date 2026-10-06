@@ -54,6 +54,12 @@ extension LayerRenderer.Clock.Instant {
 ///   angleGPU — eye-submit end → ANGLE's queue finished both eyes
 ///   frameGPU — eye-submit end → our compositor pass finished too
 ///   total    — whole renderFrame
+/// angleGPU and frameGPU are CPU-observed latencies (event listener fire
+/// times), not GPU execution. The GPU's own numbers go on a second line,
+/// "[FT] gpu(ms)" (see GPUPassTimer): gpuQueue is our command buffer's GPU
+/// start → end (commit feedback, always on); gEngine0/1 ANGLE's GPU time per
+/// eye and gComposite/gArms/gWeapon/gHUD/gDepth our passes, while Settings →
+/// Diagnostics → "GPU pass timing" is on.
 /// The per-column store, the 512-frame window and the p50/p95/max reduction all
 /// come from RAVE Engine now — four apps had grown four copies of that same
 /// shape. What stays here is this renderer's column vocabulary and its console
@@ -64,6 +70,8 @@ extension LayerRenderer.Clock.Instant {
 /// await anything.
 enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
+    /// The GPU-execution columns (GPUPassTimer), logged on their own line.
+    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth"]
 
     static let shared: RAVEFrameProfiler = {
         let profiler = RAVEFrameProfiler(
@@ -74,6 +82,8 @@ enum FrameTimingStats {
         )
         profiler.onWindowClosed = { snapshot in
             AppLog.perf.log("[FT] app(ms) \(snapshot.percentileLine(keys: order), privacy: .public)")
+            let gpu = snapshot.percentileLine(keys: gpuOrder)
+            if !gpu.isEmpty { AppLog.perf.log("[FT] gpu(ms) \(gpu, privacy: .public)") }
         }
         return profiler
     }()
@@ -215,6 +225,8 @@ actor Renderer {
     // GPU-completion timestamps for FrameTimingStats (MTL4 command
     // buffers expose no gpuStart/EndTime; shared-event listeners do).
     let ftListener = MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "LambdaVision.ft"))
+    // GPU execution time per pass (GPUPassTimer), one slot per frame in flight.
+    let gpuTimer: GPUPassTimer
 
     var uniformBufferOffset = 0
 
@@ -1027,6 +1039,7 @@ actor Renderer {
         }
 
         self.depthState = Self.buildDepthStencilState(device: device)
+        self.gpuTimer = GPUPassTimer(device: device, slots: maxBuffersInFlight)
         self.loadSnapshot = LoadSnapshot(device: device, layerRenderer: layerRenderer,
                                          slots: maxBuffersInFlight + 1)
 
@@ -1622,6 +1635,9 @@ actor Renderer {
 
         uniforms = UnsafeMutableRawPointer(dynamicUniformBuffer.contents() + uniformBufferOffset).bindMemory(to: Uniforms.self, capacity: 1)
 
+        // This slot's last frame is complete (wait0): read its pass times.
+        gpuTimer.beginFrame(slot: uniformBufferIndex)
+
         /// Reset resources used in previous frame
 
         #if !targetEnvironment(simulator)
@@ -2163,6 +2179,16 @@ actor Renderer {
         let ftEyesStart = CACurrentMediaTime()
         FrameTimingStats.shared.add("wait1", (ftEyesStart - ftWait1Start) * 1000)
 
+        // ANGLE's GPU time per eye (GL timer queries on the worker), taken
+        // as results arrive a few frames late.
+        lambda_gl_set_gpu_timing(GPUPassTimer.enabled ? 1 : 0)
+        if GPUPassTimer.enabled {
+            var eyeMs: [Float] = [0, 0]
+            let fresh = lambda_gl_gpu_eye_ms(&eyeMs)
+            if fresh & 1 != 0 { FrameTimingStats.shared.add("gEngine0", Double(eyeMs[0])) }
+            if fresh & 2 != 0 { FrameTimingStats.shared.add("gEngine1", Double(eyeMs[1])) }
+        }
+
         // Level load: while the engine is busy, keep drawing the snapshot of
         // its last frame instead of waiting on it (LoadSnapshot). Its frames
         // run without anyone waiting; the live view returns once the client
@@ -2479,6 +2505,10 @@ actor Renderer {
         let commandAllocator = self.commandAllocators[uniformBufferIndex]
         commandBuffer.beginCommandBuffer(allocator: commandAllocator)
         commandBuffer.useResidencySet(residencySet)
+        // Pass timestamps for the first drawable only (a capture drawable
+        // would repeat the same passes into the same slot).
+        let timed = encodeUpscale
+        if timed { gpuTimer.markStart(commandBuffer) }
 
         if encodeUpscale && captureSnapshotThisFrame {
             captureSnapshotThisFrame = false
@@ -2582,6 +2612,7 @@ actor Renderer {
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
+        if timed { gpuTimer.mark(.composite, commandBuffer) }
 
         if !armVertices.isEmpty {
             armPass.encode(commandBuffer: commandBuffer, drawable: drawable,
@@ -2589,6 +2620,7 @@ actor Renderer {
                            viewProjectionOffset: drawableTarget.viewProjectionBufferOffset,
                            uniformBufferIndex: uniformBufferIndex,
                            vertexFloats: armVertices)
+            if timed { gpuTimer.mark(.arms, commandBuffer) }
         }
 
         if supplementalPassActive {
@@ -2791,8 +2823,10 @@ actor Renderer {
                                   body: body,
                                   arcs: arcs,
                                   fade: screenFade(),
-                                  hud: hudScene.flatMap { [uniformBufferIndex] scene in hudRenderer.map { holo in
+                                  hud: hudScene.flatMap { [uniformBufferIndex, gpuTimer] scene in hudRenderer.map { holo in
                                       { enc in
+                                          // Gun and body done; the rest of the encoder is the holograms.
+                                          if timed { gpuTimer.mark(.weapon, enc, precise: true) }
                                           holo.encode(scene, encoder: enc,
                                                       viewProjections: drawableTarget.viewProjections(drawable: drawable),
                                                       slot: uniformBufferIndex,
@@ -2800,6 +2834,7 @@ actor Renderer {
                                                                   .truncatingRemainder(dividingBy: 1000)))
                                       }
                                   } })
+                if timed { gpuTimer.mark(hudScene != nil ? .hud : .weapon, commandBuffer) }
             }
         }
 
@@ -2833,7 +2868,19 @@ actor Renderer {
 
         commandBuffer.endCommandBuffer()
 
-        self.commandQueue.commit([commandBuffer])
+        if timed {
+            // Our command buffer's real GPU execution time. Fresh options per
+            // commit: a reused MTL4CommitOptions delivered only its first
+            // callback on the headset (Oneiros, 2026-09).
+            let options = MTL4CommitOptions()
+            options.addFeedbackHandler { feedback in
+                guard feedback.error == nil, feedback.gpuEndTime > feedback.gpuStartTime else { return }
+                FrameTimingStats.shared.add("gpuQueue", (feedback.gpuEndTime - feedback.gpuStartTime) * 1000)
+            }
+            self.commandQueue.commit([commandBuffer], options: options)
+        } else {
+            self.commandQueue.commit([commandBuffer])
+        }
 
         drawable.encodePresent()
     }

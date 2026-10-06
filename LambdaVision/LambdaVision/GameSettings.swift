@@ -133,6 +133,12 @@ final class GameSettings {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
                  AppLog.render.log("[HDR] test pattern \(hdrTest.label, privacy: .public), thermal state \(ProcessInfo.processInfo.thermalState.label, privacy: .public)") }
     }
+    /// Per-pass GPU timestamps and the engine's GL timer queries
+    /// (GPUPassTimer) for the Performance HUD. Not stored: a diagnostic with
+    /// a small cost of its own (the HUD split can split the weapon encoder).
+    var gpuPassTiming: Bool = false {
+        didSet { GPUPassTimer.enabled = gpuPassTiming }
+    }
     var gamma: Double = AppSettingsStore.gamma {
         didSet { AppSettingsStore.gamma = gamma; cvar("gamma", gamma) }
     }
