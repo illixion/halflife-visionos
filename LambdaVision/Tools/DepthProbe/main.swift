@@ -50,7 +50,12 @@ struct Dump {
     var planes: [SIMD4<Float>]? // version 3: the glass plane table the codes index
     var kinds: [UInt8] = []     // version 4: each row's kind (0 glass, 1 water)
 
-    init(path: String) throws {
+    /// `path` may end in `@deg`: the view rolled by that many degrees about
+    /// its forward axis (rolledBy), for head-roll checks the engine cannot
+    /// dump (its views are level).
+    init(path spec: String) throws {
+        let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
+        let path = parts[0]
         let d = try Data(contentsOf: URL(fileURLWithPath: path))
         func ints(_ at: Int, _ n: Int) -> [Int32] {
             d.subdata(in: at..<at + 4 * n).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
@@ -80,10 +85,67 @@ struct Dump {
             let kindsAt = tableAt + 4 + n * 16
             if header[1] >= 4, d.count >= kindsAt + n { kinds = [UInt8](d.subdata(in: kindsAt..<kindsAt + n)) }
         }
+        if parts.count > 1, let deg = Float(parts[1]) { rollBy(deg) }
     }
 
     /// The engine's AngleVectors: forward, right, up for this view.
     var axes: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) { angleVectors(angles) }
+
+    /// Re-renders the view rolled by `deg` about its forward axis: every
+    /// pixel of the rolled frame looks along a direction the level frame
+    /// saw (same forward, same frustum tangents), so colour is resampled
+    /// bilinearly, depth bilinearly on smooth surfaces and nearest across
+    /// edges (view depth is unchanged by a roll), stencil nearest, and what
+    /// the level frame never saw is far and unmarked.
+    mutating func rollBy(_ deg: Float) {
+        let (f0, r0, u0) = axes
+        angles.z += deg
+        let (f1, r1, u1) = axes
+        let p = projection
+        let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                      (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+        let w = width, h = height
+        let zn = p.columns.3.z / (p.columns.2.z - 1), zf = p.columns.3.z / (p.columns.2.z + 1)
+        let src = [UInt8](rgba)
+        var rgbaOut = [UInt8](repeating: 0, count: w * h * 4)
+        var depthOut = [Float](repeating: 1, count: w * h)
+        var stencilOut = stencil.map { _ in [UInt8](repeating: 0, count: w * h) }
+        for y in 0..<h {                      // bottom-up rows, as stored
+            for x in 0..<w {
+                let u = (Float(x) + 0.5) / Float(w), v = (Float(y) + 0.5) / Float(h)
+                let dir = f1 + (-t.x + (t.x + t.y) * u) * r1 + (-t.w + (t.z + t.w) * v) * u1
+                let fz = simd_dot(dir, f0)
+                let uo = (simd_dot(dir, r0) / fz + t.x) / (t.x + t.y), vo = (simd_dot(dir, u0) / fz + t.w) / (t.z + t.w)
+                let fx = uo * Float(w) - 0.5, fy = vo * Float(h) - 0.5
+                guard fx >= 0, fy >= 0, fx < Float(w - 1), fy < Float(h - 1) else { continue }
+                let x0 = Int(fx), y0 = Int(fy), ax = fx - Float(x0), ay = fy - Float(y0)
+                let o = y * w + x
+                for k in 0..<4 {
+                    func c(_ xx: Int, _ yy: Int) -> Float { Float(src[(yy * w + xx) * 4 + k]) }
+                    let val = (c(x0, y0) * (1 - ax) + c(x0 + 1, y0) * ax) * (1 - ay)
+                            + (c(x0, y0 + 1) * (1 - ax) + c(x0 + 1, y0 + 1) * ax) * ay
+                    rgbaOut[o * 4 + k] = UInt8(min(max(val.rounded(), 0), 255))
+                }
+                let n = Int(fy.rounded()) * w + Int(fx.rounded())
+                // window depth is affine in screen space on a plane, so a
+                // bilinear blend is exact there (nearest would stair-step a
+                // grazing top into rows of zero slope, which the mirror's
+                // facing test reads off neighbouring depths); across an edge
+                // the nearest sample
+                let d00 = depth[y0 * w + x0], d10 = depth[y0 * w + x0 + 1]
+                let d01 = depth[(y0 + 1) * w + x0], d11 = depth[(y0 + 1) * w + x0 + 1]
+                func lin(_ dd: Float) -> Float { 2 * zn * zf / ((zf + zn) - (dd * 2 - 1) * (zf - zn)) }
+                let l = [lin(d00), lin(d10), lin(d01), lin(d11)]
+                let lo = l.min()!, hi = l.max()!
+                depthOut[o] = hi - lo < 1 + 0.02 * lo ? (d00 * (1 - ax) + d10 * ax) * (1 - ay) + (d01 * (1 - ax) + d11 * ax) * ay
+                                                      : depth[n]
+                if let st = stencil { stencilOut![o] = st[n] }
+            }
+        }
+        rgba = Data(rgbaOut)
+        depth = depthOut
+        stencil = stencilOut
+    }
 }
 
 func angleVectors(_ a: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
@@ -100,7 +162,12 @@ struct Probe {
     var origin = SIMD3<Float>(), clip = SIMD2<Float>()
     var rgba = Data(), depth = [Float]()
 
-    init(path: String) throws {
+    /// `path` may end in `@deg`: the view rolled by that many degrees about
+    /// its forward axis (rolledBy), for head-roll checks the engine cannot
+    /// dump (its views are level).
+    init(path spec: String) throws {
+        let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
+        let path = parts[0]
         let d = try Data(contentsOf: URL(fileURLWithPath: path))
         let header = d.subdata(in: 0..<16).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
         guard header[0] == 0x5052_5656 else { throw NSError(domain: "not a vrprobe", code: 1) }
@@ -623,6 +690,49 @@ func timeSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLT
     return (tp.min()!, tr.min()!)
 }
 
+/// Both eyes at once, as the app dispatches them (grid depth 2), with the
+/// same view in both slices: the right eye's mirror must equal the left's
+/// texel for texel. Everything else here runs eye 0 only, so a slip in a
+/// per-eye index, slice or clear would never show. Returns texels differing.
+func eyeSlices(_ params: DisplayParams, _ dump: Dump) -> Int {
+    let w = dump.width, h = dump.height
+    guard let stencil = dump.stencil else { return 0 }
+    let rgba2 = [UInt8](dump.rgba) + [UInt8](dump.rgba)
+    let depth2 = dump.depth + dump.depth
+    let st2 = stencil + stencil
+    let color = rgba2.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 2, $0.baseAddress!, 4) }
+    let depthT = depth2.withUnsafeBytes { array2D(.depth32Float, w, h, slices: 2, $0.baseAddress!, 4) }
+    let stT = st2.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 2, $0.baseAddress!, 1) }
+    let div = params.sspr.0.w > 0.5 ? Int(params.sspr.0.w) : 4
+    let mw = (w + div - 1) / div, mh = (h + div - 1) / div
+    let d = MTLTextureDescriptor()
+    d.textureType = .type2DArray; d.pixelFormat = .rgba16Float; d.width = mw; d.height = mh; d.arrayLength = 2
+    d.usage = [.shaderRead, .shaderWrite]; d.storageMode = .shared
+    let out = device.makeTexture(descriptor: d)!
+    let keys = device.makeBuffer(bytes: [UInt32](repeating: .max, count: mw * mh * 2), length: mw * mh * 8)!
+    let debug = device.makeBuffer(length: mw * mh * 2 * 4 * 8)!
+    let cb = queue.makeCommandBuffer()!
+    let enc = cb.makeComputeCommandEncoder()!
+    enc.setBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setBuffer(keys, offset: 0, index: 0)
+    enc.setBuffer(debug, offset: 0, index: 5)
+    enc.setTexture(color, index: 0); enc.setTexture(depthT, index: 1)
+    enc.setTexture(out, index: 2); enc.setTexture(stT, index: 3)
+    let grid = MTLSize(width: mw, height: mh, depth: 2), group = MTLSize(width: 16, height: 8, depth: 1)
+    enc.setComputePipelineState(sharpProject)
+    enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+    enc.memoryBarrier(scope: .buffers)
+    enc.setComputePipelineState(sharpResolve)
+    enc.dispatchThreads(grid, threadsPerThreadgroup: group)
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    var a = [Float16](repeating: 0, count: mw * mh * 4), b = a
+    out.getBytes(&a, bytesPerRow: mw * 8, bytesPerImage: mw * mh * 8, from: MTLRegionMake2D(0, 0, mw, mh), mipmapLevel: 0, slice: 0)
+    out.getBytes(&b, bytesPerRow: mw * 8, bytesPerImage: mw * mh * 8, from: MTLRegionMake2D(0, 0, mw, mh), mipmapLevel: 0, slice: 1)
+    var differ = 0
+    for t in 0..<(mw * mh) where (0..<4).contains(where: { a[t * 4 + $0] != b[t * 4 + $0] }) { differ += 1 }
+    return differ
+}
+
 struct GlassView {
     let name: String, dump: Dump, glass: [UInt8], env: [UInt8], envFlat: [UInt8]
     var sharp: (w: Int, h: Int, rgba: [Float16], plane: SIMD4<Float>)?
@@ -632,7 +742,8 @@ var glassViews: [GlassView] = []
 for path in args {
     let dump = try Dump(path: path)
     guard let stencil = dump.stencil, dump.planes != nil, let current = probes.first else { continue }
-    let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+    let name = ((path.split(separator: "@").first.map(String.init) ?? path) as NSString).lastPathComponent
+        .replacingOccurrences(of: ".bin", with: "") + (path.contains("@") ? "@" + path.split(separator: "@")[1] : "")
     let w = dump.width, h = dump.height
     let color = dump.rgba.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
     let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
@@ -640,6 +751,11 @@ for path in args {
     params.glass = SIMD4(3, 0.04, 0.7, 0.35)           // the app's defaults (Renderer)
     params.water = SIMD4(1.8, 0.02, 0.85, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.008)
     params.reflectExtra = SIMD4(0.06, 0.04, 12.5, 1)  // a fixed moment of the ripples
+    // "waterUnderside" (Renderer.waterUnderside): an occluder's underside, as
+    // a share of its top's brightness; UNDERSIDE=0 leaves it to the probe
+    // MIRRORVIEW=1/2/3: "Water mirror view" (the mirror, its confidence, the target)
+    params.waterDebug = SIMD4(Float(ProcessInfo.processInfo.environment["MIRRORVIEW"] ?? "") ?? 0,
+                              Float(ProcessInfo.processInfo.environment["UNDERSIDE"] ?? "") ?? 0.35, 0, 0)
     params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
     params.glassTint = SIMD4(0.80, 0.90, 0.88, 0.35)   // w: the room's light (luma)
     setGlassView(&params, dump)
@@ -693,6 +809,11 @@ for path in args {
             t.getBytes(&px, bytesPerRow: t.width * 8, from: MTLRegionMake2D(0, 0, t.width, t.height), mipmapLevel: 0)
             sharpRead = (t.width, t.height, px, plane)
             print(String(format: "%@ sharp water: plane row %.0f at z %.1f", name, plane.x, plane.y))
+            do {
+                let differ = eyeSlices(params, dump)
+                print("\(name) both eyes: \(differ) mirror texels differ between the slices")
+                if differ > 0 { failures += 1 }
+            }
             if ProcessInfo.processInfo.environment["SSPR_TIMING"] == "1" {
                 let (tp, tr) = timeSharp(params, color, engineDepthTex, stencilTex)
                 print(String(format: "%@ sharp timing (Mac GPU): project %.3f ms, resolve %.3f ms", name, tp, tr))
