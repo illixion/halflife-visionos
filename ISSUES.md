@@ -205,6 +205,11 @@ instead of deleting them.
   probe does) and samples a 2 × 2-prefiltered half-size source. DepthProbe
   measures the mirrored-glass region at 2× resolution, but the Mac does not
   reproduce the device moiré. See `docs/plans/modern-lighting.md` (3j).
+- **Sharp water, round 8:** the prefilter pass cost 1.75 ms on device;
+  removed, the resolve does the 2 × 2 box with four bilinear taps (same
+  results offline). Expected mirror total ~1.3 ms; gComposite's rise traced
+  to the band-limited ripple at drawable resolution, trimmed. See
+  `docs/plans/modern-lighting.md` (3k).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

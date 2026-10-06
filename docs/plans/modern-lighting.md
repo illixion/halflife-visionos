@@ -736,6 +736,41 @@ for both eyes (~0.1–0.2 ms, counted in gMirrorFill); the projection adds a
 stencil read per source texel; the resolve samples a smaller texture.
 Mirror total ≈ 1.5–2.0 ms expected.
 
+### 3k. Sharp water, round 8: the prefilter's cost
+
+**Device (ea6a6ae = 87f6171 on phase7, c1a2 bench, sharp on, ripple 1×,
+p50):** gMirrorFill **1.78 ms** (0.03 before the prefilter), gMirrorProject
+0.31, gMirror 0.63, gComposite 5.05, gpuQueue 8.55 (was 6.6), frameGPU
+11.4, total 16.7 ms (60 fps). The first capture showed no hatching in the
+mirrored box.
+
+**The prefilter pass is gone.** Writing a half-size, two-slice rgba16Float
+copy of the engine image (1.9 M texels, shader writes) cost ~1.75 ms. The
+resolve now takes the 2 × 2-pixel box itself: four bilinear taps half a
+pixel either side of each sub-ray's sample, from the engine image directly
+(16 taps per mirror texel, on mirror texels near water only; neighbouring
+taps share cache lines). DepthProbe matches the prefiltered build to within
+0.1/255 on every check (stability, hatching, mirrored glass, gaze, stereo).
+Glass and water stay out of the mirror.
+
+**Expected:** gMirrorFill back to ~0.03 ms; gMirror up from 0.63 by about
+0.2–0.4 ms for the extra taps (~0.9–1.0 ms); mirror total ~1.3 ms, i.e.
+gpuQueue ≈ 7.1 ms instead of 8.55.
+
+**gComposite (5.05 ms, was 3.56 at abc500f).** What changed in the
+composite since then, for water pixels only: round 6's band-limited ripple
+(per wave a screen-period estimate: two dots, a length, divisions and a
+min, six waves) and the clamp on the mirror nudge. The composite runs at
+the drawable's resolution, ~2.3× the engine image per axis at the centre —
+about five times as many pixels as the engine image — so per-pixel ALU on a
+flood covering much of the view adds up. Now trimmed: a wave whose band
+weight is zero skips its cosine, and the probe walk (two depth reads and a
+colour sample) is skipped where the mirror is at least 98% confident (was
+99.9%). To confirm on device: gComposite with Water ripples 1× vs 0× (the
+ripple's share), and sharp on vs off (the mirror read and fallbacks). If
+the ripple dominates, the next step is evaluating it per mirror texel in
+the resolve rather than per drawable pixel.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new
