@@ -245,7 +245,7 @@ typedef struct {
 void lambda_body_state(lambda_body_state_t *out);
 
 // What the native (Metal) HUD shows, published by the client every HUD redraw
-// (cl_dll/hud_redraw.cpp g_vr_hud_state). -1 marks "not applicable": no
+// (VisionPort/hlsdk-vr/cl_dll/vr/vr_hud.cpp g_vr_hud_state). -1 marks "not applicable": no
 // weapon, no clip, no primary / secondary ammo, unknown max clip.
 typedef struct {
     int   has_suit;
