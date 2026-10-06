@@ -102,6 +102,11 @@ enum ViewmodelGrip {
         /// position, in model space: zero unless Valve's hand never touches
         /// the gun (see `pulledIn`).
         var pull: SIMD3<Float> = .zero
+        /// The bone an aimed gun is held still by, when it is not the grip
+        /// bone itself: the gun's body (see `gunBody`). Nil for a gun skinned
+        /// straight to the hand, for a model that marks no muzzle, and for
+        /// anything held.
+        var body: Int?
 
         /// The hand frame in the viewmodel's model space for a pose.
         func frame(in palette: [float4x4]) -> float4x4 {
@@ -130,13 +135,35 @@ enum ViewmodelGrip {
     /// `gunPoints` (the gun's vertices without hands, posed in idle) let an
     /// aimed gun that the grip hand does not actually touch be pulled into
     /// it (`pulledIn`); without them the grip is as the bones say.
+    ///
+    /// `hasAttachment` (the model marks a muzzle) makes an aimed gun held by
+    /// its body (`gunBody`, `Grip.body`); `loose` (per bone, `looseParts`)
+    /// keeps a parked spare magazine from being taken for that body. Thrown
+    /// things (grenades, snarks) and melee weapons mark none, so their throws
+    /// and swings still leave the hand as Valve animated them.
     static func grip(boneNames: [String], parents: [Int?], pose: [float4x4],
                      extractorChoice: Int, geometry: [(hand: Int, other: Int)],
-                     gunPoints: [SIMD3<Float>] = []) -> Grip? {
-        guard let g = boneGrip(boneNames: boneNames, parents: parents, pose: pose,
+                     gunPoints: [SIMD3<Float>] = [], hasAttachment: Bool = false,
+                     loose: [Bool] = []) -> Grip? {
+        guard var g = boneGrip(boneNames: boneNames, parents: parents, pose: pose,
                                extractorChoice: extractorChoice, geometry: geometry) else { return nil }
-        guard !gunPoints.isEmpty, hold(grip: g, idlePalette: pose) == .aimed else { return g }
+        guard hold(grip: g, idlePalette: pose) == .aimed else { return g }
+        if hasAttachment, let body = gunBody(geometry: geometry, loose: loose), body != g.bone, body < pose.count {
+            g.body = body
+        }
+        guard !gunPoints.isEmpty else { return g }
         return pulledIn(g, idlePalette: pose, gunPoints: gunPoints)
+    }
+
+    /// The bone that carries the most of the gun (vertices not drawn with a
+    /// hand texture), leaving out loose parts — the gun's body, which the
+    /// barrel, sights and muzzle ride on. It is the hand bone itself where
+    /// Valve skinned the gun straight to it (the Glock, the shotgun), and a
+    /// bone of its own elsewhere (the .357's `python`, the HD MP5's
+    /// `carbine`, the sniper rifle's `m40a1_stock`).
+    static func gunBody(geometry: [(hand: Int, other: Int)], loose: [Bool]) -> Int? {
+        let candidates = geometry.indices.filter { !(($0 < loose.count) && loose[$0]) && geometry[$0].other > 0 }
+        return candidates.max { geometry[$0].other < geometry[$1].other }
     }
 
     private static func boneGrip(boneNames: [String], parents: [Int?], pose: [float4x4],
@@ -313,9 +340,16 @@ enum ViewmodelGrip {
     /// has no named hand at all, and its synthesised frame sat the gun 17°
     /// high and rolled). Those axes go onto the hand's (+X along the
     /// fingers, +Z the thumb side, which a Bip01 hand shares), and the grip
-    /// bone only says where: its idle position lands on the hand, and its
-    /// motion since idle is taken back out, so recoil, the pump and the
-    /// magazine animate around a hand that does not move.
+    /// bone only says where: its idle position lands on the hand.
+    ///
+    /// What is held still is the gun's body (`Grip.body`, else the grip
+    /// bone): its motion since idle is taken back out, so the pump, the
+    /// cylinder and the magazine animate around a barrel that stays on the
+    /// hand's aim. Holding the grip bone still instead lets every animation
+    /// in which Valve's hand moves on the gun swing the gun off the aim: the
+    /// HD .357's fidget raises it 8° for four seconds, the sniper rifle's
+    /// bolt cycle turns it 47° after every shot, and the HD MP5's grenade
+    /// flips it while the hand works the launcher.
     ///
     /// `yawCorrection` (radians, aimed only) turns the gun about the hand's
     /// up axis to take out Valve's toe-in (ViewmodelAlignment).
@@ -327,10 +361,11 @@ enum ViewmodelGrip {
         case .held:
             return hand * flip * grip.frame(in: palette).inverse
         case .aimed:
-            let idle = bone(grip.bone, in: idlePalette)
+            let held = grip.body ?? grip.bone
             var toGrip = matrix_identity_float4x4
-            toGrip.columns.3 = SIMD4(-(xyz(idle.columns.3) + grip.pull), 1)
-            return hand * flip * yaw(yawCorrection) * toGrip * idle * bone(grip.bone, in: palette).inverse
+            toGrip.columns.3 = SIMD4(-(xyz(bone(grip.bone, in: idlePalette).columns.3) + grip.pull), 1)
+            return hand * flip * yaw(yawCorrection) * toGrip
+                * bone(held, in: idlePalette) * bone(held, in: palette).inverse
         }
     }
 
@@ -358,18 +393,50 @@ enum ViewmodelGrip {
 
     /// Where the muzzle is, in the viewmodel's idle model space.
     ///
-    /// Attachment 0 when the model has one — stock viewmodels put the muzzle
-    /// flash there. Otherwise (the crossbow, the RPG) the front of the gun:
-    /// the centre of the gun geometry within an inch of its furthest-forward
-    /// point. `gunPoints` are the gun's vertices (no hands) posed in idle.
+    /// Attachment 0 when the model has one and it lies on the barrel —
+    /// stock viewmodels put the muzzle flash there. Otherwise (the crossbow,
+    /// the RPG, and an attachment off the barrel) the front of the gun: the
+    /// centre of the gun geometry within an inch of its furthest-forward
+    /// point. `gunPoints` are the gun's vertices (no hands, no parked parts)
+    /// posed in idle.
+    ///
+    /// An attachment is on the barrel when, seen down the barrel (+X), it
+    /// falls inside the outline of the gun's front `muzzleSlabDepth` units
+    /// (`muzzleSlabMargin` of slack): a shot from it then leaves through the
+    /// gun's front. Every stock and HD Half-Life gun's attachment does, but
+    /// not all of the packs' copies: the HD .357 kept the classic model's
+    /// offset on a bone that sits differently, which puts its attachment 4
+    /// units ahead of and 4 above the barrel, so the shots and the reticle
+    /// ran 11 cm above the drawn barrel. Opposing Force's Desert Eagle (above
+    /// the slide), M249 (on the hand, 21 units back), sniper rifle (on the
+    /// stock) and displacer (its spinner), and the HD shotgun (above the
+    /// receiver) are off it too.
     static func muzzle(attachment: (bone: Int, org: SIMD3<Float>)?, idlePalette: [float4x4],
                        gunPoints: [SIMD3<Float>]) -> SIMD3<Float>? {
         if let a = attachment, a.bone < idlePalette.count {
-            return xyz(idlePalette[a.bone] * SIMD4(a.org, 1))
+            let p = xyz(idlePalette[a.bone] * SIMD4(a.org, 1))
+            if gunPoints.isEmpty || isOnBarrel(p, gunPoints: gunPoints) { return p }
         }
         guard let front = gunPoints.map(\.x).max() else { return nil }
         let tip = gunPoints.filter { $0.x > front - 1 }
         return tip.reduce(.zero, +) / Float(tip.count)
+    }
+
+    /// How much of the gun's front an attachment is judged against, and the
+    /// slack around its outline, in units. Measured over every stock, HD and
+    /// expansion gun: attachments on the barrel sit inside the outline, the
+    /// misplaced ones 1.3 (the HD shotgun) to 19 units outside it.
+    static let muzzleSlabDepth: Float = 6
+    static let muzzleSlabMargin: Float = 0.5
+
+    /// Whether `p` (idle model space) lies within the outline of the gun's
+    /// front, seen down +X (see `muzzle`).
+    static func isOnBarrel(_ p: SIMD3<Float>, gunPoints: [SIMD3<Float>]) -> Bool {
+        guard let front = gunPoints.map(\.x).max() else { return false }
+        let slab = gunPoints.filter { $0.x > front - muzzleSlabDepth }
+        let m = muzzleSlabMargin
+        return p.y >= slab.map(\.y).min()! - m && p.y <= slab.map(\.y).max()! + m
+            && p.z >= slab.map(\.z).min()! - m && p.z <= slab.map(\.z).max()! + m
     }
 
     /// The muzzle in the holding hand's frame, for an aimed gun: where shots
