@@ -329,8 +329,21 @@ instead of deleting them.
   behind. Seen in the probe's grip renders; likely visible on device near the
   gun. A fix wants a rule for "what the flat viewmodel would not have shown",
   e.g. culling against the original view frustum in viewmodel space.
-- **2D overlay minification.** The HUD box is downsampled ~2.15×; could
-  render the 2D layer at a matching smaller virtual resolution instead.
+- **2D overlay minification (looked at, not changed).** The 2D layer's
+  ortho keeps the full virtual screen (the engine render size, ~3800 px at
+  0.75 scale) and `R_Set2DMode` squeezes it into the 50° box, 1/frac ≈ 2.15×
+  smaller. HUD sprites and console glyphs are *not* texture-minified by
+  that: `hud_scale 4` / `con_fontscale 3` magnify them first, so they land
+  ~1.9× magnified. What does suffer is anything one virtual pixel thick (net
+  graph lines, console cursor, menu outlines: ~0.46 px, so they flicker)
+  and the stock menu if mainui rasterises its fonts at the virtual height.
+  The fix is to give the 2D layer its own virtual size equal to the box
+  (decoupled from `refState` width/height, which the 3D view also uses),
+  with `hud_scale`/`con_fontscale` divided by the same factor and
+  `Renderer.menuCursorFromGaze`'s render-target mapping switched to the
+  box. That touches client HUD layout, mainui's VidInit and the cursor
+  mapping, and can't be judged without the headset, so it is left for a
+  device session; check first whether menu text actually looks aliased.
 - **Level-transition hitches** (~43 ms signon parse + 110-180 ms map
   spawn) are inherent HL; a fade/hold would mask them.
 
