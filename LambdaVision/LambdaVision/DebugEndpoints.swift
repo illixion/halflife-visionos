@@ -539,9 +539,11 @@ enum DebugEndpoints {
         .flag("linearColor", \.linearColor),
         .flag("reprojectionDepth", \.reprojectionDepth),
         .flag("glassReflections", \.glassReflections),
+        .flag("waterReflections", \.waterReflections),
+        .number("reflectionStrength", \.reflectionStrength, 0.5...4),
         .choice("hdrTest", \.hdrTest, note: "not stored"),
         .flag("gpuPassTiming", \.gpuPassTiming, note: "not stored; fills the gpu columns of GET /perf"),
-        .number("gamma", \.gamma, 1.8...3),
+        .number("gamma", \.gamma, 1.8...3.6),
         .number("brightness", \.brightness, 0...1),
         .number("snapTurnDegrees", \.snapTurnDegrees, 15...45),
         // Audio
