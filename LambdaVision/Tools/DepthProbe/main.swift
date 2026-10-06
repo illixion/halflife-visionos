@@ -649,6 +649,71 @@ for path in args {
             print(String(format: "%@ mirrored glass/water: %d px, hatching sharp %.2f vs soft %.2f /255 (ripple off)", name, nPx, hSharp, hSoft))
             if hSharp > hSoft + 0.5 { failures += 1 }
         }
+        // the same over all the water the mirror covers, ripple on, at 2×:
+        // a comb of rows where a surface the eye barely sees (a face just
+        // above the water, the underside of an overhang) must fill many
+        // mirror rows
+        do {
+            let W2 = w * 2, H2 = h * 2
+            let sharpImg = render(glassOnPipeline, W2, H2, params, textures)
+            var softP = params
+            softP.sspr = (.zero, .zero)
+            let softImg = render(glassOnPipeline, W2, H2, softP, textures)
+            var mirrorAlpha: (Int, Int) -> Float = { _, _ in 0 }
+            if let sr = sharpRead {
+                mirrorAlpha = { x, sy in        // engine pixel (x, bottom-up row) → mirror alpha
+                    let mx = min(x * sr.w / w, sr.w - 1), my = min(sy * sr.h / h, sr.h - 1)
+                    return Float(sr.rgba[(my * sr.w + mx) * 4 + 3])
+                }
+            }
+            // per 48 × 48-pixel tile, so a local patch is not averaged away
+            let tile = 48, tw = W2 / tile + 1
+            func comb(_ img: [UInt8]) -> (Float, Int, [Float], [Int]) {
+                var sum: Float = 0, n = 0
+                var tSum = [Float](repeating: 0, count: tw * (H2 / tile + 1)), tN = [Int](repeating: 0, count: tSum.count)
+                for row in 8..<(H2 - 8) {
+                    for x in stride(from: 8, to: W2 - 8, by: 2) {
+                        let sy = h - 1 - row / 2, sx = x / 2
+                        guard sy >= 4, sy < h - 4 else { continue }
+                        let c = Int(stencil[sy * w + sx])
+                        guard c == Int(params.sspr.0.x) + 16, Int(stencil[(sy + 4) * w + sx]) == c,
+                              Int(stencil[(sy - 4) * w + sx]) == c, mirrorAlpha(sx, sy) > 0.05 else { continue }
+                        let i = (row * W2 + x) * 4
+                        var e: Float = 0
+                        for k in 0..<3 { e += abs(2 * Float(img[i + k]) - Float(img[i - W2 * 4 + k]) - Float(img[i + W2 * 4 + k])) }
+                        sum += e; n += 3
+                        let t = (row / tile) * tw + x / tile
+                        tSum[t] += e / 3; tN[t] += 1
+                    }
+                }
+                return (sum / Float(max(n, 1)), n / 3, tSum, tN)
+            }
+            let (cSharp, cn, ts, tn) = comb(sharpImg), (cSoft, _, ts0, _) = comb(softImg)
+            var worstTile: Float = 0, worstAt = 0
+            for t in ts.indices where tn[t] >= 300 {
+                let v = (ts[t] - ts0[t]) / Float(tn[t])
+                if v > worstTile { worstTile = v; worstAt = t }
+            }
+            print(String(format: "%@ worst tile at x %d y %d (2× image, top-down)", name, (worstAt % tw) * tile, (worstAt / tw) * tile))
+            print(String(format: "%@ mirror rows: %d px, hatching sharp %.2f vs soft %.2f /255, worst tile +%.2f (ripple on, 2×)",
+                         name, cn, cSharp, cSoft, worstTile))
+            if cn > 200 && (cSharp > cSoft + 0.25 || worstTile > 2.0) { failures += 1 }
+            if let dir = pngDir {
+                writePNG(sharpImg, W2, H2, "\(dir)/sharp2x-\(name).png")
+                if let sr = sharpRead {     // the mirror target: colour | alpha, top-down
+                    var img = [UInt8](repeating: 0, count: sr.w * 2 * sr.h * 4)
+                    for y in 0..<sr.h { for x in 0..<sr.w {
+                        let j = ((sr.h - 1 - y) * sr.w + x) * 4
+                        let a = Float(sr.rgba[j + 3])
+                        let o = (y * sr.w * 2 + x) * 4, o2 = (y * sr.w * 2 + sr.w + x) * 4
+                        for k in 0..<3 { img[o + k] = UInt8(min(max(a > 0.004 ? Float(sr.rgba[j + k]) / a * 255 : 0, 0), 255)) }
+                        for k in 0..<3 { img[o2 + k] = UInt8(min(max(a * 255, 0), 255)) }
+                        img[o + 3] = 255; img[o2 + 3] = 255
+                    } }
+                    writePNG(img, sr.w * 2, sr.h, "\(dir)/mirror-\(name).png")
+                }
+            }
+        }
     }
     if sharp, params.sspr.0.z > 0 {
         func shifted(_ dx: Float, _ dy: Float, dt: Float = 0) -> (DisplayParams, [Int: MTLTexture], [UInt8]) {

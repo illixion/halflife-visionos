@@ -425,15 +425,12 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float2 texel = 1.0 / float2(sharpWater.get_width(), sharpWater.get_height());
         offset = clamp(offset, -1.5 * texel, 1.5 * texel);
         const float2 suv = uv + offset;
-        const float texelY = 1.0 / float(sharpWater.get_height());
-        half4 c = sharpWater.sample(s, suv, eye);
-        // the half-resolution scatter leaves thin gaps; look a texel either side
-        if (c.a < 0.5h) {
-            const half4 up = sharpWater.sample(s, suv + float2(0, texelY), eye);
-            const half4 dn = sharpWater.sample(s, suv - float2(0, texelY), eye);
-            c = up.a > c.a ? up : c;
-            c = dn.a > c.a ? dn : c;
-        }
+        // One bilinear read, premultiplied, so coverage fades smoothly into the
+        // probe. (A search a texel up and down where coverage was low, kept
+        // from the point-splat days, switched hard between neighbours as the
+        // ripple moved the read across a coverage edge: the wavy lines on the
+        // headset. The resolve fills the mirror's gaps itself now.)
+        const half4 c = sharpWater.sample(s, suv, eye);
         sharpWeight = saturate(float(c.a));
         sharp = float3(c.rgb) / max(float(c.a), 1e-3);
     }
@@ -564,6 +561,9 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
 #ifndef SSPR_SUB_Y
 #define SSPR_SUB_Y 2    // ... and down (1 × 2 with 3 candidates is cheaper but fails DepthProbe stability)
 #endif
+#ifndef SSPR_FILL
+#define SSPR_FILL 8u    // rows searched up and down for a surface to fill a gap
+#endif
 #ifndef SSPR_CANDIDATES
 #define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
 #endif
@@ -598,11 +598,20 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         return;
     const uint base = uint(eye) * size.y * size.x;
     const uint i = base + gid.y * size.x + gid.x;
-    // Candidate surfaces: this texel's key and its four neighbours' (the
-    // texel's footprint can straddle a boundary between surfaces).
+    // Candidate surfaces: this texel's key, the nearest key above and below
+    // it within SSPR_FILL rows, and its left and right neighbours' (the
+    // texel's footprint can straddle a boundary between surfaces). The
+    // vertical search fills the gaps a forward projection leaves where a
+    // surface the eye barely sees — a face just above the water, the
+    // underside an overhang hides — must cover many mirror rows: the headset
+    // showed those as a comb of alternating rows that the ripple then
+    // dragged across the water. Each gap texel now finds the surface above
+    // or below it, and the exact-ray check below decides which one.
     uint cand[5] = { keys[i], 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
-    if (gid.y + 1 < size.y) cand[1] = keys[i + size.x];
-    if (gid.y > 0)          cand[2] = keys[i - size.x];
+    for (uint k = 1; k <= SSPR_FILL && gid.y + k < size.y; k++)
+        if (keys[i + k * size.x] != 0xFFFFFFFFu) { cand[1] = keys[i + k * size.x]; break; }
+    for (uint k = 1; k <= SSPR_FILL && gid.y >= k; k++)
+        if (keys[i - k * size.x] != 0xFFFFFFFFu) { cand[2] = keys[i - k * size.x]; break; }
     if (gid.x + 1 < size.x) cand[3] = keys[i + 1];
     if (gid.x > 0)          cand[4] = keys[i - 1];
     if (min(min(cand[0], cand[1]), min(min(cand[2], cand[3]), cand[4])) == 0xFFFFFFFFu) {
