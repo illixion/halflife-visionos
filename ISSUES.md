@@ -91,15 +91,14 @@ instead of deleting them.
   16-bit normalized and the drawable is `rgba16Float` (linear, no dither
   needed); dim vents are smooth.
 
-- **Linear colour: device check pending.** The drawable is linear light
-  and the engine's image is gamma-encoded, so writing it straight in lifted
-  everything under white (the reason gamma was tuned to 2.4). Settings
-  "Linear colour" (default on, `Renderer.displayDecodeGamma` = 2.2) decodes
-  every game colour before the drawable: composite, weapon/body pass,
-  load snapshot, the fade over the gun. HUD holograms and UI arcs are
-  authored for the drawable and stay as they are. On device: compare on/off
-  in a dark vent and a lit room, retune gamma with it on (likely toward the
-  engine's 2.5), and re-judge the HUD's dark-room dimming against it.
+- **Linear colour: gamma retuned on device (2026-10-06).** The drawable is
+  linear light and the engine's image is gamma-encoded; Settings "Linear
+  colour" (default on, `Renderer.displayDecodeGamma` = 2.2) decodes every
+  game colour before the drawable. With it on, the old 2.4 gamma read too
+  dark; 3.0 (then the slider's top) looked right on the headset, so it is
+  the new default and the slider reaches 3.6. Still to judge: whether
+  above 3.0 is better, on/off in a dark vent vs a lit room, and the HUD's
+  dark-room dimming against it. Existing installs keep their stored gamma.
 
 - **HDR headroom re-test: pending.** Settings → Diagnostics "HDR headroom
   test": test values 0.5 1 1.25 1.5 1.75 2 2.5 3 4 over black, each above a

@@ -60,7 +60,7 @@ struct SettingsView: View {
                     Toggle("Linear colour", isOn: $settings.linearColor)
                     Toggle("Per-pixel reprojection depth", isOn: $settings.reprojectionDepth)
                     Toggle("Glass reflections (prototype)", isOn: $settings.glassReflections)
-                    slider("Gamma", $settings.gamma, 1.8...3.0, 0.1) {
+                    slider("Gamma", $settings.gamma, 1.8...3.6, 0.1) {
                         String(format: "%.1f", $0)
                     }
                     slider("Brightness", $settings.brightness, 0.0...1.0, 0.05) {

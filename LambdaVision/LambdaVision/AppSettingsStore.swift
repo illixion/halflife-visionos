@@ -77,7 +77,7 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: glassReflectionsKey) }
     }
     static var gamma: Double {
-        get { double(gammaKey, 2.4) }   // tuned on the headset (engine default 2.5)
+        get { double(gammaKey, 3.0) }   // with Linear colour on; tuned on the headset 2026-10-06
         set { defaults.set(newValue, forKey: gammaKey) }
     }
     static var brightness: Double {
