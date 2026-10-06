@@ -227,7 +227,11 @@ static inline float3 hdrTestPattern(float2 uv, float mode, float aspect)
 // walked to where it meets the probe's surroundings (probeLookup), and each
 // eye sees the mirrored room at its true distance. Two probes are blended
 // across a refresh (probeMix.x), so a new capture fades in rather than pops.
-// What is seen through the pane takes on its tint (glassTint).
+// What is seen through the pane takes on its tint (glassTint). Water rows
+// (r_vrwater, the warp surfaces) use the same probe with their own Fresnel and
+// an animated ripple (waterRipple), and none from below the surface. The
+// reflectance is exaggerated on purpose (Settings "Reflection strength", plus
+// a little head-on): physically correct glass at 4% vanishes in this art.
 //
 // Per glass pixel: one stencil read, then three depth reads and a colour
 // sample per probe (two probes only while a refresh fades in). None elsewhere.
@@ -292,6 +296,31 @@ static inline float3 glassViewRay(float2 uv, ushort eye, constant DisplayParams 
     return normalize(p.glassEye[eye][1].xyz + v.x * p.glassEye[eye][2].xyz + v.y * p.glassEye[eye][3].xyz);
 }
 
+// Water (r_vrwater rows): the plane's normal tilted by a few travelling
+// sine waves of the world point, so the reflection shimmers instead of
+// mirroring. World-space and a function of P and time only, so both eyes see
+// the same ripple at the same spot. Returns the tilted normal; the slope fades
+// with distance so far water does not alias into noise.
+static inline float3 waterRipple(float3 n, float3 P, float dist, constant DisplayParams &p)
+{
+    const float slope = p.water.w / (1.0 + dist / 600.0);
+    if (slope <= 0.0)
+        return n;
+    const float3 t1 = normalize(cross(n, abs(n.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0)));
+    const float3 t2 = cross(n, t1);
+    const float2 q = float2(dot(P, t1), dot(P, t2)) / max(p.reflectExtra.w, 0.05);
+    const float t = p.reflectExtra.z;
+    // direction, spatial frequency (rad / unit), speed (rad / s), amplitude
+    const float4 waves[4] = { float4(0.83, 0.56, 0.16, 1.7), float4(-0.42, 0.91, 0.23, 2.3),
+                              float4(0.97, -0.26, 0.37, 3.1), float4(-0.71, -0.70, 0.55, 4.3) };
+    const float amp[4] = { 0.45, 0.30, 0.17, 0.08 };
+    // each wave tilts the normal along its direction by amp · cos(phase)
+    float2 g = 0.0;
+    for (int i = 0; i < 4; i++)
+        g += amp[i] * waves[i].xy * cos(dot(waves[i].xy, q) * waves[i].z + waves[i].w * t);
+    return normalize(n - slope * (g.x * t1 + g.y * t2));
+}
+
 static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
                                 texture2d_array<uint> engineStencil,
                                 texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
@@ -301,19 +330,31 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
     if (code < 16 || code > 239)
         return rgb;
-    const float4 plane = p.glassPlanes[eye][code - 16];
+    const uint row = code - 16;
+    const bool water = (p.glassKinds[eye][row >> 7][(row >> 5) & 3] >> (row & 31)) & 1;
+    const float4 plane = p.glassPlanes[eye][row];
     const float3 E = p.glassEye[eye][0].xyz;
     const float3 d = glassViewRay(uv, eye, p);
     float3 n = plane.xyz;
     const float nd = dot(n, d);
     if (abs(nd) < 1e-4)
         return rgb;
-    const float3 P = E + d * max((plane.w - dot(n, E)) / nd, 0.0);
+    const float side = dot(n, E) - plane.w;
+    // water's plane faces up out of it: from below (underwater) no reflection
+    if (water && side <= 0.0)
+        return rgb;
+    const float dist = max(-side / nd, 0.0);
+    const float3 P = E + d * dist;
     if (nd > 0.0)
         n = -n;                              // the side facing the viewer
-    const float cosTheta = saturate(-dot(d, n));
-    const float F = p.glass.y + (1.0 - p.glass.y) * pow(1.0 - cosTheta, 5.0);
-    const float3 r = reflect(d, n);
+    const float3 shape = water ? waterRipple(n, P, dist, p) : n;
+    const float4 k = water ? p.water : p.glass;   // strength, F0, cap
+    const float cosTheta = saturate(-dot(d, shape));
+    const float F = k.y + (1.0 - k.y) * pow(1.0 - cosTheta, 5.0)
+        + (water ? p.reflectExtra.y : p.reflectExtra.x);
+    float3 r = reflect(d, shape);
+    if (dot(r, n) < 0.0)
+        r -= 2.0 * dot(r, n) * n;            // a ripple never sends it below the surface
     const float2 clip = p.probeMix.yz;
     float3 env = p.glassAmbient.rgb;
     if (p.probe[1].w >= 0.0) {
@@ -324,8 +365,8 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float3 cur = probeLookup(probeColor, probeDepth, s, P, r, p.probe[1], clip, 3);
         env = mix(older, cur, w);
     }
-    const float3 seen = rgb * mix(float3(1.0), p.glassTint.rgb, p.glass.w);
-    return mix(seen, env, min(F * p.glass.x, p.glass.z));
+    const float3 seen = water ? rgb : rgb * mix(float3(1.0), p.glassTint.rgb, p.glass.w);
+    return mix(seen, env, min(F * k.x, k.z));
 }
 
 // Test hook for Tools/DepthProbe: what the probe shows along each pixel's

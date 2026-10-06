@@ -39,6 +39,8 @@ enum AppSettingsStore {
     private static let snapTurnDegreesKey = "lambdavision.settings.snapTurnDegrees"
     private static let reprojectionDepthKey = "lambdavision.settings.reprojectionDepth"
     private static let glassReflectionsKey = "lambdavision.settings.glassReflections"
+    private static let waterReflectionsKey = "lambdavision.settings.waterReflections"
+    private static let reflectionStrengthKey = "lambdavision.settings.reflectionStrength"
 
     static var renderScale: Double {
         get { double(renderScaleKey, 0.75) }
@@ -75,6 +77,18 @@ enum AppSettingsStore {
     static var glassReflections: Bool {
         get { bool(glassReflectionsKey, false) }
         set { defaults.set(newValue, forKey: glassReflectionsKey) }
+    }
+    /// The same probe reflection on water (Renderer.waterReflections,
+    /// r_vrwater). Off by default until judged on device.
+    static var waterReflections: Bool {
+        get { bool(waterReflectionsKey, false) }
+        set { defaults.set(newValue, forKey: waterReflectionsKey) }
+    }
+    /// Scales glass and water reflectance (Renderer.reflectionStrength).
+    /// 3× by default: the headset showed physical 4% glass barely at all.
+    static var reflectionStrength: Double {
+        get { double(reflectionStrengthKey, 3.0) }
+        set { defaults.set(newValue, forKey: reflectionStrengthKey) }
     }
     static var gamma: Double {
         get { double(gammaKey, 3.0) }   // with Linear colour on; tuned on the headset 2026-10-06

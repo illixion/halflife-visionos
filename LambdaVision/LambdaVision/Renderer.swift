@@ -145,7 +145,7 @@ actor Renderer {
     // frame so each Settings toggle is live without adding a pass: FXAA
     // folded into the fragment shader (the default, Renderer.compositeFXAA),
     // per-pixel reprojection depth (Renderer.reprojectionDepth), glass
-    // reflections (Renderer.glassReflections).
+    // and water reflections (Renderer.glassReflections, waterReflections).
     let compositePipelines: [MTLRenderPipelineState]
     struct CompositeVariant: OptionSet {
         let rawValue: Int
@@ -314,8 +314,24 @@ actor Renderer {
     /// in its stencil (Shaders.metal glassShade; GameSettings pushes the
     /// engine's r_vrglass with it). Settings → Graphics, default off. Live.
     nonisolated(unsafe) static var glassReflections: Bool = false
-    /// How much of the Fresnel reflectance the glass shows (1 = physical).
-    nonisolated(unsafe) static var glassStrength: Float = 1.0
+    /// The same probe reflection on water (r_vrwater), with moving ripples.
+    /// Settings → Graphics, default off. Live.
+    nonisolated(unsafe) static var waterReflections: Bool = false
+    /// Scales glass and water reflectance (Settings "Reflection strength",
+    /// 0.5–4×). Physical (1×) glass barely showed on the headset.
+    nonisolated(unsafe) static var reflectionStrength: Float = 3.0
+    /// Reflectance added head-on before the strength (glass, water), so a
+    /// pane seen from the front still reads; the most of a pixel a reflection
+    /// may replace (glass, water), so it never turns opaque; water's ripple
+    /// slope (0 = a flat mirror).
+    static let reflectionHeadOn = SIMD2<Float>(0.06, 0.04)
+    static let reflectionCap = SIMD2<Float>(0.7, 0.6)
+    nonisolated(unsafe) static var waterRippleSlope: Float = 0.08
+    /// Water's share of the strength: seen at grazing angles it reflects far
+    /// more than a pane and washed its own colour out at the glass setting.
+    static let waterStrengthScale: Float = 0.6
+    /// Either surface reflects: the probe runs and the composite reads it.
+    nonisolated static var probeReflections: Bool { glassReflections || waterReflections }
     /// The pane's own colour, multiplied into what is seen through it (float
     /// glass's faint green), and how far: GoldSrc's translucent glass alone
     /// reads as nearly clear. Engine colour space.
@@ -2520,7 +2536,7 @@ actor Renderer {
 
         // Glass probe (GlassProbe): made on first use; forgotten across a
         // load or while the toggle is off.
-        if Renderer.glassReflections, glassProbe == nil, let colorMap,
+        if Renderer.probeReflections, glassProbe == nil, let colorMap,
            let probe = GlassProbe(device: device, colorFormat: colorMap.pixelFormat) {
             glassProbe = probe
             #if !targetEnvironment(simulator)
@@ -2528,7 +2544,7 @@ actor Renderer {
             commandQueueResidencySet.commit()
             #endif
         }
-        if engineHeld || !Renderer.glassReflections { glassProbe?.reset() }
+        if engineHeld || !Renderer.probeReflections { glassProbe?.reset() }
         var secondEyeRan = false
 
         for eye in 0..<2 where !engineHeld {
@@ -2572,7 +2588,7 @@ actor Renderer {
                 if eye == 0 { Renderer.hudBoxAspect = sumV / sumH }
             }
             // The glass probe's face for this frame rides on the second eye.
-            if eye == 1, Renderer.glassReflections, let glassProbe {
+            if eye == 1, Renderer.probeReflections, let glassProbe {
                 glassProbe.stageFace(now: ftEyesStart, eyes: glassEyes)
             }
             let rc: Int32 = withUnsafePointer(to: &tang) { tp in
@@ -2690,6 +2706,13 @@ actor Renderer {
                 view[eye * 4 + 3] = SIMD4(e.up.0, e.up.1, e.up.2, 0)
                 var copy = e
                 let n = Int(min(max(e.count, 0), LAMBDA_GLASS_MAX_PLANES))
+                // water rows as bits (glassKinds)
+                var words = [UInt32](repeating: 0, count: 8)
+                withUnsafeBytes(of: &copy.kind) { kinds in
+                    for row in 0..<n where kinds[row] == 1 { words[row >> 5] |= 1 << UInt32(row & 31) }
+                }
+                let kindsAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassKinds)!
+                (raw.baseAddress! + kindsAt + eye * 32).copyMemory(from: words, byteCount: 32)
                 withUnsafeBytes(of: &copy.planes) { src in
                     (planes + eye * Int(LAMBDA_GLASS_MAX_PLANES) * rowBytes)
                         .copyMemory(from: src.baseAddress!, byteCount: n * rowBytes)
@@ -2964,7 +2987,7 @@ actor Renderer {
             && Renderer.hdrTestMode == 0 && displayMap == nil
         weaponPass.keepsDepth = perPixelDepth
         // Glass needs the engine's stencil, which lives in the same texture.
-        let glass = Renderer.glassReflections && engineStencil != nil
+        let glass = Renderer.probeReflections && engineStencil != nil
             && glassProbe != nil && glassEyes.count == 2
             && lambda_gl_depth_target_ok() != 0 && Renderer.hdrTestMode == 0 && displayMap == nil
         var variant: CompositeVariant = []
@@ -3019,7 +3042,12 @@ actor Renderer {
                 self.fragmentArgumentTable.setTexture(engineStencil.gpuResourceID, index: 2)
                 self.fragmentArgumentTable.setTexture(glassProbe.color.gpuResourceID, index: 3)
                 self.fragmentArgumentTable.setTexture(glassProbe.depth.gpuResourceID, index: 4)
-                params.glass = SIMD4(Renderer.glassStrength, 0.04, 0.85, Renderer.glassTintAmount)
+                let strength = Renderer.reflectionStrength
+                params.glass = SIMD4(strength, 0.04, Renderer.reflectionCap.x, Renderer.glassTintAmount)
+                params.water = SIMD4(strength * Renderer.waterStrengthScale, 0.02, Renderer.reflectionCap.y,
+                                     Renderer.waterRippleSlope)
+                params.reflectExtra = SIMD4(Renderer.reflectionHeadOn.x, Renderer.reflectionHeadOn.y,
+                                            Float(CACurrentMediaTime().truncatingRemainder(dividingBy: 3600)), 1)
                 // Until the first probe is in: the room's light at the eye
                 // (the engine's light probe), dimmed. Engine colour space,
                 // like the image.

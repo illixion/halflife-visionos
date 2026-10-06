@@ -3921,6 +3921,7 @@ static void gt_end(void) {
 // drawn right after the second eye so the eye's fence covers it.
 extern int   vr_glass_count;
 extern float vr_glass_planes[LAMBDA_GLASS_MAX_PLANES][4];
+extern unsigned char vr_glass_kind[LAMBDA_GLASS_MAX_PLANES];
 extern float vr_glass_view[12];
 extern void  R_VRProbeFace(const float *origin, int face, int size, float zNear, float zFar);
 static lambda_glass_eye_t g_glass_eye[2];
@@ -3941,6 +3942,7 @@ static void lambda_glass_capture_eye(int eye) {
     if (n > LAMBDA_GLASS_MAX_PLANES) n = LAMBDA_GLASS_MAX_PLANES;
     e->count = n;
     memcpy(e->planes, vr_glass_planes, sizeof(float) * 4 * (size_t)n);
+    memcpy(e->kind, vr_glass_kind, (size_t)n);
 }
 
 void lambda_glass_get_eye(int eye, lambda_glass_eye_t *out) {
