@@ -216,6 +216,9 @@ instead of deleting them.
   The resolve fills mirror gaps from up to 8 rows away. DepthProbe's new
   per-tile comb check at 2× fails aadfa42. See
   `docs/plans/modern-lighting.md` (3l).
+- **Sharp water, round 10 (b2e7e18): device check pending.** Smooth
+  confidence, ripple-free coverage, and a hidden-surface march for the
+  table-underside comb/transparency. Handoff: `docs/plans/sharp-water-handoff.md`.
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
