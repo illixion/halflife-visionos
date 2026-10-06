@@ -35,3 +35,6 @@ LambdaVision/LambdaVision/log.txt
 
 # Local signing config (certs/passwords) for scripts/build-and-sign.sh
 scripts/build-signing.conf
+
+# Scratch dir of scripts/fetch-prebuilts.sh
+LambdaVision/Vendor/.prebuilt-download/
