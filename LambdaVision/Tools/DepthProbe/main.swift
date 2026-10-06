@@ -426,7 +426,7 @@ for path in args {
     params.water = SIMD4(1.8, 0.02, 0.6, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.08)
     params.reflectExtra = SIMD4(0.06, 0.04, 12.5, 1)  // a fixed moment of the ripples
     params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
-    params.glassTint = SIMD4(0.80, 0.90, 0.88, 0)
+    params.glassTint = SIMD4(0.80, 0.90, 0.88, 0.35)   // w: the room's light (luma)
     setGlassView(&params, dump)
 
     // Probe view: each probe along the eye's own rays, on static world pixels
@@ -463,16 +463,23 @@ for path in args {
     }
 
     current.use(&params, iterations: 3)
-    let textures: [Int: MTLTexture] = [TextureIndex.color.rawValue: color, 2: stencilTex, 3: current.color, 4: current.depth]
+    let engineDepthTex = depthTexture(w, h, dump.depth, array: true)
+    let textures: [Int: MTLTexture] = [TextureIndex.color.rawValue: color, 1: engineDepthTex, 2: stencilTex,
+                                       3: current.color, 4: current.depth]
     let plain = render(plainPipeline, w, h, params, textures)
     let glass = render(glassOnPipeline, w, h, params, textures)
     var envParams = params                             // the reflection alone
     envParams.glass = SIMD4(100, 0.04, 1, 0)
     envParams.water.x = 100; envParams.water.z = 1
-    let env = render(glassOnPipeline, w, h, envParams, textures)
+    // over flat grey, so water's reflection (which modulates the surface's
+    // own colour) depends on the reflection alone
+    let grey = [UInt8](repeating: 128, count: w * h * 4)
+    var envTextures = textures
+    envTextures[TextureIndex.color.rawValue] = grey.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
+    let env = render(glassOnPipeline, w, h, envParams, envTextures)
     var flatParams = envParams                         // and with still water
     flatParams.water.w = 0
-    let envFlat = render(glassOnPipeline, w, h, flatParams, textures)
+    let envFlat = render(glassOnPipeline, w, h, flatParams, envTextures)
     var marked = 0, changedOutside = 0, changedInside = 0, missed = 0
     for row in 0..<h {
         for col in 0..<w {
@@ -512,6 +519,40 @@ for path in args {
         }
         print("\(name) water: \(waterPx) px, \(changed) changed with the eye below the surface")
         if changed > 0 { failures += 1 }
+    }
+    // Occluders: a model or sprite drawn after a marked surface keeps its
+    // stencil code. Put a fake one 30 units from the eye over the middle of
+    // the view (its depth only): marked pixels under it must come out as
+    // plain, and everything else as before. Then the real one in the dump:
+    // marked pixels whose depth is the flat viewmodel's (under 6 units).
+    do {
+        let zOcc: Float = 30
+        let occDepth = ((far + near - 2 * near * far / zOcc) / (far - near) + 1) / 2
+        var fake = dump.depth
+        let box = (x: w * 3 / 8..<w * 5 / 8, y: h / 4..<h * 3 / 4)    // bottom-up rows
+        for y in box.y { for x in box.x { fake[y * w + x] = occDepth } }
+        var t2 = textures
+        t2[1] = depthTexture(w, h, fake, array: true)
+        let occluded = render(glassOnPipeline, w, h, params, t2)
+        var under = 0, wrongUnder = 0, wrongElsewhere = 0, viewmodel = 0, wrongViewmodel = 0
+        for row in 0..<h {
+            for col in 0..<w {
+                let src = (h - 1 - row) * w + col
+                let code = stencil[src]
+                guard code >= 16 && code <= 239 else { continue }
+                let i = (row * w + col) * 4
+                let inBox = box.x.contains(col) && box.y.contains(h - 1 - row)
+                func differs(_ a: [UInt8], _ b: [UInt8]) -> Bool { (0..<3).contains { abs(Int(a[i + $0]) - Int(b[i + $0])) > 1 } }
+                if inBox { under += 1; if differs(occluded, plain) { wrongUnder += 1 } }
+                else if differs(occluded, glass) { wrongElsewhere += 1 }
+                let ndc = dump.depth[src] * 2 - 1
+                if 2 * near * far / ((far + near) - ndc * (far - near)) < 6 {
+                    viewmodel += 1; if differs(glass, plain) { wrongViewmodel += 1 }
+                }
+            }
+        }
+        print("\(name) occluders: \(under) marked px under a fake model, \(wrongUnder) shaded; \(wrongElsewhere) changed elsewhere; \(viewmodel) marked px under the viewmodel, \(wrongViewmodel) shaded")
+        if wrongUnder > 0 || wrongElsewhere > 0 || wrongViewmodel > 0 { failures += 1 }
     }
     print("\(name) glass+water: \(marked) px marked, \(changedInside) changed, \(changedOutside) changed outside the mask, \(missed) without a probe reflection")
     if changedOutside > 0 || (marked > 0 && changedInside == 0) || missed > 0 { failures += 1 }

@@ -169,7 +169,9 @@ typedef struct
     // rgb = what the reflection shows while no probe is ready, in the engine's
     // (gamma-encoded) colour space.
     simd_float4 glassAmbient;
-    // rgb = the pane's own colour, multiplied into what is seen through it.
+    // rgb = the pane's own colour, multiplied into what is seen through it;
+    // w = the room's light (luma, engine colour space): what water's
+    // reflection is measured against.
     simd_float4 glassTint;
     // Per eye: the engine frustum's left, right, top, bottom tangents, for
     // each pixel's view ray.

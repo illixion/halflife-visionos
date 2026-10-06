@@ -3040,6 +3040,9 @@ actor Renderer {
             }
             if glass, let engineStencil, let glassProbe, glassEyes.count == 2 {
                 self.fragmentArgumentTable.setTexture(engineStencil.gpuResourceID, index: 2)
+                // the depth too: a model drawn over a marked surface keeps its
+                // stencil code, and only the depth tells it apart (glassShade)
+                self.fragmentArgumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
                 self.fragmentArgumentTable.setTexture(glassProbe.color.gpuResourceID, index: 3)
                 self.fragmentArgumentTable.setTexture(glassProbe.depth.gpuResourceID, index: 4)
                 let strength = Renderer.reflectionStrength
@@ -3054,7 +3057,8 @@ actor Renderer {
                 var light: [Float] = [0.3, 0.3, 0.3]
                 light.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 params.glassAmbient = SIMD4(SIMD3(light[0], light[1], light[2]) * 0.5, 0)
-                params.glassTint = SIMD4(Renderer.glassTint, 0)
+                params.glassTint = SIMD4(Renderer.glassTint,
+                                         0.299 * light[0] + 0.587 * light[1] + 0.114 * light[2])
                 let t = drawable.views.indices.map { drawable.frustumTangents(viewIndex: $0) }
                 params.eyeTangents = (t[0], t[min(1, t.count - 1)])
                 let probe = glassProbe.shaderParams(now: CACurrentMediaTime())
