@@ -176,8 +176,8 @@ void     lambda_weapon_unlock(void);
 // internally). Returns its generation, 0 if no pose has been published yet.
 uint32_t lambda_weapon_copy_pose(lambda_weapon_pose_t *out);
 
-// Copy the current bake's sequence 0 / frame 0 pose — a viewmodel's idle —
-// into *out. Unlike lambda_weapon_copy_pose this does not follow playback, so
+// Copy the current bake's rest pose — frame 0 of its first idle sequence,
+// else of sequence 0 — into *out. Unlike lambda_weapon_copy_pose this does not follow playback, so
 // it is the stable reference for how the gun sits in the hand. Returns its
 // generation, 0 before the first bake.
 uint32_t lambda_weapon_copy_rest_pose(lambda_weapon_pose_t *out);
@@ -222,8 +222,8 @@ uint32_t lambda_body_pose_at(int seq, float frame, lambda_weapon_pose_t *out);
 // warm-up before the game starts: it bakes every weapon's viewmodel and world
 // model once, exactly as the weapon slots will, and works out what the weapon
 // pass would otherwise compute the first time each one is drawn. Same lock
-// rules as the other slots; the pose is sequence 0 frame 0 (a viewmodel's
-// idle). One model at a time — each load replaces the last. Not thread-safe
+// rules as the other slots; the pose is the rest pose (frame 0 of the first
+// idle sequence, else sequence 0). One model at a time — each load replaces the last. Not thread-safe
 // against itself; the warm-up runs it from one task.
 int      lambda_scratch_load(const char *path, int body);
 uint32_t lambda_scratch_lock(lambda_weapon_mesh_t *out);

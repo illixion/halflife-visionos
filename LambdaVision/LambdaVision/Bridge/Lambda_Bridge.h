@@ -370,6 +370,20 @@ void lambda_set_aim_offset(float pitch_deg, float yaw_deg);
 // eye, as stock. Thread-safe; applied on the GL worker each tick.
 void lambda_set_muzzle(float fwd, float left, float up, int active);
 
+// How the platform draws the weapon this tick, for the game's effects:
+// `flat` = 1 while it draws the viewmodel locked to the head as authored (a
+// viewmodel no hand can hold; the game then fires it along the view), and
+// `attachments` = the drawn gun's studio attachments (`count` of them, at most
+// four, x/y/z each), relative to the engine's eye in the same view-yaw frame
+// as lambda_set_muzzle (xash units). The hidden viewmodel's muzzle flash, its
+// light and beams from the gun (the gluon gun's, the shock roach's arcs) start
+// there. count = 0 leaves them where the flat viewmodel would have been.
+// `xform` (12 floats, or NULL with no gun in the hand) is the drawn gun's
+// model transform in that frame: the columns of its rotation, then its
+// origin, from the viewmodel's model space (units); shells eject from it.
+// Thread-safe; applied on the GL worker each tick.
+void lambda_set_weapon_draw(int flat, const float *xform, const float *attachments, int count);
+
 // Gun-mounted flashlight beam: the source relative to the eye in the same
 // view-yaw frame as lambda_set_muzzle (xash units), and the beam's pitch/yaw
 // offset from the composed view (degrees, same conventions as

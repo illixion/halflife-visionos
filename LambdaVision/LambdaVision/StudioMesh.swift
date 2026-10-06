@@ -194,6 +194,18 @@ final class StudioMesh {
         return out
     }
 
+    /// Each bone's vertices in its own bone space (the baked positions), for
+    /// `ViewmodelGrip.looseParts`.
+    static func bonePoints(of mesh: lambda_weapon_mesh_t) -> [[SIMD3<Float>]] {
+        var out = [[SIMD3<Float>]](repeating: [], count: Int(mesh.bone_count))
+        guard let verts = mesh.vertices else { return out }
+        for i in 0..<Int(mesh.vertex_count) {
+            let v = verts[i]
+            if Int(v.bone) < out.count { out[Int(v.bone)].append(SIMD3(v.pos.0, v.pos.1, v.pos.2)) }
+        }
+        return out
+    }
+
     /// The mesh's studio attachments as (bone, bone-local point).
     static func attachments(of mesh: lambda_weapon_mesh_t) -> [(bone: Int, org: SIMD3<Float>)] {
         var copy = mesh.attachments

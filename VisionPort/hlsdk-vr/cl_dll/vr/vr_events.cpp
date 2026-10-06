@@ -20,8 +20,15 @@
 //
 // We read g_vr_aim_offset_cl (vr_client.cpp, written by the bridge) rather
 // than the server's g_vr_aim_offset — the intermediate cl_dll dylib link has
-// no server symbols. Egon is absent, matching the server-side and
-// render-side exemptions — it fires along the view.
+// no server symbols. While the gun on screen is the head-locked viewmodel
+// (g_vr_weapon_flat_cl), events run as stock, matching the server, which
+// then fires along the view too.
+//
+// Not listed, because they draw nothing from the view: the gluon gun (its
+// beam is a server entity attached to the gun's muzzle, which
+// VR_StudioAttachments moves to the drawn gun, as it does the shock roach's
+// arcs and every muzzle flash), the displacer (sound and animation only; the
+// ball is a server entity) and the melee swings.
 
 #include "hud.h"
 #include "cl_util.h"
@@ -36,60 +43,100 @@
 
 extern "C" float g_vr_aim_offset_cl[2];     // vr_client.cpp
 extern "C" float g_vr_muzzle_offset_cl[4];  // vr_client.cpp
+extern "C" int g_vr_weapon_flat_cl;         // vr_client.cpp
+extern "C" float g_vr_weapon_xform_cl[13];  // vr_client.cpp
 
 typedef void ( *vr_event_fn )( struct event_args_s *args );
+
+enum
+{
+	VR_EV_AIM,	// copies args->angles once: aims along the barrel
+	VR_EV_MUZZLE,	// ...and fires from EV_GetGunPosition once: from the muzzle
+	VR_EV_ORIGIN,	// ...and places its effect at args->origin + the offset below
+			// (forward, right, up, in the aimed frame): moved to the muzzle
+};
 
 static const struct
 {
 	const char *name;
-	int muzzle;	// 1: the event fires bullets from EV_GetGunPosition
+	int mode;
+	float offset[3];	// VR_EV_ORIGIN only
 } s_vrEvents[] =
 {
 	// Half-Life
-	{ "events/glock1.sc", 1 },
-	{ "events/glock2.sc", 1 },
-	{ "events/shotgun1.sc", 1 },
-	{ "events/shotgun2.sc", 1 },
-	{ "events/mp5.sc", 1 },
-	{ "events/python.sc", 1 },
-	{ "events/gauss.sc", 1 },
-	{ "events/gaussspin.sc", 0 },
-	// Opposing Force (same shape: one args->angles copy, one EV_GetGunPosition)
-	{ "events/eagle.sc", 1 },
-	{ "events/m249.sc", 1 },
-	{ "events/sniper.sc", 1 },
+	{ "events/glock1.sc", VR_EV_MUZZLE },
+	{ "events/glock2.sc", VR_EV_MUZZLE },
+	{ "events/shotgun1.sc", VR_EV_MUZZLE },
+	{ "events/shotgun2.sc", VR_EV_MUZZLE },
+	{ "events/mp5.sc", VR_EV_MUZZLE },
+	{ "events/python.sc", VR_EV_MUZZLE },
+	{ "events/gauss.sc", VR_EV_MUZZLE },
+	{ "events/gaussspin.sc", VR_EV_AIM },
+	{ "events/crossbow2.sc", VR_EV_MUZZLE },	// the zoomed bolt's hit
+	// The throw checks: their trace must match the server's (which runs
+	// along the aimed v_angle) or the throw animation plays for a throw that
+	// never happens, or the other way round.
+	{ "events/snarkfire.sc", VR_EV_AIM },
+	{ "events/tripfire.sc", VR_EV_AIM },
+	// Opposing Force
+	{ "events/eagle.sc", VR_EV_MUZZLE },
+	{ "events/m249.sc", VR_EV_MUZZLE },
+	{ "events/sniper.sc", VR_EV_MUZZLE },
+	{ "events/penguinfire.sc", VR_EV_AIM },
+	// The spore launcher's spit spray, at origin + forward·16 + right·8 + up·4.
+	{ "events/spore.sc", VR_EV_ORIGIN, { 16.0f, 8.0f, 4.0f } },
 };
 
 #define VR_MAX_EVENTS 32
 
 static vr_event_fn s_vrEventFns[VR_MAX_EVENTS];
-static int s_vrEventMuzzle[VR_MAX_EVENTS];
+static int s_vrEventSlot[VR_MAX_EVENTS];	// index into s_vrEvents
 static void ( *s_vrHookEvent )( const char *name, vr_event_fn pfnEvent );
 
 // Set while a muzzle event runs for the local player: the view yaw before
 // the aim offset, which the muzzle offset's level frame is relative to.
 static int s_vrMuzzleArmed = 0;
 static float s_vrMuzzleYaw = 0.0f;
+// Set for the whole of a listed event run for the local player.
+static int s_vrEventActive = 0;
 
 static void VR_RunEvent( int slot, struct event_args_s *args )
 {
 	vr_event_fn fn = s_vrEventFns[slot];
-	if( !EV_IsLocal( args->entindex ))
+	if( !EV_IsLocal( args->entindex ) || g_vr_weapon_flat_cl )
 	{
 		fn( args );
 		return;
 	}
-	float saved[3];
+	const int mode = s_vrEvents[s_vrEventSlot[slot]].mode;
+	float saved[3], savedOrigin[3];
 	VectorCopy( args->angles, saved );
+	VectorCopy( args->origin, savedOrigin );
 	args->angles[PITCH] += g_vr_aim_offset_cl[0];
 	args->angles[YAW]   += g_vr_aim_offset_cl[1];
-	s_vrMuzzleArmed = s_vrEventMuzzle[slot];
 	s_vrMuzzleYaw = saved[YAW];
+
+	if( mode == VR_EV_ORIGIN && g_vr_muzzle_offset_cl[3] > 0.0f )
+	{
+		// Where the muzzle is (the eye when a wall is in the way), less the
+		// event's own offset, so the effect it places lands on the muzzle.
+		const float *off = s_vrEvents[s_vrEventSlot[slot]].offset;
+		vec3_t muzzle, forward, right, up;
+		s_vrMuzzleArmed = 1;
+		EV_GetGunPosition( args, muzzle, args->origin );
+		AngleVectors( args->angles, forward, right, up );
+		for( int i = 0; i < 3; i++ )
+			args->origin[i] = muzzle[i] - forward[i] * off[0] - right[i] * off[1] - up[i] * off[2];
+	}
+	s_vrMuzzleArmed = mode == VR_EV_MUZZLE;
+	s_vrEventActive = 1;
 
 	fn( args );
 
+	s_vrEventActive = 0;
 	s_vrMuzzleArmed = 0;
 	VectorCopy( saved, args->angles );
+	VectorCopy( savedOrigin, args->origin );
 }
 
 template<int N> static void VR_EventTrampoline( struct event_args_s *args )
@@ -123,7 +170,7 @@ static void VR_HookEvent( const char *name, vr_event_fn pfnEvent )
 			used++;
 		}
 		s_vrEventFns[slot] = pfnEvent;
-		s_vrEventMuzzle[slot] = s_vrEvents[i].muzzle;
+		s_vrEventSlot[slot] = (int)i;
 		s_vrHookEvent( name, s_vrTrampolines[slot] );
 		return;
 	}
@@ -177,4 +224,53 @@ void VR_EV_GunPosition( struct event_args_s *args, float *vecSrc )
 	pmtrace_t *tr = gEngfuncs.PM_TraceLine( vecSrc, muzzle, PM_TRACELINE_PHYSENTSONLY, 2, -1 );
 	if( tr && tr->fraction >= 1.0f && !tr->startsolid && !tr->allsolid )
 		VectorCopy( muzzle, vecSrc );
+}
+
+/*
+=========================
+VR_EV_ShellInfo
+
+Hook: end of EV_GetDefaultShellInfo (ev_common.cpp).
+
+Shells eject from the gun in the hand. Stock places the shell at a fixed
+offset from the eye along the view's forward/right/up — a point on the flat
+viewmodel, which is authored in view space (x forward, y left, z up from the
+eye). With barrel aim those axes are the barrel's, but the origin is still
+the eye, so shells left from in front of the face, off the aim ray. The
+offset is read as that viewmodel-space point and carried onto the drawn gun
+by the platform's model transform (g_vr_weapon_xform_cl); the throw is
+turned with it, the player's own velocity kept.
+=========================
+*/
+void VR_EV_ShellInfo( struct event_args_s *args, float *velocity, float *ShellVelocity, float *ShellOrigin,
+	float *forward, float *right, float *up, float forwardScale, float upScale, float rightScale )
+{
+	const float *x = g_vr_weapon_xform_cl;
+	if( !s_vrEventActive || x[12] <= 0.0f || !EV_IsLocal( args->entindex ))
+		return;
+	int i;
+	vec3_t eye, d;
+	for( i = 0; i < 3; i++ )
+	{
+		eye[i] = ShellOrigin[i] - up[i] * upScale - forward[i] * forwardScale - right[i] * rightScale;
+		d[i] = ShellVelocity[i] - velocity[i];
+	}
+	// Viewmodel space: x forward, y left, z up.
+	const float p[3] = { forwardScale, -rightScale, upScale };
+	const float v[3] = { DotProduct( d, forward ), -DotProduct( d, right ), DotProduct( d, up ) };
+	// x: columns of the gun's rotation [0..8] and its origin [9..11], relative
+	// to the eye in the level frame of the view yaw.
+	float lp[3], lv[3];
+	for( i = 0; i < 3; i++ )
+	{
+		lp[i] = x[i] * p[0] + x[3 + i] * p[1] + x[6 + i] * p[2] + x[9 + i];
+		lv[i] = x[i] * v[0] + x[3 + i] * v[1] + x[6 + i] * v[2];
+	}
+	const float yaw = s_vrMuzzleYaw * 0.017453293f, c = cosf( yaw ), s = sinf( yaw );
+	ShellOrigin[0] = eye[0] + c * lp[0] - s * lp[1];
+	ShellOrigin[1] = eye[1] + s * lp[0] + c * lp[1];
+	ShellOrigin[2] = eye[2] + lp[2];
+	ShellVelocity[0] = velocity[0] + c * lv[0] - s * lv[1];
+	ShellVelocity[1] = velocity[1] + s * lv[0] + c * lv[1];
+	ShellVelocity[2] = velocity[2] + lv[2];
 }

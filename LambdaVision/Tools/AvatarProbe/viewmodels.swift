@@ -65,6 +65,20 @@ struct ProbeModel {
     }
 }
 
+/// Each bone's vertices in its own bone space, for ViewmodelGrip.parkedBones.
+func boneLocalPoints(_ model: ProbeModel) -> [[SIMD3<Float>]] {
+    var out = [[SIMD3<Float>]](repeating: [], count: model.boneNames.count)
+    for tri in model.triangles { for (p, b) in tri.v where b < out.count { out[b].append(p) } }
+    return out
+}
+
+/// Which bones are hidden in the rest pose as parked parts (ViewmodelGrip).
+func parkedInRest(_ model: ProbeModel) -> [Bool] {
+    let pts = boneLocalPoints(model)
+    let loose = ViewmodelGrip.looseParts(points: pts, restPose: model.restPose, boneNames: model.boneNames)
+    return ViewmodelGrip.parkedBones(loose: loose, points: pts, palette: model.restPose)
+}
+
 /// Writes posed triangles as "label|x y z|x y z|x y z" lines (render with
 /// render_tri.py beside this file).
 func triLines(_ model: ProbeModel, palette: [float4x4], transform: float4x4, label: String,
@@ -85,16 +99,6 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
         .filter { $0.hasPrefix("v_") && $0.hasSuffix(".mdl") }.sorted()
     guard !files.isEmpty else { print("no v_*.mdl under \(modelsDir), skipped"); return }
 
-    // The pose the avatar holds a gun in: right hand forward at chest
-    // height, fingers forward and a little down, back of the hand outward.
-    let eye = SIMD3<Float>(0, 0, 64)
-    let rest = rig.pose(AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil))
-    let shoulder = PoseSolver.translation(of: rest.root * rest.palette[rig.rightArm!.chain.joints[0]])
-    let handTarget = shoulder + SIMD3<Float>(15, 2, -5)
-    let handRotation = AvatarRig.handRotation(forward: simd_normalize(SIMD3<Float>(1, 0, -0.35)),
-                                              back: SIMD3<Float>(0, -1, 0))
-    let armBones = rig.subtree(of: rig.rightArm!.chain.joints[0])
-
     var worstSynth: Float = 0
     for file in files {
         let path = modelsDir + "/" + file
@@ -105,8 +109,10 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
         let geometry = ViewmodelGrip.boneGeometry(
             boneCount: vm.boneNames.count, textureNames: vm.textureNames,
             vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+        let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
+            .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
         let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
-                                      extractorChoice: vm.handBone, geometry: geometry)
+                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints)
         let fingerChains = ViewmodelGrip.fingerChains(parents: vm.parents, geometry: geometry)
 
         // The synthesised hand frame, built for a hand that has a real Bip01
@@ -149,8 +155,6 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
         let offFingers = acosf(max(-1, min(1, valveBarrel.x))) * 180 / .pi
         let hold = ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose)
         let barrel = ViewmodelGrip.barrel(grip: grip, hold: hold, idlePalette: vm.restPose, handIsLeft: false)
-        let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
-            .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
         let muzzle = ViewmodelGrip.muzzle(attachment: vm.attachments.first, idlePalette: vm.restPose,
                                           gunPoints: gunPoints)
         let muzzleInHand = muzzle.map { ViewmodelGrip.muzzleInHand($0, grip: grip, idlePalette: vm.restPose,
@@ -207,33 +211,51 @@ func runViewmodelChecks(rig: AvatarRig, gordon: ProbeModel, modelsDir: String, d
             print(line)
         }
         guard let dumpDir else { continue }
-        // Gordon's right arm holding the gun-only viewmodel, fingers curled
-        // by the viewmodel's own idle grip.
-        var t = AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: handTarget)
-        t.rightHandRotation = handRotation
-        t.rightFingers = ViewmodelGrip.fingerPose(boneNames: vm.boneNames, palette: vm.restPose,
-                                                  grip: grip, handIsLeft: false)
-        let pose = rig.pose(t)
-        let hand = rig.handMatrix(pose, left: false)!
-        let model = ViewmodelGrip.modelMatrix(hand: hand, grip: grip, hold: hold, palette: vm.restPose,
-                                              idlePalette: vm.restPose, handIsLeft: false)
-        var lines = triLines(gordon, palette: pose.palette, transform: pose.root, label: "body") { _, bones in
-            bones.allSatisfy { armBones.contains($0) }
-        }
-        lines += triLines(vm, palette: vm.restPose, transform: model, label: "gun") { tex, b in
-            !isHand(tex, b[0], b[1], b[2])
-        }
-        // The barrel ray, as a thin sliver from the hand.
-        let origin = PoseSolver.translation(of: hand)
-        let dir = simd_normalize((hand * SIMD4<Float>(barrel, 0)).xyz3)
-        let side = simd_normalize(simd_cross(dir, SIMD3<Float>(0, 0, 1))) * 0.15
-        let tip = origin + dir * 30
-        lines.append("ray" + [origin - side, origin + side, tip].map { String(format: "|%.3f %.3f %.3f", $0.x, $0.y, $0.z) }.joined())
-        let out = dumpDir + "/grip_" + file.replacingOccurrences(of: ".mdl", with: ".tri")
-        try? lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
+        writeGripDump(rig: rig, gordon: gordon, vm: vm, grip: grip, hold: hold, barrel: barrel,
+                      file: file, dumpDir: dumpDir)
     }
     print(String(format: "  synthesised hand frames vs real Bip01 hands: worst %.0f°", worstSynth))
     if worstSynth > 30 { die("the synthesised hand frame does not match a real Bip01 hand") }
+}
+
+/// Gordon's right arm holding the gun-only viewmodel, fingers curled by the
+/// viewmodel's own idle grip, as grip_<model>.tri in `dumpDir`.
+func writeGripDump(rig: AvatarRig, gordon: ProbeModel, vm: ProbeModel, grip: ViewmodelGrip.Grip,
+                   hold: ViewmodelGrip.Hold, barrel: SIMD3<Float>, file: String, dumpDir: String) {
+    let isHand = ViewmodelGrip.handTriangleFilter(textureNames: vm.textureNames, boneNames: vm.boneNames)
+    // The pose the avatar holds a gun in: right hand forward at chest
+    // height, fingers forward and a little down, back of the hand outward.
+    let eye = SIMD3<Float>(0, 0, 64)
+    let rest = rig.pose(AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: nil))
+    let shoulder = PoseSolver.translation(of: rest.root * rest.palette[rig.rightArm!.chain.joints[0]])
+    let handTarget = shoulder + SIMD3<Float>(15, 2, -5)
+    let handRotation = AvatarRig.handRotation(forward: simd_normalize(SIMD3<Float>(1, 0, -0.35)),
+                                              back: SIMD3<Float>(0, -1, 0))
+    let armBones = rig.subtree(of: rig.rightArm!.chain.joints[0])
+    var t = AvatarRig.Targets(headPosition: eye, bodyYaw: 0, leftHand: nil, rightHand: handTarget)
+    t.rightHandRotation = handRotation
+    t.rightFingers = ViewmodelGrip.fingerPose(boneNames: vm.boneNames, palette: vm.restPose,
+                                              grip: grip, handIsLeft: false)
+    let pose = rig.pose(t)
+    let hand = rig.handMatrix(pose, left: false)!
+    let model = ViewmodelGrip.modelMatrix(hand: hand, grip: grip, hold: hold, palette: vm.restPose,
+                                          idlePalette: vm.restPose, handIsLeft: false)
+    var lines = triLines(gordon, palette: pose.palette, transform: pose.root, label: "body") { _, bones in
+        bones.allSatisfy { armBones.contains($0) }
+    }
+    // Parked parts are not drawn (ViewmodelGrip.parkedBones), as in the app.
+    let parked = parkedInRest(vm)
+    lines += triLines(vm, palette: vm.restPose, transform: model, label: "gun") { tex, b in
+        !isHand(tex, b[0], b[1], b[2]) && !b.allSatisfy { $0 < parked.count && parked[$0] }
+    }
+    // The barrel ray, as a thin sliver from the hand.
+    let origin = PoseSolver.translation(of: hand)
+    let dir = simd_normalize((hand * SIMD4<Float>(barrel, 0)).xyz3)
+    let side = simd_normalize(simd_cross(dir, SIMD3<Float>(0, 0, 1))) * 0.15
+    let tip = origin + dir * 30
+    lines.append("ray" + [origin - side, origin + side, tip].map { String(format: "|%.3f %.3f %.3f", $0.x, $0.y, $0.z) }.joined())
+    let out = dumpDir + "/grip_" + file.replacingOccurrences(of: ".mdl", with: ".tri")
+    try? lines.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
 }
 
 extension SIMD4 where Scalar == Float {
@@ -242,8 +264,9 @@ extension SIMD4 where Scalar == Float {
 
 /// `--anchor=<models dir>`: which viewmodels in another game's models dir
 /// the weapon pass would hold in the hand and which it would draw flat
-/// (ViewmodelGrip.canAnchorInHand). Reports only; mods may fail.
-func runAnchorChecks(modelsDir: String) {
+/// (ViewmodelGrip.canAnchorInHand). Reports only; mods may fail. With a
+/// `dumpDir` (--grips), also writes each held one's grip_<model>.tri there.
+func runAnchorChecks(modelsDir: String, rig: AvatarRig, gordon: ProbeModel, dumpDir: String?) {
     print("\n— hand anchoring in \((modelsDir as NSString).abbreviatingWithTildeInPath) —")
     let files = ((try? FileManager.default.contentsOfDirectory(atPath: modelsDir)) ?? [])
         .filter { $0.lowercased().hasPrefix("v_") && $0.lowercased().hasSuffix(".mdl") }.sorted()
@@ -257,13 +280,47 @@ func runAnchorChecks(modelsDir: String) {
         let geometry = ViewmodelGrip.boneGeometry(
             boneCount: vm.boneNames.count, textureNames: vm.textureNames,
             vertices: vm.triangles.flatMap { tri in tri.v.map { (tri.texture, $0.1) } })
+        let gunPoints = vm.triangles.filter { !isHand($0.texture, $0.v[0].1, $0.v[1].1, $0.v[2].1) }
+            .flatMap { $0.v.map { (p, b) in (vm.restPose[min(b, vm.restPose.count - 1)] * SIMD4(p, 1)).xyz3 } }
         let grip = ViewmodelGrip.grip(boneNames: vm.boneNames, parents: vm.parents, pose: vm.restPose,
-                                      extractorChoice: vm.handBone, geometry: geometry)
+                                      extractorChoice: vm.handBone, geometry: geometry, gunPoints: gunPoints)
         let ok = ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: vm.restPose,
                                                gunVertexCount: vm.triangles.count - cut)
         let hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: vm.restPose) == .aimed ? "aimed" : "held" } ?? "-"
-        print(String(format: "  %-24@ cut %4d/%4d  grip %@  %@  → %@", file, cut, vm.triangles.count,
+        // How far each hand bone sits from the nearest gun vertex in idle: a
+        // grip that holds the gun is within a few units of it. The grip's own
+        // gap is after any pull-in (ViewmodelGrip.pulledIn), marked "pulled".
+        func gap(_ bone: Int, pull: SIMD3<Float> = .zero) -> Float {
+            let o = PoseSolver.translation(of: vm.restPose[bone]) + pull
+            return gunPoints.map { simd_distance($0, o) }.min() ?? .infinity
+        }
+        let gaps = vm.boneNames.indices.filter { vm.boneNames[$0].hasSuffix(" Hand") && $0 < vm.restPose.count }
+            .map { String(format: "%@ %.1f", vm.boneNames[$0].hasSuffix(" L Hand") ? "L" : "R", gap($0)) }
+            .joined(separator: " ")
+        print(String(format: "  %-24@ cut %4d/%4d  grip %@  %@  → %@  gap %@", file, cut, vm.triangles.count,
                      grip.map { vm.boneNames[$0.bone] + ($0.fingerPrefix == nil ? " (synth)" : "") } ?? "none",
-                     hold, ok ? "hand" : "FLAT"))
+                     hold, ok ? "hand" : "FLAT", grip.map { String(format: "%.1f%@", gap($0.bone, pull: $0.pull), $0.pull == .zero ? "" : " pulled") } ?? "-")
+              + (gaps.isEmpty ? "" : " (\(gaps))"))
+        let parked = parkedInRest(vm)
+        if parked.contains(true) {
+            print("      parked out of shot (hidden): " + parked.indices.filter { parked[$0] }.map { vm.boneNames[$0] }.joined(separator: ", "))
+        }
+        if let dumpDir {
+            // The viewmodel as authored, in its idle model space: hands as
+            // "cut", the rest as "gun".
+            let raw = triLines(vm, palette: vm.restPose, transform: matrix_identity_float4x4, label: "gun") { t, b in
+                !isHand(t, b[0], b[1], b[2]) }
+                + triLines(vm, palette: vm.restPose, transform: matrix_identity_float4x4, label: "cut") { t, b in
+                isHand(t, b[0], b[1], b[2]) }
+            try? raw.joined(separator: "\n").write(toFile: dumpDir + "/raw_" + file.replacingOccurrences(of: ".mdl", with: ".tri"),
+                                                   atomically: true, encoding: .utf8)
+        }
+        if let dumpDir, ok, let grip {
+            let h = ViewmodelGrip.hold(grip: grip, idlePalette: vm.restPose)
+            writeGripDump(rig: rig, gordon: gordon, vm: vm, grip: grip, hold: h,
+                          barrel: ViewmodelGrip.barrel(grip: grip, hold: h, idlePalette: vm.restPose,
+                                                       handIsLeft: false),
+                          file: file, dumpDir: dumpDir)
+        }
     }
 }

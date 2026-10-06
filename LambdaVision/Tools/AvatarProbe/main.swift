@@ -657,7 +657,12 @@ do {
         runWorldModelChecks(rig: rig, gordon: gordon, modelsDir: hd, dumpDir: dump.map { $0 + "/hd" })
     }
     for arg in CommandLine.arguments where arg.hasPrefix("--anchor=") {
-        runAnchorChecks(modelsDir: String(arg.dropFirst("--anchor=".count)))
+        // Grip renders go to a folder named for the game (gearbox, bshift_hd…).
+        let dir = String(arg.dropFirst("--anchor=".count))
+        let game = ((dir as NSString).deletingLastPathComponent as NSString).lastPathComponent
+        let out = dump.map { $0 + "/" + game }
+        if let out { try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true) }
+        runAnchorChecks(modelsDir: dir, rig: rig, gordon: gordon, dumpDir: out)
     }
 }
 

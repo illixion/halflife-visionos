@@ -1,3 +1,28 @@
+diff --git a/cl_dll/StudioModelRenderer.cpp b/cl_dll/StudioModelRenderer.cpp
+index 45ae948..4d1fdf1 100644
+--- a/cl_dll/StudioModelRenderer.cpp
++++ b/cl_dll/StudioModelRenderer.cpp
+@@ -1087,6 +1087,10 @@ int CStudioModelRenderer::StudioDrawModel( int flags )
+ 	alight_t lighting;
+ 	vec3_t dir;
+ 
++	extern int VR_StudioDrawModel( int flags ); // VR: viewmodel events once per frame (cl_dll/vr)
++	if( !VR_StudioDrawModel( flags ) )
++		return 0;
++
+ 	m_pCurrentEntity = IEngineStudio.GetCurrentEntity();
+ 	IEngineStudio.GetTimes( &m_nFrameCount, &m_clTime, &m_clOldTime );
+ 	IEngineStudio.GetViewInfo( m_vRenderOrigin, m_vUp, m_vRight, m_vNormal );
+@@ -1545,6 +1549,9 @@ void CStudioModelRenderer::StudioCalcAttachments( void )
+ 	{
+ 		VectorTransform( pattachment[i].org, (*m_plighttransform)[pattachment[i].bone], m_pCurrentEntity->attachment[i] );
+ 	}
++
++	extern void VR_StudioAttachments( cl_entity_t *ent, int numattachments ); // VR: muzzle of the drawn gun (cl_dll/vr)
++	VR_StudioAttachments( m_pCurrentEntity, m_pStudioHeader->numattachments );
+ }
+ 
+ /*
 diff --git a/cl_dll/ammo.cpp b/cl_dll/ammo.cpp
 index 72272b2..406fcd5 100644
 --- a/cl_dll/ammo.cpp
@@ -59,7 +84,7 @@ index 3670546..958b647 100644
  	// Load an appropriate model into it ( gEngfuncs.CL_LoadModel )
  	// Call gEngfuncs.CL_CreateVisibleEntity to add it to the visedicts list
 diff --git a/cl_dll/ev_common.cpp b/cl_dll/ev_common.cpp
-index ebba9cb..3c8a773 100644
+index ebba9cb..48605fb 100644
 --- a/cl_dll/ev_common.cpp
 +++ b/cl_dll/ev_common.cpp
 @@ -126,6 +126,9 @@ void EV_GetGunPosition( event_args_t *args, float *pos, float *origin )
@@ -69,6 +94,16 @@ index ebba9cb..3c8a773 100644
 +
 +	extern void VR_EV_GunPosition( event_args_t *args, float *pos ); // VR: muzzle origin (cl_dll/vr)
 +	VR_EV_GunPosition( args, pos );
+ }
+ 
+ /*
+@@ -183,6 +186,9 @@ void EV_GetDefaultShellInfo( event_args_t *args, float *origin, float *velocity,
+ 		ShellVelocity[i] = velocity[i] + right[i] * fR + up[i] * fU + forward[i] * 25;
+ 		ShellOrigin[i] = origin[i] + view_ofs[i] + up[i] * upScale + forward[i] * forwardScale + right[i] * rightScale;
+ 	}
++
++	extern void VR_EV_ShellInfo( event_args_t *args, float *velocity, float *ShellVelocity, float *ShellOrigin, float *forward, float *right, float *up, float forwardScale, float upScale, float rightScale ); // VR: shells leave the drawn gun (cl_dll/vr)
++	VR_EV_ShellInfo( args, velocity, ShellVelocity, ShellOrigin, forward, right, up, forwardScale, upScale, rightScale );
  }
  
  /*

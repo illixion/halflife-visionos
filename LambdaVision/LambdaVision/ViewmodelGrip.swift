@@ -49,7 +49,8 @@ enum ViewmodelGrip {
     /// Whether a bone belongs to an arm: clavicle, upper arm, forearm, hand
     /// or finger, whatever the rig's prefix or naming (`Bip01 L Arm1`,
     /// `Xbow biped R Hand`, and the HD pack's `Bip01 L UpperArm`,
-    /// `Bip01 L Forearm` and `L_Arm_bone`, which carries its sleeve).
+    /// `Bip01 L Forearm` and `L_Arm_bone`, which carries its sleeve, and
+    /// Blue Shift's `L_wristbone`).
     ///
     /// Judged by whole name tokens, split on spaces and underscores, not by
     /// substring: the crossbow's bow limbs are `LeftArm`/`RightArm`, and are
@@ -58,7 +59,7 @@ enum ViewmodelGrip {
         let tokens = name.lowercased().split(whereSeparator: { $0 == " " || $0 == "_" })
         return tokens.contains { t in
             ["arm", "arm1", "arm2", "upperarm", "forearm", "hand", "clavicle"].contains(String(t))
-                || t.hasPrefix("finger")
+                || t.hasPrefix("finger") || t.hasPrefix("wrist")
         }
     }
 
@@ -97,6 +98,10 @@ enum ViewmodelGrip {
         /// The hand's name prefix ("Bip01 R "), for reading its fingers;
         /// nil for a synthesised grip, whose fingers have no names.
         var fingerPrefix: String?
+        /// Where an aimed gun is held, relative to the grip bone's idle
+        /// position, in model space: zero unless Valve's hand never touches
+        /// the gun (see `pulledIn`).
+        var pull: SIMD3<Float> = .zero
 
         /// The hand frame in the viewmodel's model space for a pose.
         func frame(in palette: [float4x4]) -> float4x4 {
@@ -121,8 +126,21 @@ enum ViewmodelGrip {
     /// off them too — the Glock's slide under `Bip01 R Hand`, the whole MP5
     /// under its right hand — and taking one of those for the thumb turns the
     /// frame a quarter turn.
+    ///
+    /// `gunPoints` (the gun's vertices without hands, posed in idle) let an
+    /// aimed gun that the grip hand does not actually touch be pulled into
+    /// it (`pulledIn`); without them the grip is as the bones say.
     static func grip(boneNames: [String], parents: [Int?], pose: [float4x4],
-                     extractorChoice: Int, geometry: [(hand: Int, other: Int)]) -> Grip? {
+                     extractorChoice: Int, geometry: [(hand: Int, other: Int)],
+                     gunPoints: [SIMD3<Float>] = []) -> Grip? {
+        guard let g = boneGrip(boneNames: boneNames, parents: parents, pose: pose,
+                               extractorChoice: extractorChoice, geometry: geometry) else { return nil }
+        guard !gunPoints.isEmpty, hold(grip: g, idlePalette: pose) == .aimed else { return g }
+        return pulledIn(g, idlePalette: pose, gunPoints: gunPoints)
+    }
+
+    private static func boneGrip(boneNames: [String], parents: [Int?], pose: [float4x4],
+                                 extractorChoice: Int, geometry: [(hand: Int, other: Int)]) -> Grip? {
         if extractorChoice >= 0, extractorChoice < boneNames.count,
            boneNames[extractorChoice].hasSuffix(" Hand") {
             let name = boneNames[extractorChoice]
@@ -142,6 +160,33 @@ enum ViewmodelGrip {
         else { return nil }
         return Grip(bone: hand, fixup: pose[hand].inverse * frame,
                     isLeft: pose[hand].columns.3.y > 0, fingerPrefix: nil)
+    }
+
+    /// How far from the gun the grip bone may sit and still be holding it,
+    /// in units. Every stock, HD and expansion grip whose hand visibly holds
+    /// its gun sits within 1–5 of the nearest gun vertex in idle (the wrist
+    /// is behind the fist); the gluon gun's right hand reads 8 and Opposing
+    /// Force's shock roach 16.5 — their guns hang off a hand Valve never drew
+    /// on them (the egon is held by a side bar in the left hand, the roach is
+    /// worn over a hidden right hand), so pinning that bone floated the gun
+    /// in front of the player's fist.
+    static let holdingGapLimit: Float = 6
+    /// The gap a pulled-in gun is left at: a typical hold's.
+    static let pulledGap: Float = 3
+
+    /// An aimed gun whose grip bone is further than `holdingGapLimit` from
+    /// it, moved toward the hand along the line to its nearest vertex until
+    /// that vertex is `pulledGap` away. Otherwise unchanged.
+    static func pulledIn(_ grip: Grip, idlePalette: [float4x4], gunPoints: [SIMD3<Float>]) -> Grip {
+        guard grip.bone < idlePalette.count else { return grip }
+        let origin = xyz(idlePalette[grip.bone].columns.3)
+        guard let nearest = gunPoints.min(by: { simd_distance($0, origin) < simd_distance($1, origin) })
+        else { return grip }
+        let gap = simd_distance(nearest, origin)
+        guard gap > holdingGapLimit else { return grip }
+        var g = grip
+        g.pull = (nearest - origin) * (1 - pulledGap / gap)
+        return g
     }
 
     /// A viewmodel with no hand drawn at all is worn over the fist: the
@@ -284,7 +329,7 @@ enum ViewmodelGrip {
         case .aimed:
             let idle = bone(grip.bone, in: idlePalette)
             var toGrip = matrix_identity_float4x4
-            toGrip.columns.3 = SIMD4(-xyz(idle.columns.3), 1)
+            toGrip.columns.3 = SIMD4(-(xyz(idle.columns.3) + grip.pull), 1)
             return hand * flip * yaw(yawCorrection) * toGrip * idle * bone(grip.bone, in: palette).inverse
         }
     }
@@ -332,7 +377,7 @@ enum ViewmodelGrip {
     static func muzzleInHand(_ muzzle: SIMD3<Float>, grip: Grip, idlePalette: [float4x4],
                              handIsLeft: Bool, yawCorrection: Float = 0) -> SIMD3<Float> {
         let flip = grip.isLeft != handIsLeft ? mirror : matrix_identity_float4x4
-        let g = xyz(bone(grip.bone, in: idlePalette).columns.3)
+        let g = xyz(bone(grip.bone, in: idlePalette).columns.3) + grip.pull
         return xyz(flip * yaw(yawCorrection) * SIMD4(muzzle - g, 0))
     }
 
@@ -344,6 +389,77 @@ enum ViewmodelGrip {
 
     private static func bone(_ i: Int, in palette: [float4x4]) -> float4x4 {
         i < palette.count ? palette[i] : matrix_identity_float4x4
+    }
+
+    // MARK: - What the flat viewmodel would not have shown
+
+    /// The flat viewmodel's frame. Viewmodels are authored in view space —
+    /// eye at the origin, looking down +X, +Z up — and drawn at Half-Life's
+    /// 90° (4:3) field of view: tan 0.75 vertically. Horizontally this allows
+    /// for 16:9 (tan 4/3), so nothing a widescreen player saw is lost.
+    static let flatFrameTan = SIMD2<Float>(4.0 / 3.0, 0.75)
+
+    /// Whether a viewmodel-space point lies outside the flat frame (or
+    /// behind the eye), with `margin` units of slack on every side.
+    static func outsideFlatFrame(_ p: SIMD3<Float>, margin: Float = 1) -> Bool {
+        p.x < 1 || abs(p.y) > p.x * flatFrameTan.x + margin || abs(p.z) > p.x * flatFrameTan.y + margin
+    }
+
+    /// Whether every one of `points` (bone space) lies outside the flat frame
+    /// under the bone transform `m`.
+    static func outsideFlatFrame(_ points: [SIMD3<Float>], _ m: float4x4) -> Bool {
+        !points.isEmpty && points.allSatisfy { outsideFlatFrame(xyz(m * SIMD4($0, 1))) }
+    }
+
+    /// How far a loose part rests from everything in shot, at least, in
+    /// units. Measured over every stock, HD and expansion viewmodel: the
+    /// parked parts (spare magazines, speed loaders, shells, the spore
+    /// launcher's spare spore) rest 9.3–55 units clear of the shot; bones
+    /// that merely run off the frame edge (the hivehand's rear, the classic
+    /// MP5's unnamed off-hand bones) are within 5.2 of it.
+    static let looseGap: Float = 7
+
+    /// Per bone, whether it is a loose part: something Valve parks out of
+    /// shot until an animation needs it — the Glock's spare magazine
+    /// (`Box02`), the .357's speed loader, the shotgun's shell. In the rest
+    /// pose it lies wholly outside the flat frame and clear of everything in
+    /// it. Arm bones never are: the hands are the hand cut's business (and a
+    /// visible avatar's), and a held gun's own hand often sits off-frame.
+    /// `points` is each bone's vertices in its own bone space.
+    static func looseParts(points: [[SIMD3<Float>]], restPose: [float4x4], boneNames: [String]) -> [Bool] {
+        let out = points.indices.map { b in
+            b < restPose.count && b < boneNames.count && !isArmBone(boneNames[b])
+                && outsideFlatFrame(points[b], restPose[b])
+        }
+        let shown = points.indices.filter { $0 < restPose.count && !outsideFlatFrame(points[$0], restPose[$0]) }
+            .flatMap { b in points[b].map { xyz(restPose[b] * SIMD4($0, 1)) } }
+        guard !shown.isEmpty else { return out.map { _ in false } }
+        return points.indices.map { b in
+            out[b] && points[b].allSatisfy { p in
+                let w = xyz(restPose[b] * SIMD4(p, 1))
+                return shown.allSatisfy { simd_distance($0, w) >= looseGap }
+            }
+        }
+    }
+
+    /// Per bone, whether to hide it in this pose: a loose part (`looseParts`)
+    /// that is out of shot right now. A gun held in the hand has no frame
+    /// edge to hide a parked part behind, so it would float beside the gun;
+    /// once the reload brings it into shot it shows, and moves as authored.
+    static func parkedBones(loose: [Bool], points: [[SIMD3<Float>]], palette: [float4x4]) -> [Bool] {
+        loose.indices.map { b in
+            loose[b] && b < points.count && b < palette.count && outsideFlatFrame(points[b], palette[b])
+        }
+    }
+
+    /// `palette` with every parked bone collapsed to a point, so the GPU draws
+    /// nothing of it (its triangles become degenerate).
+    static func hidingParked(_ palette: [float4x4], parked: [Bool]) -> [float4x4] {
+        var out = palette
+        for (b, hide) in parked.enumerated() where hide && b < out.count {
+            out[b] = float4x4(columns: (.zero, .zero, .zero, out[b].columns.3))
+        }
+        return out
     }
 
     // MARK: - World models

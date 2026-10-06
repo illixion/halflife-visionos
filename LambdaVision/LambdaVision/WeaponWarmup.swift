@@ -141,7 +141,7 @@ nonisolated final class WeaponPrepCache: Sendable {
     static let shared = WeaponPrepCache()
 
     /// Bump whenever the fit or its inputs change, to drop stale results.
-    private static let version = 2   // 2: keys carry the gamedir
+    private static let version = 3   // 2: keys carry the gamedir; 3: rest pose = first idle
     private let yaws = OSAllocatedUnfairLock<[String: Float]>(initialState: [:])
     private let url: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
         .appendingPathComponent("weapon-prep-v\(version).json")

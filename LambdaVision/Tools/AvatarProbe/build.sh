@@ -11,6 +11,7 @@
 #   ./build.sh path/to/other.mdl   probe a different player model
 #   ./build.sh --anchor=path/to/models   also report which of another
 #                         game's viewmodels hold in the hand, which draw flat
+#                         (with --grips, their grip_*.tri go to <game>/ here)
 #
 # Needs RAVEEngine checked out beside this repo (the app's own package
 # dependency) — it is built in release once and linked directly.

@@ -385,6 +385,9 @@ actor Renderer {
     /// Hold the weapon's world (p_) model instead of its viewmodel
     /// (Settings > Input > Weapon model).
     nonisolated(unsafe) static var weaponWorldModel = false
+    /// Hide the loose parts the flat viewmodel keeps out of shot, while
+    /// they are (Settings > Input > Hide parked weapon parts).
+    nonisolated(unsafe) static var hideParkedParts = true
 
     nonisolated(unsafe) static var gripRollDeg: Float = 90  // grip points down into the fist
     nonisolated(unsafe) static var gripPitchDeg: Float = 0
@@ -778,6 +781,41 @@ actor Renderer {
                                                yawCorrection: pass.heldYawCorrection)
         let p = trackedHandFrame(hand) * SIMD4<Float>(local, 1)
         return SIMD3(p.x, p.y, p.z)
+    }
+
+    /// The held gun's model space → the room (GoldSrc axes and units, the
+    /// space trackedHandFrame lives in), as the weapon pass places it on the
+    /// tracked hand; nil when no gun is held in the hand (none out, or drawn
+    /// flat).
+    private func heldGunTransform(_ hand: HandSample) -> float4x4? {
+        guard lambda_weapon_active() != 0, let pass = weaponPass, let grip = pass.heldGrip,
+              !(pass.drawsFlat && !pass.showsWorldModel),
+              !pass.heldPalette.isEmpty, !pass.heldIdlePalette.isEmpty else { return nil }
+        return ViewmodelGrip.modelMatrix(hand: trackedHandFrame(hand), grip: grip, hold: pass.heldHold,
+                                         palette: pass.heldPalette, idlePalette: pass.heldIdlePalette,
+                                         handIsLeft: Renderer.dominantHandIsLeft,
+                                         yawCorrection: pass.heldYawCorrection)
+    }
+
+    /// The drawn gun's studio attachments in the room (GoldSrc axes and units,
+    /// the space trackedHandFrame lives in), posed live — recoil included, so
+    /// a flash leaves the muzzle where the gun is this frame. The world model
+    /// has no attachments, so its muzzle stands in for the first. Empty when
+    /// no gun is held in the hand (none out, drawn flat, or a viewmodel
+    /// without attachments, whose effects the engine places itself).
+    private func attachmentPoints(_ hand: HandSample) -> [SIMD3<Float>] {
+        guard let pass = weaponPass, let model = heldGunTransform(hand) else { return [] }
+        let local: [SIMD3<Float>]
+        if pass.showsWorldModel {
+            local = pass.heldMuzzle.map { [$0] } ?? []
+        } else {
+            local = pass.attachments.prefix(4).compactMap { a in
+                guard a.bone < pass.palette.count else { return nil }
+                let p = pass.palette[a.bone] * SIMD4<Float>(a.org, 1)
+                return SIMD3(p.x, p.y, p.z)
+            }
+        }
+        return local.map { let p = model * SIMD4<Float>($0, 1); return SIMD3(p.x, p.y, p.z) }
     }
 
     /// The game's screen fade for the weapon pass: a blended fade's colour
@@ -1948,6 +1986,8 @@ actor Renderer {
         var headAngles: SIMD3<Float>? = nil  // (abs pitch, delta yaw, abs roll) deg
         var headOffset = SIMD3<Float>(0, 0, 0)  // baseline-forward frame, xash units
         var muzzleOffset: SIMD3<Float>? = nil   // eye → muzzle, view-yaw frame, xash units
+        var attachmentOffsets: [SIMD3<Float>] = []  // eye → the drawn gun's attachments, same frame
+        var gunTransform: [Float]? = nil  // the drawn gun's model space → that frame (3 axes, origin)
         // Gun-mounted flashlight: source like muzzleOffset, beam offset from the view (deg)
         var flashlightBeam: (source: SIMD3<Float>, pitch: Float, yaw: Float)? = nil
         if let cur = headPose {
@@ -2076,6 +2116,22 @@ actor Renderer {
                     let r = yawDeg * .pi / 180
                     let c = cosf(r), s = sinf(r)
                     muzzleOffset = SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z)
+                }
+                // The drawn gun's attachments, same frame, whatever fire
+                // follows: the game's muzzle flash, its light and beams from
+                // the gun start there (lambda_set_weapon_draw).
+                // Its model transform too, which shells eject from.
+                do {
+                    let r = yawDeg * .pi / 180
+                    let c = cosf(r), s = sinf(r)
+                    func level(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z) }
+                    let base = headBaselinePos! * appleToXash
+                    attachmentOffsets = attachmentPoints(hand).map { level($0 - base) }
+                    if let m = heldGunTransform(hand) {
+                        let cols = [m.columns.0, m.columns.1, m.columns.2].map { level(SIMD3($0.x, $0.y, $0.z)) }
+                        let o = level(SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z) - base)
+                        gunTransform = (cols + [o]).flatMap { [$0.x, $0.y, $0.z] }
+                    }
                 }
                 // The flashlight rides the weapon hand whatever fire follows:
                 // from the drawn muzzle along the barrel, or for a weapon with
@@ -2320,6 +2376,16 @@ actor Renderer {
         } else {
             lambda_set_muzzle(0, 0, 0, 0)
         }
+        do {
+            var flat = false
+            if lambda_weapon_active() != 0, let pass = weaponPass { flat = pass.drawsFlat && !pass.showsWorldModel }
+            let xyz = attachmentOffsets.flatMap { [$0.x, $0.y, $0.z] }
+            if let t = gunTransform {
+                lambda_set_weapon_draw(flat ? 1 : 0, t, xyz, Int32(attachmentOffsets.count))
+            } else {
+                lambda_set_weapon_draw(flat ? 1 : 0, nil, xyz, Int32(attachmentOffsets.count))
+            }
+        }
         if let f = flashlightBeam {
             lambda_set_flashlight_beam(f.source.x, f.source.y, f.source.z, f.pitch, f.yaw, 1)
         } else {
@@ -2531,6 +2597,7 @@ actor Renderer {
         // at the view as authored (its own hands, its own animation).
         let handsMode = InputModeState.current == .hands
         weaponPass.preferWorldModel = Renderer.weaponWorldModel && handsMode
+        weaponPass.hideParkedParts = Renderer.hideParkedParts
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil

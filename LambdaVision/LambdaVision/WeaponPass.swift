@@ -165,6 +165,26 @@ final class WeaponPass {
     private var reloadSequences: [Int: Int] = [:]
     var hasHandBone: Bool { mesh?.hasHandBone ?? false }
 
+    // Loose parts Valve parks out of the flat viewmodel's shot (the Glock's
+    // spare magazine, the shotgun's shell; ViewmodelGrip.looseParts), and
+    // each bone's bone-space vertices to test them against the frame with.
+    private var looseParts: [Bool] = []
+    private var bonePoints: [[SIMD3<Float>]] = []
+    /// Hide loose parts while they are out of shot. Set by the caller.
+    var hideParkedParts = true
+    /// The viewmodel's studio attachments, (bone, bone-space point); 0 is
+    /// the muzzle the engine's flash and the client's tracers start at.
+    private(set) var attachments: [(bone: Int, org: SIMD3<Float>)] = []
+
+    /// The palette the viewmodel is drawn with: the live pose, with loose
+    /// parts collapsed while the flat viewmodel would have kept them out of
+    /// shot (ViewmodelGrip.parkedBones).
+    private var drawPalette: [float4x4] {
+        guard hideParkedParts, looseParts.contains(true) else { return palette }
+        return ViewmodelGrip.hidingParked(palette, parked: ViewmodelGrip.parkedBones(
+            loose: looseParts, points: bonePoints, palette: palette))
+    }
+
     // Current pose: bone→model-space transforms from the extractor (GoldSrc
     // units), refreshed each frame by update(). `handBone` is the POSED grip
     // bone's frame, so pinning it to the tracked hand keeps the gun and the
@@ -373,13 +393,17 @@ final class WeaponPass {
         let geometry = ViewmodelGrip.boneGeometry(boneCount: uploaded.boneNames.count,
                                                   textureNames: uploaded.textureNames,
                                                   vertices: StudioMesh.vertexTextureBones(of: raw))
+        let gunPoints = StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) }
         self.grip = ViewmodelGrip.grip(boneNames: uploaded.boneNames, parents: uploaded.boneParents,
                                        pose: idle, extractorChoice: uploaded.handBoneIndex,
-                                       geometry: geometry)
+                                       geometry: geometry, gunPoints: gunPoints)
         self.hold = grip.map { ViewmodelGrip.hold(grip: $0, idlePalette: idle) } ?? .held
-        let gunPoints = StudioMesh.posedPoints(of: raw, palette: idle) { !isHand($0, $1, $2, $3) }
+        self.attachments = StudioMesh.attachments(of: raw)
         self.muzzle = ViewmodelGrip.muzzle(
-            attachment: StudioMesh.attachments(of: raw).first, idlePalette: idle, gunPoints: gunPoints)
+            attachment: attachments.first, idlePalette: idle, gunPoints: gunPoints)
+        self.bonePoints = StudioMesh.bonePoints(of: raw)
+        self.looseParts = ViewmodelGrip.looseParts(points: bonePoints, restPose: idle,
+                                                   boneNames: uploaded.boneNames)
         self.gunCorners = WeaponWarmup.viewmodelCorners(raw, idle: idle)
         self.viewmodelKey = WeaponWarmup.key(of: raw)
         self.drawsFlat = !ViewmodelGrip.canAnchorInHand(grip: grip, idlePalette: idle,
@@ -392,7 +416,7 @@ final class WeaponPass {
         self.handBone = matrix_identity_float4x4
         self.uploadedGeneration = gen
 
-        AppLog.render.log("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none", privacy: .public) hold=\(hold, privacy: .public) muzzle=\(muzzle.map { "\($0)" } ?? "none", privacy: .public)\(drawsFlat ? " → flat viewmodel (can't anchor in the hand)" : "", privacy: .public)")
+        AppLog.render.log("[WeaponPass] uploaded gen=\(gen) verts=\(uploaded.vertexCount) gun-only=\(gunOnly?.vertexCount ?? 0) submeshes=\(uploaded.submeshes.count) textures=\(uploaded.textures.count) bones=\(uploaded.boneNames.count) handbone=\(uploaded.handBoneIndex) grip=\(grip.map { "\(uploaded.boneNames[$0.bone])\($0.fingerPrefix == nil ? " (synthesised)" : "")" } ?? "none", privacy: .public) hold=\(hold, privacy: .public) muzzle=\(muzzle.map { "\($0)" } ?? "none", privacy: .public) loose=\(looseParts.indices.filter { looseParts[$0] }.map { uploaded.boneNames[$0] }, privacy: .public)\(drawsFlat ? " → flat viewmodel (can't anchor in the hand)" : "", privacy: .public)")
     }
 
     /// If a new world model was baked, upload it and lay it out in its hand.
@@ -589,7 +613,7 @@ final class WeaponPass {
         // winding flip.
         enc.setCullMode(.none)
         if drawWeapon, let mesh {
-            drawSkinned(enc, mesh: mesh, palette: heldPalette,
+            drawSkinned(enc, mesh: mesh, palette: showsWorldModel ? heldPalette : drawPalette,
                         uniforms: ub, bones: weaponBuffers.bones[uniformBufferIndex])
         }
 

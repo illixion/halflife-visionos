@@ -129,6 +129,7 @@ enum AppSettingsStore {
     private static let aimReticleKey          = "lambdavision.settings.aimReticle"
     private static let weaponModelKey         = "lambdavision.settings.weaponModel"
     private static let developerModeKey       = "lambdavision.settings.developerMode"
+    private static let hideParkedPartsKey     = "lambdavision.settings.hideParkedParts"
 
     static var dominantHand: DominantHand {
         get {
@@ -161,6 +162,10 @@ enum AppSettingsStore {
             return v
         }
         set { defaults.set(newValue.rawValue, forKey: fireAimModeKey) }
+    }
+    static var hideParkedParts: Bool {
+        get { bool(hideParkedPartsKey, true) }
+        set { defaults.set(newValue, forKey: hideParkedPartsKey) }
     }
     static var flashlightOnGun: Bool {
         get { bool(flashlightOnGunKey, true) }

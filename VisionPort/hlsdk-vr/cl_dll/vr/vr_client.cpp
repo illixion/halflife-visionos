@@ -81,11 +81,37 @@ VR_SHARED float g_vr_muzzle_offset_cl[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
 // muzzle along the aim to the first thing a shot would hit (units), [1] > 0
 // when there is one to show. Published every normal refdef.
 VR_SHARED float g_vr_aim_hit[2] = { 0.0f, -1.0f };
-// Set by VR_AddHandWeapon each frame: 1 when the weapon's p_ model was drawn
-// at the hand (so the viewmodel is hidden), 0 when it fell back to the stock
-// viewmodel — e.g. the egon, whose backpack is rigged to the body and clips
-// into the player when hand-anchored.
+// Set by VR_AddHandWeapon each frame: 1 when the weapon is drawn somewhere
+// other than the stock viewmodel (the p_ model at the hand, or the platform's
+// Metal pass), so the viewmodel is hidden; 0 when the stock viewmodel shows.
 int g_vr_hand_weapon_drawn = 0;
+// The drawn gun's studio attachments, for the platform's Metal pass, written
+// by the bridge every tick: [0..11] up to four attachment points relative to
+// the eye in the level frame of the view yaw (units, x forward, y left, z up
+// — the convention of g_vr_muzzle_offset_cl), [12] how many (0: none, e.g. a
+// flat viewmodel or no tracked hand). The hidden viewmodel still runs its
+// animation events every frame, and VR_StudioAttachments puts its
+// attachments here, so the muzzle flash, its light, the gluon beam and the
+// shock roach's arcs leave the gun in the hand instead of the empty spot in
+// front of the face where the flat viewmodel would have been.
+VR_SHARED float g_vr_weapon_attach_cl[13] = { 0 };
+// The drawn gun's model transform, bridge-written with the attachments:
+// [0..8] the columns of its rotation and [9..11] its origin, taking the
+// viewmodel's model space (units, x forward, y left, z up — for a flat
+// viewmodel, the view itself) to the eye-relative view-yaw frame above;
+// [12] > 0 while valid. Shell ejection reads it (vr_events.cpp).
+VR_SHARED float g_vr_weapon_xform_cl[13] = { 0 };
+// Bridge-written from the platform: 1 while its Metal pass draws the weapon
+// flat, locked to the head as authored (a viewmodel no hand can hold).
+VR_SHARED int g_vr_weapon_flat_app = 0;
+// 1 while the gun on screen is the head-locked viewmodel, whichever path
+// draws it — the Metal pass's flat fallback, or the engine path's for a p_
+// model with no hand to hold it by (the gluon gun's). Such a gun fires along
+// the view, where the player looks, not along the hand: the bridge copies this
+// to the server's g_vr_weapon_flat (dlls/vr/vr_player.cpp), and the client's
+// own aim users (the bullet events, the reticle trace) read it here. The one
+// place that decides it, so the picture and the shots always agree.
+VR_SHARED int g_vr_weapon_flat_cl = 0;
 // Published by VR_AddHandWeapon each frame when vr_weapon_external is on: the
 // viewmodel's resident studio header, its engine model index, body value and
 // animation state (sequence / frame / animtime / framerate + the client time
@@ -105,6 +131,12 @@ VR_SHARED float g_vr_weapon_time = 0.0f;
 // whole where the viewmodel is open, and what the platform draws in the hand
 // when the player picks world models. NULL when there is none.
 VR_SHARED void *g_vr_weapon_world_hdr = 0;
+// For either model whose textures live in a companion <name>T.mdl (older mods
+// split them out; the engine keeps only that file's texture headers, not its
+// pixels), the T file as read from the game's files, else NULL. Kept until
+// the model changes.
+VR_SHARED void *g_vr_weapon_tex_hdr = 0;
+VR_SHARED void *g_vr_weapon_world_tex_hdr = 0;
 // World light sampled at the view origin (R_LightPoint via the triangle API),
 // normalised 0..1, published each frame for the external weapon renderer to
 // shade the gun to match the room.
@@ -125,8 +157,52 @@ VR_SHARED float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
 //       from a paused game
 VR_SHARED float g_vr_body_state[7] = { 64.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 
-extern "C" float g_vr_hud_state[14];  // vr_hud.cpp
-int VR_WeaponEgonId( void );          // vr_weapons.cpp
+// The eye and the composed view yaw of the last normal refdef — the frame the
+// platform's eye-relative offsets (g_vr_weapon_attach_cl) are expressed in.
+static vec3_t s_vrEye;
+static float s_vrViewYaw = 0.0f;
+static int s_vrEyeValid = 0;
+// The engine path's stand-in muzzle (see VR_AddHandWeapon), units ahead of
+// the p_ model's hand bone along the gun's forward axis.
+#define VR_ENGINE_GUN_MUZZLE 14.0f
+static vec3_t s_vrEngineGunMuzzle;
+static int s_vrEngineGunAttach = 0;
+
+
+// The companion texture file of `mdl` when its textures live in one (the
+// engine merged its texture headers in, but not the pixels: texturedataindex
+// is still the bare model's 0), loaded through the engine's file system so it
+// is found wherever the game's content chain has it. One cache per caller,
+// freed when the model changes. NULL for a model with embedded textures.
+struct vr_tex_file_t { char name[64]; void *buf; };
+static void *VR_ExternalTextures( model_t *mdl, studiohdr_t *hdr, vr_tex_file_t *cache )
+{
+	if( !mdl || !hdr )
+		return NULL;
+	if( !strncmp( cache->name, mdl->name, sizeof( cache->name )))
+		return cache->buf;
+	if( cache->buf )
+		gEngfuncs.COM_FreeFile( cache->buf );
+	cache->buf = NULL;
+	strncpy( cache->name, mdl->name, sizeof( cache->name ) - 1 );
+	cache->name[sizeof( cache->name ) - 1] = 0;
+	size_t n = strlen( mdl->name );
+	if( hdr->numtextures <= 0 || hdr->texturedataindex > 0 || n < 4 || n + 2 > 64 )
+		return NULL;
+	char path[64];
+	memcpy( path, mdl->name, n - 4 );
+	strcpy( path + n - 4, "T.mdl" );
+	int len = 0;
+	byte *buf = gEngfuncs.COM_LoadFile( path, 5, &len );
+	studiohdr_t *t = (studiohdr_t *)buf;
+	if( buf && ( len < (int)sizeof( studiohdr_t ) || t->ident != IDSTUDIOHEADER || t->numtextures != hdr->numtextures ))
+	{
+		gEngfuncs.COM_FreeFile( buf );
+		buf = NULL;
+	}
+	cache->buf = buf;
+	return buf;
+}
 
 /*
 =========================
@@ -149,15 +225,18 @@ static qboolean VR_HandBonePose( studiohdr_t *hdr, float R_out[3][3], float t_ou
 	if( hdr->numseq < 1 || hdr->numbones < 1 || hdr->numbones > 128 )
 		return false;
 
-	for( i = 0; i < hdr->numbones; i++ )
-	{
+	// The right hand: "Bip01 R Hand", else any rig's "… R Hand". A model
+	// with none (p_egon, whose gun hangs off the forearm and whose backpack
+	// hangs off the spine) cannot be held, and the caller falls back to the
+	// stock viewmodel.
+	for( i = 0; i < hdr->numbones && hand < 0; i++ )
 		if( !strcmp( pbone[i].name, "Bip01 R Hand" ))
-		{
 			hand = i;
-			break;
-		}
-		if( !strcmp( pbone[i].name, "Bip01 R Forearm" ))
-			hand = i; // fallback (p_egon has no hand bone)
+	for( i = 0; i < hdr->numbones && hand < 0; i++ )
+	{
+		size_t n = strlen( pbone[i].name );
+		if( n >= 7 && !strcmp( pbone[i].name + n - 7, " R Hand" ))
+			hand = i;
 	}
 	if( hand < 0 )
 		return false;
@@ -228,6 +307,8 @@ void VR_AddHandWeapon( void )
 	int i;
 
 	g_vr_hand_weapon_drawn = 0; // default: viewmodel shows
+	g_vr_weapon_flat_cl = 0;
+	s_vrEngineGunAttach = 0;
 
 	// External weapon renderer (visionOS Metal pass) owns the weapon model:
 	// draw nothing engine-side, but keep the camera-locked viewmodel hidden
@@ -235,6 +316,8 @@ void VR_AddHandWeapon( void )
 	// console or via a "vr_weapon_external 1" command pushed from Swift.
 	g_vr_weapon_hdr = NULL; // reset each frame; republished below in external mode
 	g_vr_weapon_world_hdr = NULL;
+	g_vr_weapon_tex_hdr = NULL;
+	g_vr_weapon_world_tex_hdr = NULL;
 
 	static cvar_t *vr_weapon_external = NULL;
 	if( !vr_weapon_external )
@@ -242,6 +325,7 @@ void VR_AddHandWeapon( void )
 	if( vr_weapon_external && vr_weapon_external->value )
 	{
 		g_vr_hand_weapon_drawn = 1;
+		g_vr_weapon_flat_cl = g_vr_weapon_flat_app;
 		// Publish the VIEWMODEL (v_*.mdl) — not the third-person p_ model
 		// the local player entity carries. Only the v_ model has Gordon's
 		// HEV hands, the separable magazine/pump/cylinder bones and the
@@ -266,6 +350,8 @@ void VR_AddHandWeapon( void )
 			g_vr_weapon_animtime   = view->curstate.animtime;
 			g_vr_weapon_framerate  = view->curstate.framerate;
 			g_vr_weapon_time       = gEngfuncs.GetClientTime();
+			static vr_tex_file_t s_viewTex;
+			g_vr_weapon_tex_hdr = VR_ExternalTextures( wm, (studiohdr_t *)wm->cache.data, &s_viewTex );
 		}
 		// And the same weapon's third-person p_ model: seen from every side,
 		// so it is whole where the viewmodel was never modelled (the side
@@ -278,7 +364,11 @@ void VR_AddHandWeapon( void )
 		model_t *pm = ( player && player->curstate.weaponmodel )
 			? gEngfuncs.pfnGetModelByIndex( player->curstate.weaponmodel ) : NULL;
 		if( pm && pm->type == mod_studio )
+		{
+			static vr_tex_file_t s_worldTex;
 			g_vr_weapon_world_hdr = IEngineStudio.Mod_Extradata( pm );
+			g_vr_weapon_world_tex_hdr = VR_ExternalTextures( pm, (studiohdr_t *)g_vr_weapon_world_hdr, &s_worldTex );
+		}
 		// Sample the world light at the eye (R_LightPoint via the tri API,
 		// 0..255) and publish it normalised for the external weapon shader.
 		{
@@ -299,12 +389,6 @@ void VR_AddHandWeapon( void )
 
 	model_t *mdl = gEngfuncs.pfnGetModelByIndex( player->curstate.weaponmodel );
 	if( !mdl )
-		return;
-
-	// Egon's backpack is rigged to the body (no hand bone in p_egon), so
-	// hand-anchoring the whole model drives the pack into the player.
-	// Fall back to the stock viewmodel — hand-directed aim still applies.
-	if( strstr( mdl->name, "egon" ))
 		return;
 
 	// Rendered camera = last refdef view + head override (mirrors the
@@ -354,14 +438,14 @@ void VR_AddHandWeapon( void )
 		s_hbValid = ( mdl->type == mod_studio && mdl->cache.data )
 			? VR_HandBonePose((studiohdr_t *)mdl->cache.data, s_hbR, s_hbT )
 			: false;
-		if( !s_hbValid )
-		{
-			// identity fallback: entity axes = hand axes, bone at origin
-			memset( s_hbR, 0, sizeof( s_hbR ));
-			s_hbR[0][0] = s_hbR[1][1] = s_hbR[2][2] = 1.0f;
-			s_hbT[0] = s_hbT[1] = s_hbT[2] = 0.0f;
-			s_hbValid = true;
-		}
+	}
+	// No hand to hold it by (the egon's p_ model, an unreadable mod model):
+	// the stock viewmodel stays up, and the gun fires along the view to
+	// match it — the same rule as the Metal pass's flat fallback.
+	if( !s_hbValid )
+	{
+		g_vr_weapon_flat_cl = 1;
+		return;
 	}
 
 	float wl[3]; // world left = up × fwd (xash: fwd × left = up)
@@ -428,6 +512,14 @@ void VR_AddHandWeapon( void )
 
 	gEngfuncs.CL_CreateVisibleEntity( ET_NORMAL, &gun );
 	g_vr_hand_weapon_drawn = 1; // weapon is at the hand; hide the viewmodel
+
+	// The p_ models carry no attachments, so the hidden viewmodel's muzzle
+	// events (VR_StudioAttachments) go to a point ahead of the hand along
+	// the gun's forward axis, about where a muzzle is.
+	for( i = 0; i < 3; i++ )
+		s_vrEngineGunMuzzle[i] = org[i] + E[i][0] * s_hbT[0] + E[i][1] * s_hbT[1] + E[i][2] * s_hbT[2]
+			+ wf[i] * VR_ENGINE_GUN_MUZZLE;
+	s_vrEngineGunAttach = 1;
 }
 
 /*
@@ -445,9 +537,91 @@ viewmodel (egon).
 */
 void VR_HideViewModel( void )
 {
+	// Hidden by rendering it fully transparent rather than by clearing its
+	// model: R_DrawViewModel skips a model with no blend, but the engine
+	// still runs its animation events every frame (R_RunViewmodelEvents),
+	// which is where the muzzle flash, its light and the attachments that
+	// beams start from come from. VR_StudioAttachments moves those to the
+	// drawn gun. The engine resets rendermode every frame (V_SetupViewModel).
 	cl_entity_t *view = gEngfuncs.GetViewModel();
 	if( g_vr_hand_weapon_drawn && view )
-		view->model = NULL;
+	{
+		view->curstate.rendermode = kRenderTransTexture;
+		view->curstate.renderamt = 0;
+		view->curstate.renderfx = kRenderFxNone;
+	}
+}
+
+/*
+=========================
+VR_StudioAttachments
+
+Hook: end of CStudioModelRenderer::StudioCalcAttachments.
+
+While the weapon is drawn in the hand, the hidden viewmodel's attachments
+(computed head-locked, as the flat viewmodel was posed) are replaced with
+the drawn gun's: the Metal pass's live attachments from the platform, or a
+point ahead of the engine-drawn p_ model. Everything that reads them right
+after — the engine's EF_MUZZLEFLASH light, HUD_StudioEvent's muzzle-flash
+sprites, the copy into the local player's entity that beams attached to
+the player start from (the gluon gun's), the shock roach's arcs — then
+leaves the gun in the hand.
+=========================
+*/
+void VR_StudioAttachments( cl_entity_t *ent, int numattachments )
+{
+	if( !g_vr_hand_weapon_drawn || g_vr_weapon_flat_cl || !ent || ent != gEngfuncs.GetViewModel() )
+		return;
+	int i, k;
+	if( s_vrEngineGunAttach )
+	{
+		for( k = 0; k < 4; k++ )
+			VectorCopy( s_vrEngineGunMuzzle, ent->attachment[k] );
+		return;
+	}
+	int count = (int)g_vr_weapon_attach_cl[12];
+	if( count <= 0 || !s_vrEyeValid )
+		return;
+	if( count > 4 )
+		count = 4;
+	const float y = s_vrViewYaw * ( M_PI_F / 180.0f ), c = cosf( y ), s = sinf( y );
+	for( k = 0; k < count; k++ )
+	{
+		const float *o = &g_vr_weapon_attach_cl[k * 3];
+		ent->attachment[k][0] = s_vrEye[0] + c * o[0] - s * o[1];
+		ent->attachment[k][1] = s_vrEye[1] + s * o[0] + c * o[1];
+		ent->attachment[k][2] = s_vrEye[2] + o[2];
+	}
+	// A model with fewer attachments than its events name (the engine fills
+	// all four with the origin for a model with none) gets the first.
+	for( ; k < 4 && k >= numattachments; k++ )
+		for( i = 0; i < 3; i++ )
+			ent->attachment[k][i] = ent->attachment[0][i];
+}
+
+/*
+=========================
+VR_StudioDrawModel
+
+Hook: start of CStudioModelRenderer::StudioDrawModel. Returns 0 to skip.
+
+The headset renders the world twice per frame, once per eye, and the
+engine runs the viewmodel's animation events with each render
+(R_RunViewmodelEvents, STUDIO_EVENTS alone): every muzzle flash and every
+sound an animation plays (reload clicks) would happen twice. Only the
+first render of a client frame runs them.
+=========================
+*/
+int VR_StudioDrawModel( int flags )
+{
+	static float s_lastEventsTime = -1.0f;
+	if( flags != STUDIO_EVENTS || IEngineStudio.GetCurrentEntity() != gEngfuncs.GetViewModel() )
+		return 1;
+	const float now = gEngfuncs.GetClientTime();
+	if( now == s_lastEventsTime )
+		return 0;
+	s_lastEventsTime = now;
+	return 1;
 }
 
 // Fills g_vr_body_state from a finished normal refdef. The floor is found by
@@ -484,24 +658,29 @@ static void V_PublishBodyState( struct ref_params_s *pparams )
 // entities all stop it, as they stop a bullet.
 static void V_PublishAimHit( struct ref_params_s *pparams )
 {
-	// The egon fires along the view, not the hand (dlls/vr/vr_player.cpp
-	// VR_ItemPostFrame), so there is no barrel ray to mark. Weapon id from
-	// the HUD publish (vr_hud.cpp), in this game's numbering.
+	const bool vr = g_vr_cam_override[0] > 0.0f;
+	const float viewYaw = pparams->cl_viewangles[YAW] + ( vr ? g_vr_cam_override[2] : 0.0f );
+	vec3_t angles, forward, eye, muzzle, end;
+	VectorAdd( pparams->simorg, pparams->viewheight, eye );
+	// The frame the platform's eye-relative offsets live in, for
+	// VR_StudioAttachments during this frame's render.
+	VectorCopy( eye, s_vrEye );
+	s_vrViewYaw = viewYaw;
+	s_vrEyeValid = 1;
+
+	// A gun drawn flat fires along the view, not the hand
+	// (g_vr_weapon_flat_cl), so there is no barrel ray to mark.
 	cl_entity_t *local = gEngfuncs.GetLocalPlayer();
-	if( g_vr_muzzle_offset_cl[3] <= 0.0f || !local || (int)g_vr_hud_state[4] == VR_WeaponEgonId() )
+	if( g_vr_muzzle_offset_cl[3] <= 0.0f || !local || g_vr_weapon_flat_cl )
 	{
 		g_vr_aim_hit[1] = -1.0f;
 		return;
 	}
-	const bool vr = g_vr_cam_override[0] > 0.0f;
-	const float viewYaw = pparams->cl_viewangles[YAW] + ( vr ? g_vr_cam_override[2] : 0.0f );
-	vec3_t angles, forward, eye, muzzle, end;
 	angles[PITCH] = ( vr ? g_vr_cam_override[1] : pparams->cl_viewangles[PITCH] ) + g_vr_aim_offset_cl[0];
 	angles[YAW] = viewYaw + g_vr_aim_offset_cl[1];
 	angles[ROLL] = 0.0f;
 	AngleVectors( angles, forward, NULL, NULL );
 
-	VectorAdd( pparams->simorg, pparams->viewheight, eye );
 	const float *o = g_vr_muzzle_offset_cl;
 	const float y = viewYaw * ( M_PI_F / 180.0f ), c = cosf( y ), s = sinf( y );
 	muzzle[0] = eye[0] + c * o[0] - s * o[1];
