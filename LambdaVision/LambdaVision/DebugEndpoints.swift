@@ -38,8 +38,12 @@ import Foundation
 import GameLibrary
 import QuartzCore
 import RAVEDiagnostics
+import SwiftUI
 #if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
 import DebugTraceServer
+import Network
+import os
+import UIKit
 #endif
 
 /// Settings › Advanced › Debug server.
@@ -111,23 +115,200 @@ enum LambdaDebugServer {
     static func apply(_ mode: DebugServerMode) {
         #if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
         if wanted(mode) {
-            guard server == nil else { return }
-            // .custom: DebugTrace's default alert needs a frontmost UIKit window,
-            // which the immersive space lacks (DebugApprovalWindow).
-            let s = DebugTraceServer(configuration: .init(
-                ports: ports,
-                approval: .custom { await DebugApprovalCenter.shared.ask($0) }))
-            server = s
-            s.startInBackground()
-            AppLog.app.log("[DebugServer] starting (\(mode.rawValue, privacy: .public)), ports \(ports.lowerBound)-\(ports.upperBound)")
-        } else if let s = server {
-            s.stop()
-            server = nil
-            AppLog.app.log("[DebugServer] stopped (\(mode.rawValue, privacy: .public))")
+            if server == nil { start(reason: "setting \(mode.rawValue)") }
+            startWatching()
+        } else {
+            stopWatching()
+            if let s = server {
+                s.stop()
+                server = nil
+                AppLog.app.log("[DebugServer] stopped (setting \(mode.rawValue, privacy: .public))")
+            }
         }
         #endif
     }
+
+    #if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
+
+    // MARK: Keeping it alive
+    //
+    // DebugTraceServer watches its NWListener's state only until the first
+    // `.ready`: a later `.failed` / `.cancelled` (a defuncted socket, a
+    // Bonjour registration failure on a network change) is swallowed, and the
+    // server still reports `isRunning` with its old port while every
+    // connection is refused. On the headset that happened ~6 minutes into a
+    // session, with nothing logged (2026-10-06). The listener is private, so
+    // from out here the only way to see that is to knock: every few seconds
+    // the watchdog connects to the port over loopback and over the Wi-Fi
+    // address, and rebuilds the server — on the same port when it can, so a
+    // client's recorded URL keeps working — when the knock is refused. Path
+    // changes, app lifecycle and scene phases are logged alongside, so the
+    // log says what the listener died next to.
+
+    /// The port the last server bound; a restart tries it first.
+    private static var lastPort: UInt16?
+    private static var watchdog: Task<Void, Never>?
+    private static var pathMonitor: NWPathMonitor?
+    private static var lifecycleObservers: [NSObjectProtocol] = []
+    private static var restarts = 0
+    static let checkInterval: Duration = .seconds(5)
+
+    private static func makeServer(ports range: ClosedRange<UInt16>) -> DebugTraceServer {
+        // .custom: DebugTrace's default alert needs a frontmost UIKit window,
+        // which the immersive space lacks (DebugApprovalWindow).
+        DebugTraceServer(configuration: .init(
+            ports: range,
+            approval: .custom { await DebugApprovalCenter.shared.ask($0) }))
+    }
+
+    private static func start(reason: String) {
+        let preferred = lastPort.map { $0...ports.upperBound } ?? ports
+        let s = makeServer(ports: preferred)
+        server = s
+        AppLog.app.log("[DebugServer] starting (\(reason, privacy: .public)), ports \(preferred.lowerBound)-\(preferred.upperBound)")
+        Task { @MainActor in
+            do {
+                lastPort = try await s.start()
+            } catch {
+                guard server === s else { return }
+                // The preferred port range is all taken: the whole range.
+                if preferred != ports {
+                    let full = makeServer(ports: ports)
+                    server = full
+                    if let p = try? await full.start() { lastPort = p; return }
+                }
+                AppLog.app.error("[DebugServer] could not start: \(String(describing: error), privacy: .public); retrying in \(checkInterval.components.seconds) s")
+                server = nil
+            }
+        }
+    }
+
+    /// Rebuilds a server whose listener no longer answers.
+    private static func restart(reason: String) {
+        restarts += 1
+        AppLog.app.error("[DebugServer] listener on port \(lastPort.map(String.init) ?? "?", privacy: .public) stopped answering (\(reason, privacy: .public)); restart #\(restarts)")
+        server?.stop()
+        server = nil
+        start(reason: "restart #\(restarts)")
+    }
+
+    /// One health check now (also run when the app comes back to the
+    /// foreground, see `scenePhaseChanged`).
+    static func check() async {
+        guard watchdog != nil else { return }
+        guard let s = server else { start(reason: "not running"); return }
+        guard let port = s.port else { return }   // still binding
+        var targets = ["127.0.0.1"]
+        if let lan = DebugTraceServer.localAddresses().first(where: { $0.hasPrefix("en") })?.split(separator: " ").last {
+            targets.append(String(lan))
+        }
+        for host in targets {
+            let outcome = await ListenerProbe.knock(host: host, port: port)
+            guard server === s else { return }    // replaced meanwhile
+            switch outcome {
+            case .accepted: continue
+            case .refused(let why): restart(reason: "\(host):\(port) refused: \(why)"); return
+            case .noAnswer(let why):
+                // Not proof on its own (a stalled network); a second miss is.
+                let again = await ListenerProbe.knock(host: host, port: port)
+                guard server === s else { return }
+                if case .accepted = again { continue }
+                restart(reason: "\(host):\(port) no answer twice: \(why)")
+                return
+            }
+        }
+    }
+
+    private static func startWatching() {
+        guard watchdog == nil else { return }
+        watchdog = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: checkInterval)
+                if Task.isCancelled { break }
+                await check()
+            }
+        }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { path in
+            let interfaces = path.availableInterfaces.map { "\($0.name)" }.joined(separator: ",")
+            AppLog.app.log("[DebugServer] network path \(String(describing: path.status), privacy: .public) via \(interfaces, privacy: .public)")
+        }
+        monitor.start(queue: DispatchQueue(label: "LambdaVision.DebugServer.path"))
+        pathMonitor = monitor
+        let center = NotificationCenter.default
+        let events: [(Notification.Name, String)] = [
+            (UIApplication.didEnterBackgroundNotification, "entered background"),
+            (UIApplication.willEnterForegroundNotification, "entering foreground"),
+            (UIApplication.didReceiveMemoryWarningNotification, "memory warning"),
+        ]
+        lifecycleObservers = events.map { name, label in
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                AppLog.app.log("[DebugServer] app \(label, privacy: .public)")
+            }
+        }
+    }
+
+    private static func stopWatching() {
+        watchdog?.cancel()
+        watchdog = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lifecycleObservers.forEach(NotificationCenter.default.removeObserver)
+        lifecycleObservers = []
+    }
+    #endif
+
+    /// Logged, and back to `.active` re-checks the listener at once: a
+    /// suspension defuncts listening sockets.
+    static func scenePhaseChanged(_ phase: ScenePhase) {
+        #if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
+        guard server != nil || watchdog != nil else { return }
+        AppLog.app.log("[DebugServer] scene phase \(String(describing: phase), privacy: .public)")
+        if phase == .active { Task { await check() } }
+        #endif
+    }
 }
+
+#if canImport(DebugTraceServer) && !LAMBDA_NO_DEBUG_SERVER
+/// A TCP connect to the server's own port, closed at once: the kernel
+/// accepts it if a listener is bound, whatever the main actor is doing, so a
+/// refusal means the listener is gone. Sends nothing (the server cancels a
+/// connection that closes before a request).
+nonisolated enum ListenerProbe {
+    enum Outcome: Sendable { case accepted, refused(String), noAnswer(String) }
+
+    static func knock(host: String, port: UInt16, timeout: Double = 2) async -> Outcome {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return .refused("bad port") }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let queue = DispatchQueue(label: "LambdaVision.DebugServer.probe")
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Outcome, Never>) in
+            let once = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func finish(_ outcome: Outcome) {
+                guard once.withLock({ let first = !$0; $0 = true; return first }) else { return }
+                connection.cancel()
+                continuation.resume(returning: outcome)
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready: finish(.accepted)
+                case .failed(let error): finish(Self.classify(error))
+                case .waiting(let error): finish(Self.classify(error))
+                default: break
+                }
+            }
+            connection.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + timeout) { finish(.noAnswer("no reply in \(timeout) s")) }
+        }
+    }
+
+    private static func classify(_ error: NWError) -> Outcome {
+        if case .posix(let code) = error, code == .ECONNREFUSED || code == .ECONNRESET {
+            return .refused(String(describing: error))
+        }
+        return .noAnswer(String(describing: error))
+    }
+}
+#endif
 
 // MARK: - Endpoints
 

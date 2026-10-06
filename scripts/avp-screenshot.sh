@@ -71,12 +71,48 @@ fi
 mkdir -p build/screenshots
 [ -n "$out" ] || out="build/screenshots/$(date +%Y%m%d-%H%M%S)-$eye.png"
 mkdir -p "$(dirname "$out")"
-# The response lands here first; only a PNG is moved to $out.
+# The response lands here first; only a PNG is moved to $out; curl's own
+# complaint (refused vs unreachable) goes to the second file.
 response=build/screenshots/.last-response
+curl_err=build/screenshots/.last-curl-error
 
-status="$(lv_curl "screenshot?eye=$eye&source=$source_name&width=$width&unwarp=$unwarp" \
-    --max-time 30 -o "$response" -w '%{http_code}' 2>/dev/null || true)"
-status="${status:-000}"
+fetch() {
+    curl_exit=0
+    status="$(lv_curl "screenshot?eye=$eye&source=$source_name&width=$width&unwarp=$unwarp" \
+        --connect-timeout 5 --max-time 30 -o "$response" -w '%{http_code}' 2>"$curl_err")" || curl_exit=$?
+    status="${status:-000}"
+}
+
+# curl says only "Couldn't connect" for both a refusal (the device answered
+# with a reset: nothing listens) and no route; nc names which. Prints
+# "refused", "unreachable" or nothing.
+connect_failure() {
+    local hostport="${LV_URL#http://}" said
+    said="$(/usr/bin/nc -vz -G 3 "${hostport%:*}" "${hostport##*:}" 2>&1 || true)"
+    case "$said" in
+        *[Rr]efused*) echo refused ;;
+        *failed*|*timed\ out*|*[Nn]o\ route*|*[Uu]nreachable*) echo unreachable ;;
+    esac
+}
+
+fetch
+failure=""
+[ "$curl_exit" = 7 ] && failure="$(connect_failure)"
+# Refused at a recorded port: the app may have rebuilt its server on another
+# port (it re-checks its listener every 5 s); ask Bonjour once.
+if [ "$failure" = refused ] && [ "$LV_SOURCE" != bonjour ] && [ -z "$host" ]; then
+    old_url="$LV_URL"
+    LV_URL=""
+    lv_discover
+    if [ -n "$LV_URL" ] && [ "$LV_URL" != "$old_url" ]; then
+        echo "note: $old_url refused; retrying at $LV_URL (Bonjour)" >&2
+        fetch
+        failure=""
+        [ "$curl_exit" = 7 ] && failure="$(connect_failure)"
+    else
+        LV_URL="$old_url"
+    fi
+fi
 
 if [ "$status" = 200 ] && [ "$(/usr/bin/head -c 4 "$response" | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')" = 89504e47 ]; then
     mv "$response" "$out"
@@ -88,7 +124,22 @@ if [ "$status" = 200 ] && [ "$(/usr/bin/head -c 4 "$response" | /usr/bin/od -An 
 fi
 
 case "$status" in
-    000) echo "error: no answer from $LV_URL (via $LV_SOURCE): is the app running with its debug server, on this network?" >&2 ;;
+    000)
+        why="$(/usr/bin/sed -n 's/^curl: ([0-9]*) //p' "$curl_err" | /usr/bin/head -1)"
+        if [ "$failure" = refused ]; then
+            echo "error: REFUSED: the device is reachable but nothing listens at $LV_URL (via $LV_SOURCE)" >&2
+            echo "hint: the debug server's listener stopped or moved. The app rebuilds it within ~5 s (log: '[DebugServer] listener ... stopped answering' then 'listening on port N'); retry, or check the app is still running and Settings > Advanced > Debug server isn't Off" >&2
+        elif [ "$curl_exit" = 6 ]; then
+            echo "error: UNREACHABLE: can't resolve the host in $LV_URL (via $LV_SOURCE): $why" >&2
+            echo "hint: pass --host <ip>[:port], or check the tailnet / local network" >&2
+        elif [ "$curl_exit" = 28 ] || [ "$curl_exit" = 7 ]; then
+            echo "error: UNREACHABLE: no connection to $LV_URL (via $LV_SOURCE): ${why:-curl exit $curl_exit}" >&2
+            echo "hint: the headset is asleep, off this network/tailnet, or (No route to host while ping works) macOS Local Network privacy is blocking this terminal's curl; try /usr/bin/curl from Terminal.app" >&2
+        else
+            echo "error: no HTTP answer from $LV_URL (via $LV_SOURCE): ${why:-curl exit $curl_exit}" >&2
+            echo "hint: the connection opened but broke; retry, and check build/device-console.log for a crash" >&2
+        fi
+        ;;
     401) echo "error: $LV_URL wants this build's bearer token; none was found (set DEBUGTRACE_TOKEN, or launch with build-and-sign --mcp)" >&2 ;;
     *)
         message="$(/usr/bin/plutil -extract error.message raw -o - "$response" 2>/dev/null || true)"

@@ -276,6 +276,9 @@ extension ImmersiveSpaceContent: CompositorLayerConfiguration {
 struct LambdaVisionApp: App {
 
     @State private var appModel = AppModel()
+    // The app-wide phase (all scenes): the debug server re-checks its
+    // listener when it returns to active (LambdaDebugServer).
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         AppLog.configureDebugTrace()
@@ -298,6 +301,7 @@ struct LambdaVisionApp: App {
                 // "Open in LambdaVision" (AirDrop, Files, Share): a game zip.
                 .onOpenURL { url in appModel.library.open(url) }
         }
+        .onChange(of: scenePhase) { _, phase in LambdaDebugServer.scenePhaseChanged(phase) }
 
         // In-app log viewer. This app renders through CompositorServices and
         // has no tab bar, so the console is its own window.
