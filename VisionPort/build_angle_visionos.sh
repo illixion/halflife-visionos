@@ -30,6 +30,12 @@ if [[ ! -d "$ANGLE_ROOT/depot_tools" ]]; then
 fi
 export PATH="$ANGLE_ROOT/depot_tools:$PATH"
 export DEPOT_TOOLS_UPDATE=0
+# DEPOT_TOOLS_UPDATE=0 also skips the bootstrap a first `gclient` run would
+# do (CIPD and depot_tools' own python3), so a fresh clone, as on CI, needs it
+# explicitly: gclient sync's siso hook dies on a missing python3_bin_reldir.txt.
+if [[ ! -f "$ANGLE_ROOT/depot_tools/python3_bin_reldir.txt" ]]; then
+    "$ANGLE_ROOT/depot_tools/ensure_bootstrap"
+fi
 
 # --- 2. ANGLE source + gclient sync ---
 if [[ ! -d "$ANGLE_ROOT/angle" ]]; then

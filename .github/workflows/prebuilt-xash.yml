@@ -140,8 +140,9 @@ jobs:
             brew install llvm
             prefix=$(brew --prefix llvm)
           fi
+          # Only llvm-objcopy, never LLVM on PATH: build_game.sh compiles with
+          # CC=clang, which must stay Apple's clang from the pinned Xcode.
           echo "LLVM_OBJCOPY=$prefix/bin/llvm-objcopy" >> "$GITHUB_ENV"
-          echo "PATH=$prefix/bin:$PATH" >> "$GITHUB_ENV"
       - name: Fetch and patch sources
         if: steps.guard.outputs.run == 'true'
         run: ./VisionPort/setup.sh
