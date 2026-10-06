@@ -430,9 +430,13 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         // from the point-splat days, switched hard between neighbours as the
         // ripple moved the read across a coverage edge: the wavy lines on the
         // headset. The resolve fills the mirror's gaps itself now.)
+        // Coverage from the un-rippled position, colour from the rippled one:
+        // the ripple must never decide whether the mirror is there, or a
+        // coverage edge strobes in ripple-shaped bands.
         const half4 c = sharpWater.sample(s, suv, eye);
-        sharpWeight = saturate(float(c.a));
-        sharp = float3(c.rgb) / max(float(c.a), 1e-3);
+        const half4 c0 = sharpWater.sample(s, uv, eye);
+        sharpWeight = saturate(float(c0.a));
+        sharp = c.a > 0.02h ? float3(c.rgb) / float(c.a) : float3(c0.rgb) / max(float(c0.a), 1e-3);
     }
     if (sharpWeight < 0.98 && p.probe[1].w >= 0.0) {
         const float w = p.probeMix.x;
@@ -564,6 +568,12 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
 #ifndef SSPR_FILL
 #define SSPR_FILL 8u    // rows searched up and down for a surface to fill a gap
 #endif
+#ifndef SSPR_MARCH
+#define SSPR_MARCH 8    // steps of the hidden-surface march per texel
+#endif
+#ifndef SSPR_THICK
+#define SSPR_THICK 16.0 // units behind on-screen geometry a ray counts as hitting its hidden side
+#endif
 #ifndef SSPR_CANDIDATES
 #define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
 #endif
@@ -654,6 +664,44 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     // there: the candidate whose check lands back on the ray is the surface
     // that ray really mirrors. Its colour is sampled at that exact,
     // continuously moving coordinate, and the samples are averaged.
+    // Hidden surfaces: the underside of a table is never on screen (the eye
+    // sees its top), so nothing mirrors into its footprint but the
+    // background past its edge — a table that looked transparent, more or
+    // less depending on head pitch, on the headset. March this texel's
+    // reflected ray (from the water under its centre) up to the farthest
+    // candidate: where it passes just behind on-screen geometry above the
+    // water (within SSPR_THICK of it), it would hit a surface the eye cannot
+    // see, and the texel is left to the probe.
+    float hidden = 0.0;
+    {
+        const float3 d0 = glassViewRay((float2(gid.xy) + 0.5) / float2(size.xy), eye, p);
+        if (d0.z < -1e-4) {
+            const float3 P0 = E + d0 * ((height - E.z) / d0.z);
+            const float3 r0 = float3(d0.x, d0.y, -d0.z);
+            float reach = 0.0;
+            for (int k = 0; k < 5; k++)
+                if (valid[k]) reach = max(reach, dot(Wc[k] - P0, r0));
+            reach = min(reach, 2048.0);
+            for (int k = 1; k <= SSPR_MARCH && hidden == 0.0; k++) {
+                const float3 X = P0 + r0 * (reach * float(k) / float(SSPR_MARCH + 1));
+                const float3 q = X - E;
+                const float qz = dot(q, F);
+                if (qz < 4.0) break;
+                const float2 xs = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
+                if (any(xs < 0.0) || any(xs >= 1.0)) break;
+                const float ndc = engineDepth.read(min(uint2(xs * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                const float zv = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
+                const float3 dv = glassViewRay(xs, eye, p);
+                const float3 V = E + dv * (zv / dot(dv, F));
+                if (V.z > height + 1.0 && qz > zv + 1.0 && qz < zv + SSPR_THICK + 0.02 * zv)
+                    hidden = 1.0;
+            }
+        }
+    }
+    if (hidden > 0.0) {
+        mirror.write(half4(0.0h), gid.xy, gid.z);
+        return;
+    }
     half3 sum = 0.0h;
     float conf = 0.0;
     for (int sj = 0; sj < SSPR_SUB_Y; sj++) {
@@ -673,6 +721,8 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             float2 fallback = float2(-1.0);
             for (int k = 0; k < 5 && fallback.x < 0.0; k++)
                 if (valid[k]) fallback = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
+            float2 exactSum = 0.0;
+            float exactN = 0.0;
             for (int k = 0; k < 5; k++) {
                 if (!valid[k]) continue;
                 const float along = max(dot(Wc[k] - P, r), 0.0);
@@ -680,6 +730,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 const float qz = dot(q, F);
                 if (qz < 4.0) continue;
                 const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
+                exactSum += src; exactN += 1.0;
                 if (any(src < 0.0) || any(src >= 1.0)) continue;
                 if (candidates == 1) { bestSrc = src; break; }     // one surface: no check needed
                 const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
@@ -689,9 +740,18 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 const float miss = length(off - r * dot(off, r)) + 0.01 * along;   // nearer wins a tie
                 if (A.z > height && miss < best) { best = miss; bestSrc = src; }
             }
+            // The confidence follows where this ray's mirrored point would be
+            // in the frame — the mean of every candidate's exact projection,
+            // in the frame or not — which moves smoothly from texel to texel,
+            // as neighbouring texels share candidates. Taken from the chosen
+            // sample's source instead, it jumped between neighbouring rows
+            // that chose surfaces at different distances from the frame's
+            // edge: wavy bands of confidence in a sharp-edged patch on the
+            // headset, where the mirror runs out at the top of the view.
             if (bestSrc.x < 0.0) bestSrc = fallback;
+            const float2 confAt = exactN > 0.0 ? exactSum / exactN : bestSrc;
             if (bestSrc.x < 0.0) continue;
-            const float2 edge = min(bestSrc, 1.0 - bestSrc);
+            const float2 edge = min(confAt, 1.0 - confAt);
             const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));
             // A 2 × 2-pixel box around the sample (four bilinear taps half a
             // pixel out): the sub-rays sit two engine pixels apart, and a
