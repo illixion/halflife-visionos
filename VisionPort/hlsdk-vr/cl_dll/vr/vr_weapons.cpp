@@ -23,3 +23,10 @@ int VR_WeaponMaxClip( int id )
 		return -1;
 	return info.iMaxClip > 0 ? info.iMaxClip : -1;
 }
+
+// The egon's weapon id in this game's numbering (8 in Half-Life, 10 in
+// Opposing Force), for client code that can't include weapons.h.
+int VR_WeaponEgonId( void )
+{
+	return WEAPON_EGON;
+}

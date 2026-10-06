@@ -276,6 +276,46 @@ instead of deleting them.
   window; brief game-audio replay when reopening a window while the game is
   hidden. Cosmetic.
 
+## Open — compiled games and mods
+
+- **Opposing Force weapons in the VR layer.** OF and BS build, load and
+  spawn their own entities (Mac: of0a0, of1a1, ba_tram1, ba_canal1, no
+  missing factories), but OF's new arsenal hasn't been checked on device:
+  - *Hand-anchored weapon pass:* displacer, Desert Eagle (laser spot),
+    knife, M249, pipe wrench, shock rifle, sniper rifle (zoom), spore
+    launcher, barnacle grapple and penguins have never been through
+    `ViewmodelGrip` / `WeaponPass`, and OF's viewmodels use the PCV
+    hands. The 7.3 fallback (stock flat viewmodel when grip derivation
+    fails) is what should catch the odd ones.
+  - *Client barrel aim:* only eagle.sc, m249.sc and sniper.sc are in
+    `hlsdk-vr/cl_dll/vr/vr_events.cpp`'s table. The server already fires
+    every weapon along the aim offset; the shock rifle, spore launcher and
+    displacer events draw their beams/projectiles from the head view.
+    Adding a name is enough when the event copies `args->angles` once and
+    calls `EV_GetGunPosition` once.
+  - *Weapon ids differ per game:* OF renumbers (`WEAPON_EGON` 10, RPG 8).
+    The VR layer now asks the game (`VR_WeaponEgonId`); anything app-side
+    that keys on HL ids (HUD icons, per-weapon tuning) needs the same care.
+  - The egon exemption (fires along the view) is keyed on `WEAPON_EGON`
+    and the model name; OF's displacer/shock rifle may want the same.
+- **FreeVGUI clients on this engine pin.** hlsdk-portable branches after
+  2026-08-19 link FreeVGUI into the client, which needs the VGUI
+  `SetPaintOffset` entry our xash3d-fwgs pin predates (NULL call on the
+  first panel paint). The engine now has the entry as a no-op, so HUD
+  sprites drawn from inside a VGUI panel (multiplayer menus) land off by
+  the panel's position, and FreeVGUI's panels have never run on the
+  headset. The built-in ports are pinned before the switch
+  (`VisionPort/games.list`); user-compiled current mods take the FreeVGUI
+  path. Proper fix: implement the offset in the engine's 2D draw calls, or
+  bump the xash3d-fwgs pin.
+- **Kind C runs on Half-Life's code.** A gamedir with no compiled-in match
+  (by gamedir, then gamedll_linux / gamedll_osx, then gamedll) gets
+  Half-Life's (`Lambda_FindCompiledGame`, lib_posix.c); that includes an
+  OF or BS install on a build that didn't compile their port.
+- **Game change needs an app restart.** `Sys_NewInstance` hands the
+  gamedir to `Lambda_RequestGameChange` instead of `execv`; restarting
+  the engine in-process (static globals in engine + games) is unexplored.
+
 ## Open — upstream candidates (xash3d-fwgs)
 
 - **gl2_shim BaseVertex workaround**: ANGLE's Metal backend advertises
