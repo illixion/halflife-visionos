@@ -179,6 +179,11 @@ instead of deleting them.
   (expected 0.2–0.4 ms, timed as `gMirror`). The empty device mirror is not
   explained yet: Settings → Diagnostics "Water mirror view" shows what the
   mirror holds. See `docs/plans/modern-lighting.md` (3e).
+- **Sharp water, round 3: device check pending.** The mirror was right on
+  device but the blend cancelled it; water now lerps toward a hue-tinted
+  reflection by Fresnel (dominant at grazing). Mirror at 1/4 resolution with
+  stencil early-outs, timed per dispatch (gMirrorFill / gMirrorProject /
+  gMirror). See `docs/plans/modern-lighting.md` (3f).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

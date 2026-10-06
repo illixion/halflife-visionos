@@ -537,6 +537,43 @@ one key read and a colour sample (resolve), plus a 3 MB fill: roughly
 `sharpWaterReflections` defaults off until `gMirror` confirms it. The
 composite's extra sharp-water samples stay in `gComposite`.
 
+### 3f. Sharp water, round 3: the blend, and a cheaper mirror
+
+**Device (b9cdd6a, c1a2):** "Water mirror view" showed the mirror fully
+populated and correctly mirrored (wall, vent, bench, ceiling grid, red
+light; empty only where the source was off screen) — but the final image
+showed plain blue water. The blend was the culprit: water was modulated by
+the reflection's brightness against the room's light, which cancels a
+mid-grey room to nothing however crisp the mirror. Cost: gMirror 1.24 ms
+p50 / 2.91 p95, gComposite 3.79, gpuQueue 6.45 (4.63 with water off),
+frame 12.2 ms.
+
+**Blend, now:** water lerps toward its reflection by Fresnel × strength
+(capped at 0.85, so at grazing angles the reflection dominates, as on the
+lake), the reflection tinted by the water's own hue so it stays watery. The
+sharp mirror gets the full weight and a light tint (30%); where only the
+probe's soft room is available the weight halves and the tint rises to 50%,
+which keeps the water's colour (the grey wash of round 1 came from that
+soft room at full weight). "Reflection strength" still scales it. On the
+Mac render of the device view the vent, bench and fridge now mirror clearly
+in the flood, and the probe-only view stays blue with a soft room in it.
+
+**Cost:** the mirror defaults to 1/4 resolution (`sharpWaterDivisor` 4, 56%
+of the threads of 1/3), and both passes now skip texels that are not this
+plane's water in the engine's stencil: a mirrored point that lands
+elsewhere takes no atomic, and the resolve does nothing there (about 60% of
+the texels at the c1a2 spot). Expected gMirror ≈ 0.5–0.7 ms p50. The pass is
+split for profiling: `gMirrorFill` (the 0xFF fill of the key buffer),
+`gMirrorProject` (projection + atomics) and `gMirror` (resolve), precise
+timestamps between the dispatches. From the code the projection should
+dominate (full depth decode and projection per texel, scattered atomics);
+the fill is ~2 MB. Ship at 4 if gMirror lands near 0.5 ms; 3 only if the
+mirror looks too soft and there is headroom.
+
+**Verified offline:** 0 pixels changed outside the mask, 0 underwater,
+0 of 122 k under a fake occluder; final image between gazes 2.1/255; a
+mirrored point in both eyes' mirrors 8.0/255 against a 4.5 baseline.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new
