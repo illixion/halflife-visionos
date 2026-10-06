@@ -277,6 +277,12 @@ point, and *Swing sensitivity* (0.5×–2×) sets how hard you need to swing.
 ./VisionPort/build_xash_libxash.sh
 ./VisionPort/build_angle_visionos.sh
 
+# Compile another game's code into libxash.a (any hlsdk-portable-based source;
+# the VR layer in VisionPort/hlsdk-vr is applied automatically)
+./VisionPort/build_game.sh https://github.com/FWGS/hlsdk-portable opfor
+./VisionPort/build_game.sh https://github.com/FWGS/hlsdk-portable bshift
+./VisionPort/pack_libxash.sh   # re-fold games/libgame-*.a into libxash.a
+
 # Engine smoke build for visionOS simulator (dedicated server only, no GL)
 ./VisionPort/build_xash_xrsim.sh
 

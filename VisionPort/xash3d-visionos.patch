@@ -631,7 +631,7 @@ index 3bda62d..88dcfac 100644
  static qboolean FS_DetermineRootDirectory( char *out, size_t size )
  {
 diff --git a/engine/common/host.c b/engine/common/host.c
-index ebb7fe0..108f6b9 100644
+index ebb7fe0..fbd5398 100644
 --- a/engine/common/host.c
 +++ b/engine/common/host.c
 @@ -54,9 +54,16 @@ To fix this, we create jmp_buf in Host_Main function, when jumping into with
@@ -652,7 +652,19 @@ index ebb7fe0..108f6b9 100644
  }
  
  #ifdef XASH_ENGINE_TESTS
-@@ -650,6 +657,95 @@ static qboolean Host_FilterTime( double time )
+@@ -372,7 +379,11 @@ static void Host_NewInstance( const char *name, const char *finalmsg )
+ 	host.change_game = true;
+ 
+ 	if( !Sys_NewInstance( name, finalmsg ))
++#if XASH_VISIONOS
++		return; // the app took the request; this instance carries on
++#else
+ 		Con_Printf( S_ERROR "Failed to restart the engine\n" );
++#endif
+ }
+ 
+ /*
+@@ -650,6 +661,95 @@ static qboolean Host_FilterTime( double time )
  	return true;
  }
  
@@ -748,7 +760,7 @@ index ebb7fe0..108f6b9 100644
  /*
  =================
  Host_Frame
-@@ -677,6 +773,27 @@ void Host_Frame( double time )
+@@ -677,6 +777,27 @@ void Host_Frame( double time )
  
  	host.framecount++;
  	host.pureframetime = Platform_DoubleTime() - t1;
@@ -776,7 +788,7 @@ index ebb7fe0..108f6b9 100644
  }
  
  /*
-@@ -1152,13 +1269,67 @@ static void Sys_Quit_f( void )
+@@ -1152,13 +1273,67 @@ static void Sys_Quit_f( void )
  Host_Main
  =================
  */
@@ -795,11 +807,11 @@ index ebb7fe0..108f6b9 100644
 -	static double oldtime;
 -	string demoname, exename;
 +	int rc;
- 
- 	if( setjmp( return_from_main_buf ))
++
++	if( setjmp( return_from_main_buf ))
 +	{
 +		return_from_main_armed = false;
- 		return error_on_exit;
++		return error_on_exit;
 +	}
 +	return_from_main_armed = true;
 +
@@ -827,11 +839,11 @@ index ebb7fe0..108f6b9 100644
 +
 +	if( return_from_main_armed ) // inside Host_Main, which owns the jump
 +		return Host_DoInitBody( argc, argv, progname, bChangeGame, pChangeGame );
-+
-+	if( setjmp( return_from_main_buf ))
+ 
+ 	if( setjmp( return_from_main_buf ))
 +	{
 +		return_from_main_armed = false;
-+		return error_on_exit;
+ 		return error_on_exit;
 +	}
 +	return_from_main_armed = true;
 +	rc = Host_DoInitBody( argc, argv, progname, bChangeGame, pChangeGame );
@@ -846,7 +858,7 @@ index ebb7fe0..108f6b9 100644
  
  	host.starttime = Platform_DoubleTime();
  
-@@ -1311,14 +1482,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
+@@ -1311,14 +1486,7 @@ int EXPORT Host_Main( int argc, char **argv, const char *progname, int bChangeGa
  	// check after all configs were executed
  	HPAK_CheckIntegrity( hpk_custom_file.string );
  
@@ -939,7 +951,7 @@ index 1688f98..081758d 100644
  	// just spew it to stderr normally in debug mode
  	fprintf( stderr, "%s %s", logtime, buf );
 diff --git a/engine/common/system.c b/engine/common/system.c
-index ec64677..be7f43f 100644
+index ec64677..35c7edb 100644
 --- a/engine/common/system.c
 +++ b/engine/common/system.c
 @@ -534,7 +534,7 @@ qboolean Sys_CanRestart( void )
@@ -951,6 +963,38 @@ index ec64677..be7f43f 100644
  	return false;
  #else
  	int exelen = wai_getExecutablePath( NULL, 0, NULL );
+@@ -554,12 +554,30 @@ but since engine will be unloaded during this call
+ it explicitly doesn't use internal allocation or string copy utils
+ ==================
+ */
++#if XASH_VISIONOS
++// Defined by the app (Lambda_Bridge.c), which persists the choice and asks
++// the player to reopen the app. This weak default stands in until it does:
++// an undefined weak_import reference doesn't link in a static binary.
++__attribute__(( weak, visibility( "default" ))) void Lambda_RequestGameChange( const char *gamedir )
++{
++	Con_Printf( S_WARN "Changing the game to %s needs an app restart\n", gamedir );
++}
++#endif
++
+ qboolean Sys_NewInstance( const char *gamedir, const char *finalmsg )
+ {
+ 	qboolean replaced_arg = false;
+ 	int i;
+ 
+-#if XASH_NSWITCH
++#if XASH_VISIONOS
++	// No execv on visionOS. Hand the choice to the app, which persists it
++	// and asks the player to reopen the app; this instance keeps running
++	// the current game.
++	(void)replaced_arg; (void)i; (void)finalmsg;
++	host.change_game = false;
++	Lambda_RequestGameChange( gamedir );
++	return false;
++#elif XASH_NSWITCH
+ 	char newargs[4096];
+ 	const char *exe = host.argv[0]; // arg 0 is always the full NRO path
+ 
 diff --git a/engine/platform/posix/crash_posix.c b/engine/platform/posix/crash_posix.c
 index 9461b45..c1a33b2 100644
 --- a/engine/platform/posix/crash_posix.c
@@ -971,38 +1015,249 @@ index 9461b45..c1a33b2 100644
  	// also write to a dedicated crash report file the Java side picks up on next launch
  	if( crashlog_path[0] )
 diff --git a/engine/platform/posix/lib_posix.c b/engine/platform/posix/lib_posix.c
-index 9c34f38..23a3d26 100644
+index 9c34f38..8c811aa 100644
 --- a/engine/platform/posix/lib_posix.c
 +++ b/engine/platform/posix/lib_posix.c
-@@ -81,6 +81,17 @@ void *COM_LoadLibrary( const char *dllname, int build_ordinals_table, qboolean d
+@@ -37,6 +37,169 @@ GNU General Public License for more details.
+ #include "server.h"
+ #include "platform/android/lib_android.h"
+ 
++#if XASH_VISIONOS
++/*
++=============================================================================
++
++	COMPILED-IN GAMES (visionOS)
++
++The app binary carries every compiled-in game's server + client code
++(VisionPort/build_game.sh), each prelinked to one object whose exported
++symbols carry a per-game prefix, "lg_<gamedir>_", because games export the
++same names: entity factories are exported by classname, and Half-Life and
++Opposing Force both have monster_zombie. Lambda_CompiledGames() (generated
++by VisionPort/pack_libxash.sh) lists them, Half-Life first.
++
++COM_LoadLibrary hands out a handle carrying the prefix of the game chosen
++for the running gamedir, and COM_GetProcAddress looks names up with it.
++Every other library (menu, renderer) is the plain RTLD_DEFAULT surrogate.
++
++=============================================================================
++*/
++typedef struct
++{
++	const char *gamedir;  // canonical gamedir, e.g. "valve", "gearbox", "bshift"
++	const char *dll;      // gamedll basename without path/extension: "hl", "opfor", "bshift"
++	const char *title;    // display name, e.g. "Opposing Force"
++} lambda_compiled_game_t;
++const lambda_compiled_game_t *Lambda_CompiledGames( void );
++
++#define LAMBDA_GAMELIB_MAGIC 0x4c47414d // 'LGAM'
++
++typedef struct
++{
++	uint32_t magic;
++	qboolean client;
++	char prefix[64];
++} lambda_gamelib_t;
++
++static lambda_gamelib_t lambda_server_lib, lambda_client_lib;
++
++static lambda_gamelib_t *Lambda_GameLib( void *hInstance )
++{
++	if( hInstance == &lambda_server_lib || hInstance == &lambda_client_lib )
++		return (lambda_gamelib_t *)hInstance;
++	return NULL;
++}
++
++// The name a game's archive goes by in symbols: gamedir with anything that
++// isn't [A-Za-z0-9_] replaced. Same rule as build_game.sh.
++static void Lambda_GamePrefix( const char *gamedir, char *out, size_t size )
++{
++	size_t i = Q_strncpy( out, "lg_", size );
++
++	for( ; *gamedir && i + 2 < size; gamedir++, i++ )
++		out[i] = isalnum( (byte)*gamedir ) || *gamedir == '_' ? *gamedir : '_';
++	out[i++] = '_';
++	out[i] = 0;
++}
++
++// "dlls\\opfor.dll", "dlls/opfor.dylib" -> "opfor"
++static void Lambda_DllBase( const char *path, char *out, size_t size )
++{
++	const char *p, *base = path;
++
++	for( p = path; *p; p++ )
++	{
++		if( *p == '/' || *p == '\\' )
++			base = p + 1;
++	}
++	Q_strncpy( out, base, size );
++	COM_StripExtension( out );
++}
++
++/*
++==============
++Lambda_FindCompiledGame
++
++The compiled-in game for the running gamedir: by gamedir first, then by the
++liblist gamedll basename, POSIX entries before the Windows one (Blue
++Shift's Windows gamedll says "hl"). A mod with no match runs on Half-Life's
++code (the library's kind C: maps load, the mod's own entities are missing).
++==============
++*/
++static const lambda_compiled_game_t *Lambda_FindCompiledGame( void )
++{
++	const lambda_compiled_game_t *games = Lambda_CompiledGames( ), *g;
++	const char *dlls[3] = { GI->game_dll_linux, GI->game_dll_osx, GI->game_dll };
++	string base;
++	int i;
++
++	for( g = games; g->gamedir; g++ )
++	{
++		if( !Q_stricmp( g->gamedir, GI->gamefolder ))
++			return g;
++	}
++
++	for( i = 0; i < 3; i++ )
++	{
++		if( COM_StringEmpty( dlls[i] ))
++			continue;
++
++		Lambda_DllBase( dlls[i], base, sizeof( base ));
++
++		for( g = games; g->gamedir; g++ )
++		{
++			if( !Q_stricmp( g->dll, base ))
++				return g;
++		}
++	}
++
++	if( games->gamedir )
++		Con_Printf( S_WARN "No compiled-in game code for %s; running it on %s's\n", GI->gamefolder, games->title );
++	return games->gamedir ? games : NULL;
++}
++
++static void *Lambda_LoadGameLibrary( const char *dllname )
++{
++	lambda_gamelib_t *lib = NULL;
++	const lambda_compiled_game_t *g;
++	string path;
++
++	COM_GetCommonLibraryPath( LIBRARY_SERVER, path, sizeof( path ));
++	if( !Q_strcmp( dllname, path ))
++		lib = &lambda_server_lib;
++	else
++	{
++		COM_GetCommonLibraryPath( LIBRARY_CLIENT, path, sizeof( path ));
++		if( !Q_strcmp( dllname, path ))
++			lib = &lambda_client_lib;
++	}
++
++	if( !lib )
++		return RTLD_DEFAULT; // menu, renderer: plain symbols of the app binary
++
++	if( !( g = Lambda_FindCompiledGame( )))
++	{
++		COM_PushLibraryError( "No game code is compiled into this build" );
++		return NULL;
++	}
++
++	lib->magic = LAMBDA_GAMELIB_MAGIC;
++	lib->client = lib == &lambda_client_lib;
++	Lambda_GamePrefix( g->gamedir, lib->prefix, sizeof( lib->prefix ));
++	Con_Reportf( "%s: %s -> compiled-in %s (%s*)\n", __func__, dllname, g->title, lib->prefix );
++	return lib;
++}
++
++static void *Lambda_GameProcAddress( lambda_gamelib_t *lib, const char *name )
++{
++	char sym[256];
++	void *p;
++
++	Q_snprintf( sym, sizeof( sym ), "%s%s", lib->prefix, name );
++	p = dlsym( RTLD_DEFAULT, sym );
++
++	// The client's own IN_ActivateMouse & co. stay hidden in its prelink;
++	// the engine binds the app's stubs of those names instead (see
++	// build_game.sh). Server names never fall back: an entity classname must
++	// not resolve to some unrelated symbol of the app binary.
++	if( !p && lib->client )
++		p = dlsym( RTLD_DEFAULT, name );
++	return p;
++}
++#endif // XASH_VISIONOS
++
+ #ifdef XASH_NO_LIBDL
+ void *dlsym( void *handle, const char *symbol )
+ {
+@@ -81,6 +244,16 @@ void *COM_LoadLibrary( const char *dllname, int build_ordinals_table, qboolean d
  
  	COM_ResetLibraryError();
  
 +#if XASH_VISIONOS
 +	// visionOS forbids dlopen() of dylibs from outside the bundle, but
 +	// allows dlsym(RTLD_DEFAULT) to resolve any symbol already in the
-+	// loaded image set. HLSDK (server / client) and the menu UI are
-+	// statically linked into the app exec at build time; route their
-+	// "loads" to RTLD_DEFAULT so subsequent COM_GetProcAddress lookups
-+	// just dlsym into the main binary.
++	// loaded image set. The game code (server / client) and the menu UI are
++	// statically linked into the app exec at build time; the game libraries
++	// get a handle naming the compiled-in game, the rest RTLD_DEFAULT.
 +	(void)hInst; (void)pHandle; (void)buf;
-+	return RTLD_DEFAULT;
++	return Lambda_LoadGameLibrary( dllname );
 +#endif
 +
  	// platforms where gameinfo mechanism is impossible
  #ifdef Platform_POSIX_LoadLibrary
  	return Platform_POSIX_LoadLibrary( dllname );
-@@ -129,6 +140,10 @@ void *COM_LoadLibrary( const char *dllname, int build_ordinals_table, qboolean d
+@@ -129,6 +302,10 @@ void *COM_LoadLibrary( const char *dllname, int build_ordinals_table, qboolean d
  
  void COM_FreeLibrary( void *hInstance )
  {
 +#if XASH_VISIONOS
-+	if( hInstance == RTLD_DEFAULT )
++	if( hInstance == RTLD_DEFAULT || Lambda_GameLib( hInstance ))
 +		return; // statically-linked surrogate; nothing to release
 +#endif
  #ifdef Platform_POSIX_FreeLibrary
  	Platform_POSIX_FreeLibrary( hInstance );
  #else
+@@ -138,6 +315,11 @@ void COM_FreeLibrary( void *hInstance )
+ 
+ void *COM_GetProcAddress( void *hInstance, const char *name )
+ {
++#if XASH_VISIONOS
++	lambda_gamelib_t *lib = Lambda_GameLib( hInstance );
++	if( lib )
++		return Lambda_GameProcAddress( lib, name );
++#endif
+ #if Platform_POSIX_GetProcAddress
+ 	return Platform_POSIX_GetProcAddress( hInstance, name );
+ #else
+@@ -147,7 +329,17 @@ void *COM_GetProcAddress( void *hInstance, const char *name )
+ 
+ void *COM_FunctionFromName( void *hInstance, const char *pName )
+ {
++#if XASH_VISIONOS
++	// Save games name functions as dladdr() saw them. Exported game symbols
++	// come back through the prefix (COM_NameForFunction strips it); any other
++	// name resolves against the app binary, as before games had prefixes.
++	void *p = COM_GetProcAddress( hInstance, pName );
++	if( !p && Lambda_GameLib( hInstance ))
++		p = dlsym( RTLD_DEFAULT, pName );
++	return p;
++#else
+ 	return COM_GetProcAddress( hInstance, pName );
++#endif
+ }
+ 
+ const char *COM_NameForFunction( void *hInstance, void *function )
+@@ -155,6 +347,11 @@ const char *COM_NameForFunction( void *hInstance, void *function )
+ 	// NOTE: dladdr() is a glibc extension
+ 	Dl_info info = {0};
+ 	int ret = dladdr( (void*)function, &info );
++#if XASH_VISIONOS
++	lambda_gamelib_t *lib = Lambda_GameLib( hInstance );
++	if( ret && info.dli_sname && lib && !Q_strncmp( info.dli_sname, lib->prefix, Q_strlen( lib->prefix )))
++		return COM_GetPlatformNeutralName( info.dli_sname + Q_strlen( lib->prefix ));
++#endif
+ 	if( ret && info.dli_sname )
+ 		return COM_GetPlatformNeutralName( info.dli_sname );
+ 
 diff --git a/engine/platform/posix/sys_posix.c b/engine/platform/posix/sys_posix.c
 index 72bafc2..973d9bd 100644
 --- a/engine/platform/posix/sys_posix.c
@@ -2970,6 +3225,26 @@ index 4e1d5b8..fab0449 100644
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || !WORLDMODEL )
  		return false;
  
+diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
+index 038abd4..6509d98 100644
+--- a/ref/gl/gl_context.c
++++ b/ref/gl/gl_context.c
+@@ -351,6 +351,15 @@ static void GAME_EXPORT R_SetupSky( int *skyboxTextures )
+ 
+ 	for( i = 0; i < SKYBOX_MAX_SIDES; i++ )
+ 		tr.skyboxTextures[i] = skyboxTextures[i];
++
++	// R_UnloadSkybox() above just cleared this on the shared world_static_t
++	// (tr.world aliases the engine's world_t via PARM_GET_WORLD_PTR), which
++	// undid the SetBits() the engine had just done in R_SetupSky() before
++	// calling us. Without this, FWORLD_CUSTOM_SKYBOX reads false even
++	// though tr.skyboxTextures[] is fully populated, so R_AddSkyBoxSurface
++	// takes the legacy FWORLD_SKYSPHERE cloud-poly branch instead — drawing
++	// with whatever texture unit happened to be bound, i.e. a flat gray sky.
++	SetBits( tr.world->flags, FWORLD_CUSTOM_SKYBOX );
+ }
+ 
+ static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int offset_x, int offset_y, float scale_x, float scale_y )
 diff --git a/ref/gl/gl_draw.c b/ref/gl/gl_draw.c
 index 26974c1..b5b4b4a 100644
 --- a/ref/gl/gl_draw.c
@@ -3321,45 +3596,6 @@ index 0568486..2a954e5 100644
  
  	return;
  }
-diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
-index 038abd4..6509d98 100644
---- a/ref/gl/gl_context.c
-+++ b/ref/gl/gl_context.c
-@@ -351,6 +351,15 @@ static void GAME_EXPORT R_SetupSky( int *skyboxTextures )
- 
- 	for( i = 0; i < SKYBOX_MAX_SIDES; i++ )
- 		tr.skyboxTextures[i] = skyboxTextures[i];
-+
-+	// R_UnloadSkybox() above just cleared this on the shared world_static_t
-+	// (tr.world aliases the engine's world_t via PARM_GET_WORLD_PTR), which
-+	// undid the SetBits() the engine had just done in R_SetupSky() before
-+	// calling us. Without this, FWORLD_CUSTOM_SKYBOX reads false even
-+	// though tr.skyboxTextures[] is fully populated, so R_AddSkyBoxSurface
-+	// takes the legacy FWORLD_SKYSPHERE cloud-poly branch instead — drawing
-+	// with whatever texture unit happened to be bound, i.e. a flat gray sky.
-+	SetBits( tr.world->flags, FWORLD_CUSTOM_SKYBOX );
- }
- 
- static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int offset_x, int offset_y, float scale_x, float scale_y )
-diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c
-index cfa7835..32bcb26 100644
---- a/ref/gl/gl_warp.c
-+++ b/ref/gl/gl_warp.c
-@@ -348,6 +348,14 @@ void R_DrawSkyBox( void )
- 	pglDisable( GL_BLEND );
- 	pglDisable( GL_ALPHA_TEST );
- 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
-+	// on real fixed-function GL, REPLACE ignores vertex color, so this was
-+	// never needed; the visionOS GLES compat shim has no TexEnv support and
-+	// always multiplies by the current color (see gl2_shim.c), so without
-+	// resetting it here the skybox gets tinted by whatever color a prior
-+	// draw call (lightmaps, decals) left behind — this is what produced the
-+	// flat/dark-gray sky. Every other GL_REPLACE call site in gl_rsurf.c
-+	// already resets color the same way.
-+	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
- 
- 	for( int i = 0; i < SKYBOX_MAX_SIDES; i++ )
- 	{
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
 index df6f012..6959ddd 100644
 --- a/ref/gl/gl_rsurf.c
@@ -3497,6 +3733,25 @@ index df6f012..6959ddd 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
+diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c
+index cfa7835..32bcb26 100644
+--- a/ref/gl/gl_warp.c
++++ b/ref/gl/gl_warp.c
+@@ -348,6 +348,14 @@ void R_DrawSkyBox( void )
+ 	pglDisable( GL_BLEND );
+ 	pglDisable( GL_ALPHA_TEST );
+ 	pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE );
++	// on real fixed-function GL, REPLACE ignores vertex color, so this was
++	// never needed; the visionOS GLES compat shim has no TexEnv support and
++	// always multiplies by the current color (see gl2_shim.c), so without
++	// resetting it here the skybox gets tinted by whatever color a prior
++	// draw call (lightmaps, decals) left behind — this is what produced the
++	// flat/dark-gray sky. Every other GL_REPLACE call site in gl_rsurf.c
++	// already resets color the same way.
++	pglColor4f( 1.0f, 1.0f, 1.0f, 1.0f );
+ 
+ 	for( int i = 0; i < SKYBOX_MAX_SIDES; i++ )
+ 	{
 diff --git a/ref/gl/wscript b/ref/gl/wscript
 index f085da6..9a9f280 100644
 --- a/ref/gl/wscript

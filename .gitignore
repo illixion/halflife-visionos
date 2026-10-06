@@ -38,3 +38,6 @@ scripts/build-signing.conf
 
 # Scratch dir of scripts/fetch-prebuilts.sh
 LambdaVision/Vendor/.prebuilt-download/
+
+# Mod sources fetched by VisionPort/build_game.sh
+VisionPort/games-src/

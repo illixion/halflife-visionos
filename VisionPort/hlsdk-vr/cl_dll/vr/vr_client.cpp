@@ -29,6 +29,11 @@
 #include "r_studioint.h" // IEngineStudio.Mod_Extradata for the p_ hull
 extern engine_studio_api_t IEngineStudio;
 
+// Platform-facing globals are weak: every compiled-in game defines the same
+// set, and the single static link keeps one copy that the bridge and the
+// running game share (only one game runs per process).
+#define VR_SHARED extern "C" __attribute__((weak, visibility("default")))
+
 extern vec3_t v_origin;
 extern vec3_t v_angles;
 
@@ -52,30 +57,30 @@ extern vec3_t v_angles;
 // VR_HideViewModel) and VR_AddHandWeapon draws the current p_ model at this
 // pose as a world entity. Defined hlsdk-side, extern'd by the bridge (the
 // intermediate cl_dll link needs the definition).
-extern "C" __attribute__((visibility("default"))) float g_vr_hand_pose[9] = { 0 };
-extern "C" __attribute__((visibility("default"))) int g_vr_hand_pose_active = 0;
+VR_SHARED float g_vr_hand_pose[9] = { 0 };
+VR_SHARED int g_vr_hand_pose_active = 0;
 // Mirror of the engine's stereo view override (abs pitch, delta yaw, abs
 // roll + head translation in the baseline-yaw frame), copied over by the
 // bridge each tick. The engine globals can't be referenced from here
 // directly — the intermediate cl_dll dylib link has no engine symbols.
 // [0]=active, [1..3]=angles, [4..6]=origin offset.
-extern "C" __attribute__((visibility("default"))) float g_vr_cam_override[7] = { 0 };
+VR_SHARED float g_vr_cam_override[7] = { 0 };
 // Client-side mirror of the server's g_vr_aim_offset (dlls/vr/vr_player.cpp):
 // the pitch/yaw the server adds to pev->v_angle so shots fire along the weapon
 // barrel. The client bullet-trace events (vr_events.cpp) apply the SAME offset
 // so the decal/tracer land where the damage does. Defined here (not extern'd
 // from the server) because the intermediate cl_dll dylib link has no server
 // symbols; the bridge writes both copies each tick from one source.
-extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset_cl[2] = { 0 };
+VR_SHARED float g_vr_aim_offset_cl[2] = { 0 };
 // Client mirror of the server's g_vr_muzzle_offset: the muzzle of the gun in
 // the hand relative to the eye, in the level frame of the view yaw (units);
 // [3] > 0 while active. The bullet events start their traces there
 // (vr_events.cpp) and the aim trace below does too.
-extern "C" __attribute__((visibility("default"))) float g_vr_muzzle_offset_cl[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
+VR_SHARED float g_vr_muzzle_offset_cl[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
 // The aim ray's hit, for the platform's reticle: [0] = distance from the
 // muzzle along the aim to the first thing a shot would hit (units), [1] > 0
 // when there is one to show. Published every normal refdef.
-extern "C" __attribute__((visibility("default"))) float g_vr_aim_hit[2] = { 0.0f, -1.0f };
+VR_SHARED float g_vr_aim_hit[2] = { 0.0f, -1.0f };
 // Set by VR_AddHandWeapon each frame: 1 when the weapon's p_ model was drawn
 // at the hand (so the viewmodel is hidden), 0 when it fell back to the stock
 // viewmodel — e.g. the egon, whose backpack is rigged to the body and clips
@@ -88,22 +93,22 @@ int g_vr_hand_weapon_drawn = 0;
 // Metal weapon pass (Lambda_WeaponModel.c) reads these to bake the skinned
 // mesh once and pose its bones every tick. NULL header = no external weapon
 // this frame.
-extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_hdr = 0;
-extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_modelindex = 0;
-extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_body = 0;
-extern "C" __attribute__((visibility("default"))) int   g_vr_weapon_sequence = 0;
-extern "C" __attribute__((visibility("default"))) float g_vr_weapon_frame = 0.0f;
-extern "C" __attribute__((visibility("default"))) float g_vr_weapon_animtime = 0.0f;
-extern "C" __attribute__((visibility("default"))) float g_vr_weapon_framerate = 1.0f;
-extern "C" __attribute__((visibility("default"))) float g_vr_weapon_time = 0.0f;
+VR_SHARED void *g_vr_weapon_hdr = 0;
+VR_SHARED int   g_vr_weapon_modelindex = 0;
+VR_SHARED int   g_vr_weapon_body = 0;
+VR_SHARED int   g_vr_weapon_sequence = 0;
+VR_SHARED float g_vr_weapon_frame = 0.0f;
+VR_SHARED float g_vr_weapon_animtime = 0.0f;
+VR_SHARED float g_vr_weapon_framerate = 1.0f;
+VR_SHARED float g_vr_weapon_time = 0.0f;
 // The same weapon's third-person (p_) model header, published alongside:
 // whole where the viewmodel is open, and what the platform draws in the hand
 // when the player picks world models. NULL when there is none.
-extern "C" __attribute__((visibility("default"))) void *g_vr_weapon_world_hdr = 0;
+VR_SHARED void *g_vr_weapon_world_hdr = 0;
 // World light sampled at the view origin (R_LightPoint via the triangle API),
 // normalised 0..1, published each frame for the external weapon renderer to
 // shade the gun to match the room.
-extern "C" __attribute__((visibility("default"))) float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
+VR_SHARED float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
 // Where the player's feet are, for the visionOS first-person body's legs
 // (AvatarRig): published every normal refdef, read by the app through
 // lambda_body_state (Lambda_WeaponModel.c).
@@ -118,7 +123,7 @@ extern "C" __attribute__((visibility("default"))) float g_vr_weapon_light[3] = {
 //   [5] vertical velocity, units/s
 //   [6] a counter bumped on every publish, so a reader can tell fresh data
 //       from a paused game
-extern "C" __attribute__((visibility("default"))) float g_vr_body_state[7] = { 64.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+VR_SHARED float g_vr_body_state[7] = { 64.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 
 extern "C" float g_vr_hud_state[14];  // vr_hud.cpp
 
