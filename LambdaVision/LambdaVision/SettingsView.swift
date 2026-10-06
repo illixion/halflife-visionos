@@ -178,7 +178,7 @@ struct SettingsView: View {
                     Text((settings.isEngineReady
                           ? "The menu buttons open the stock Half-Life menu inside the immersive space — use it for Configuration, Multiplayer, and other tabs not surfaced here."
                           : "Start the game (Show Immersive Space) to enable the menu and console.")
-                         + " “Developer mode” shows a debug panel over your off-hand palm when you turn it to face you: frame time and a few render toggles to look at and pinch with your other hand. It stays away while that hand is driving the movement joystick.")
+                         + " “Developer mode” shows a debug panel over your off-hand palm when you turn it to face you: frame time and a few render toggles to look at and pinch with your other hand. It stays away while that hand is driving the movement joystick. It also turns on the engine’s verbose developer messages in the log; with it off they stay quiet.")
                 }
             }
             .navigationTitle("Settings")

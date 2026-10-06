@@ -235,10 +235,12 @@ final class GameSettings {
     }
 
     /// Developer mode: the palm debug panel (frame time and render toggles
-    /// over the off-hand palm while it faces you).
+    /// over the off-hand palm while it faces you) and the engine's verbose
+    /// developer message stream (`developer 2`, off otherwise).
     var developerMode: Bool = AppSettingsStore.developerMode {
         didSet { AppSettingsStore.developerMode = developerMode
-                 Renderer.debugPanelEnabled = developerMode }
+                 Renderer.debugPanelEnabled = developerMode
+                 cvar("developer", developerMode ? 2 : 0) }
     }
 
     /// Hold the weapon's viewmodel or its world model (WeaponPass).

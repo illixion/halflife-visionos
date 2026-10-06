@@ -1537,7 +1537,11 @@ actor Renderer {
             return
         }
         AppLog.render.log("[LambdaVision] rodir: \(rodir, privacy: .private)")
-        let extra = ["-dev", "2", "-console", "-noip", "-noenginemouse",
+        // The engine's developer stream (-dev 2: warnings, load spam) is
+        // only on in Developer mode; GameSettings.developerMode keeps the
+        // `developer` cvar in step when it is toggled later.
+        let devArgs = Renderer.debugPanelEnabled ? ["-dev", "2"] : []
+        let extra = devArgs + ["-console", "-noip", "-noenginemouse",
                      "-rodir", rodir, "-game", "valve",
                      "+map", "c0a0"] // tram ride (Black Mesa Inbound)
         // -noenginemouse: no real mouse on AVP. Keeps in_mouseinitialized

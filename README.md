@@ -1,4 +1,4 @@
-# Lambda VisionPro
+# LambdaVision
 
 Half-Life on Apple Vision Pro — [Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs)
 running its `ref_gl` renderer via [ANGLE](https://github.com/google/angle)
@@ -27,6 +27,18 @@ particles, decals), whereas the from-scratch Vulkan path only ever reached
 launcher UI as a leftover diagnostic from that earlier phase; it's not
 part of the render path.
 
+While the off-hand locomotion clutch is held, LambdaVision renders RAVEInput's
+shared joystick visualization as a head-facing outer ring, deadzone ring, and
+handle above the movement wrist. It uses the existing Metal weapon/UI arc pass,
+so the feedback remains stereoscopic and world-anchored without adding a
+RealityKit overlay to the Compositor Services renderer.
+
+**Developer mode** (Settings → Advanced; on by default in Debug builds, off in
+Release) shows a debug panel over the off-hand palm and turns on the engine's
+verbose developer message stream (`developer 2`). With it off, the engine log
+stays quiet. The in-game console and the Advanced tab's console field work
+either way.
+
 **Known limitations:** VR input (aiming, locomotion, gestures) is
 proof-of-concept quality — functional enough to play, but rough around the
 edges compared to the rest of the app. See [ISSUES.md](ISSUES.md) for
@@ -45,11 +57,11 @@ specifics, and [PLAN.md](PLAN.md) for the full phase history.
 
 ```bash
 # This repo and both RAVE packages must sit in the same parent directory
-git clone <this-repo> Lambda_VisionPro
+git clone https://github.com/illixion/halflife-visionos.git
 git clone https://github.com/illixion/RAVESDK.git
 git clone https://github.com/illixion/RAVEEngine.git
 
-cd Lambda_VisionPro
+cd halflife-visionos
 
 # Open the Xcode project
 open LambdaVision/LambdaVision.xcodeproj
@@ -57,7 +69,7 @@ open LambdaVision/LambdaVision.xcodeproj
 
 ### RAVE packages
 
-Lambda VisionPro links two shared packages:
+LambdaVision links two shared packages:
 
 | Package | Products used |
 |---|---|
@@ -74,7 +86,7 @@ side by side:
 some-parent/
 ├── RAVESDK/
 ├── RAVEEngine/
-└── Lambda_VisionPro/
+└── halflife-visionos/
 ```
 
 The requirement is only that this repo's parent directory also contains
@@ -86,12 +98,6 @@ Why path references and not versions: the packages and the apps co-evolve
 continuously — the hand input this app uses was converged into `RAVEInput` out of
 this app and two others — and a path reference keeps "move this into the package
 and update its callers" a single atomic edit.
-
-While the off-hand locomotion clutch is held, LambdaVision renders RAVEInput's
-shared joystick visualization as a head-facing outer ring, deadzone ring, and
-handle above the movement wrist. It uses the existing Metal weapon/UI arc pass,
-so the feedback remains stereoscopic and world-anchored without adding a
-RealityKit overlay to the Compositor Services renderer.
 
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
 your team ID. Before the first build, two engine artifacts need to exist —
@@ -206,6 +212,36 @@ The folder is NOT redistributable; it's already gitignored.
 * Xash3D-FWGS will load 25th-anniversary `valve/` BSPs but rendering and
   some game logic edge-cases differ. Don't fight it; use legacy.
 
+## Controls
+
+With **Immersive gesture input** on (Settings → Input, the default), the game
+is played with hand tracking:
+
+| Action | Gesture |
+|---|---|
+| Aim | Point the weapon hand; the hand-tracked weapon follows it |
+| Fire | Curl your dominant index finger (finger-gun) |
+| Reload | Curl your thumb down with the index extended, hold until the ring fills |
+| Move | Pinch thumb+index with the other hand and drag like a joystick |
+| Jump / crouch | Raise or drop the pinched hand |
+| Switch weapon | Pinch all fingertips together, move toward a sector, release |
+| Use / buttons | Poke with the off-hand index finger; rest an open palm on chargers |
+| Train throttle | Poke the console, then pinch and push/pull; poke again to let go |
+
+**Arm-swing walking** (Settings → Input, on by default) is the alternative to
+the pinch joystick:
+
+1. Close both hands into fists and pump your arms like jogging. The harder
+   you swing, the faster you walk, up to full run speed.
+2. Flick both fists up together to jump.
+3. Once you're running, point your gun hand (finger-gun) to aim and fire while
+   the other arm keeps you running. That arm's flick alone then jumps. Swing
+   the gun hand as a fist again to put it back into the run.
+4. A held pinch always wins over a swing, so the two can be mixed freely.
+
+*Swing direction* picks whether you go where you look or where your fists
+point, and *Swing sensitivity* (0.5×–2×) sets how hard you need to swing.
+
 ## Build & run cheat sheet
 
 ```bash
@@ -238,8 +274,11 @@ Find your AVP's UDID with `xcrun xctrace list devices`.
 
 ```
 LambdaVision/      Xcode visionOS app (Swift + C bridge + ANGLE)
-VisionPort/        Engine cross-compile workspace (xash3d-fwgs + patch + setup)
+VisionPort/        Engine cross-compile workspace (xash3d-fwgs + hlsdk-portable
+                   + patches + setup)
+scripts/           Asset fetch/push scripts and the Xcode pre-build hook
 PLAN.md            Architecture, phase plan, risks
+ISSUES.md          Known problems
 README.md          You are here
 
 ../RAVESDK/        Shared package, cloned as a sibling (see First-time setup)
@@ -274,7 +313,7 @@ This project is a fan-made, non-commercial port and is not affiliated with
 or endorsed by Valve Corporation. Half-Life is a trademark of Valve
 Corporation.
 
-This app also links [RAVESDK](https://github.com/illixion/RAVESDK) and
+LambdaVision also links [RAVESDK](https://github.com/illixion/RAVESDK) and
 [RAVEEngine](https://github.com/illixion/RAVEEngine) as local Swift package
 dependencies; both are MIT-licensed (unaffected by the GPLv3 obligation
 above, since that only reaches the combined LambdaVision distribution, not
