@@ -310,6 +310,78 @@ the pinch joystick:
 *Swing direction* picks whether you go where you look or where your fists
 point, and *Swing sensitivity* (0.5×–2×) sets how hard you need to swing.
 
+Hand tracking has no flashlight, alt-fire or quick save gesture yet (see
+ISSUES.md); use a keyboard or gamepad for those.
+
+### Keyboard, mouse and gamepad
+
+A Bluetooth keyboard and mouse, or a gamepad, play the game like desktop
+Half-Life in stereo. **Input mode** (Settings → Keyboard, mouse & gamepad)
+on *Auto* follows the last device used: a key, the mouse or the gamepad
+switches to it at once, and a look-and-pinch brings the hands back once the
+device has been still for a second (or when it disconnects). Outside hands
+mode the weapon is the classic viewmodel in front of you, shots go where you
+look (the stock crosshair marks it), the body's arms stop following your
+hands and the hand gestures rest. *Hands*, *Keyboard + mouse* and *Gamepad*
+pin the mode instead. The launcher's Diagnostics shows the current mode.
+
+Every mode reaches stock full run speed; nothing changes the movement
+speeds. Keyboard and mouse binds are ordinary engine binds, set on first run
+and rebindable in the game's menu (Configuration → Controls). Settings also
+lists them under *Controls*.
+
+| Keyboard | Action |
+|---|---|
+| W A S D, ↑ ↓ | Move |
+| ← → | Turn (smooth) |
+| Z / X | Snap turn left / right (*Snap-turn angle* in Settings) |
+| Space | Jump |
+| Ctrl | Crouch (hold, then Space: long jump) |
+| Shift | Walk |
+| E | Use |
+| R | Reload |
+| F | Flashlight |
+| 1–0 | Weapon slots |
+| [ / ] | Previous / next weapon |
+| Q | Last weapon |
+| J or Enter | Fire (for playing without a mouse) |
+| K | Alt-fire |
+| F5 or F6 | Quick save |
+| F9 or F7 | Quick load |
+| T | Spray |
+| Esc | Menu |
+| ~ | Console |
+
+| Mouse | Action |
+|---|---|
+| Move | Turn smoothly (and look up/down with *Look up/down* on) |
+| Left button | Fire |
+| Right button | Alt-fire |
+| Wheel | Previous / next weapon |
+| In the menu | Move the cursor; click to select |
+
+| Gamepad | Action |
+|---|---|
+| Left stick | Move |
+| Right stick | Turn, smooth (*Stick turn speed*, 100°/s default) or snap |
+| Right trigger | Fire |
+| Left trigger | Alt-fire |
+| A | Jump |
+| B | Crouch (hold, then A: long jump) |
+| X | Reload |
+| Y | Use |
+| Left shoulder | Walk |
+| Right shoulder | Last weapon |
+| D-pad ← → | Previous / next weapon |
+| D-pad ↑ | Flashlight |
+| View / Options | Tap: quick save · hold 1 s: quick load |
+| Menu | Menu |
+
+*Mouse sensitivity* uses Half-Life's scale (3 is the stock default). *Look
+up/down* (off by default) adds mouse and right-stick pitch to your head's.
+It tilts the game's horizon away from the room's, which some find
+uncomfortable, and the first-person body hides while a tilt is set.
+
 ## Build & run cheat sheet
 
 ```bash

@@ -6,32 +6,16 @@ instead of deleting them.
 
 ## Open — interaction
 
-- **Finish keyboard + mouse and controller play ("flat HL1 in 3D").** Goal:
-  someone with a keyboard and mouse, or a gamepad, can play exactly like
-  desktop Half-Life, just stereo, immersive, and with the 3D viewmodel;
-  hand tracking steps aside entirely. Gaps as of 2026-09-23:
-  - *Mouse does nothing.* There is no `GCMouse` handling (only
-    `GamepadInput.swift` and the keyboard). Needed: mouse buttons → the
-    stock `mouse1`/`mouse2` binds (already bound on first run), wheel →
-    `invprev`/`invnext`, and relative motion → smooth yaw (and pitch, if
-    it can be done comfortably) layered on the head pose the way snap turn
-    is. Mind `-noenginemouse` (Renderer.swift engine args): it's there so
-    the engine's own mouse path can't overwrite the synthetic menu cursor,
-    so feed motion ourselves rather than removing it.
-  - *Hand tracking keeps posing the weapon and body.* With a keyboard or
-    gamepad in use, the viewmodel should go back to automatic poses (stock
-    viewmodel animation at the usual view offset), and the arm/body IK
-    shouldn't follow the tracked hands. Gestures already pause while the
-    keyboard is in use (`KeyboardInput.inUse`); extend that to a single
-    "input mode" (hands / keyboard+mouse / gamepad) that switches the
-    weapon pass, aim source (view, not hand ray; see the aim offset in
-    hlsdk `ItemPostFrame`) and body IK together, picked automatically from
-    the last device used.
-  - *Controller turn.* The right stick should turn smoothly (C/V for
-    keyboard snap/smooth turn were discussed earlier); check the current
-    `GamepadInput` mapping against stock HL gamepad feel, and never change
-    movement speeds (every mode reaches stock full speed).
-  - First-run UI should show these bindings once it exists.
+- **Keyboard/mouse/gamepad follow-ups.** The flat mode is in (see
+  Resolved, device check pending). Still open: the HEV ammo hologram stays
+  anchored beside the tracked gun hand, which outside hands mode is resting
+  on the keyboard, mouse or pad (it could ride the viewmodel, or the stock 2D
+  readouts could come back in flat mode); the body still trails the head's
+  yaw, not the mouse's; the default bindings show in Settings
+  (Keyboard, mouse & gamepad > Controls) but nothing shows them on first
+  run, and the list doesn't follow in-game rebinds. Mouse look-pitch is
+  opt-in because the room-space passes (body, HEV holograms) can't follow a
+  tilted world.
 
 - **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
   skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
@@ -78,8 +62,8 @@ instead of deleting them.
   gun-mounted beam (see "Gun-mounted flashlight" under rendering) never
   shows for them. Likely fix: a sixth weapon-wheel sector for `impulse 100`
   (reuses the wheel's hysteresis and release-to-pick), or an off-hand
-  toggle gesture. The README Controls section also documents neither the
-  flashlight nor the keyboard and gamepad bindings.
+  toggle gesture. (The README Controls section now lists the keyboard and
+  gamepad flashlight binds.)
 - **Long jump unreachable with hand tracking.** The module fires in
   `PM_Jump` (`pm_shared.c`) only when `+duck` is already held and its timer
   is open (`flDuckTime > 0`) as `+jump` goes down, moving faster than 50 u/s
@@ -96,15 +80,12 @@ instead of deleting them.
   duck-then-jump is just a crouched jump, so ideally only do it once the
   player has picked the module up (the client may need a signal for that).
   Not checked whether the campaign requires the module.
-- **No alt-fire on keyboard or hands.** `+attack2` (MP5 grenades, crossbow
-  and Python zoom, shotgun double barrel, gauss charge) is wired only to the
-  gamepad's left trigger. The keyboard binds it to `mouse2`
-  (`Lambda_Bridge.c`), but nothing reads a mouse, so `mouse1`/`mouse2` are
-  dead binds: a keyboard-only player can't fire or alt-fire at all (keyboard
-  movement plus hand-tracked fire works). Needs a keyboard key for both, and
-  a hand gesture for alt-fire still to be designed; it must not clash with
-  finger-gun fire, reload (thumb curl), the weapon wheel (all-fingertip
-  pinch) or the movement pinch.
+- **No alt-fire with hand tracking.** `+attack2` (MP5 grenades, crossbow
+  and Python zoom, shotgun double barrel, gauss charge) now has the mouse's
+  right button, K on the keyboard (J/Enter fire without a mouse) and the
+  gamepad's left trigger. A hand gesture for it is still to be designed; it
+  must not clash with finger-gun fire, reload (thumb curl), the weapon wheel
+  (all-fingertip pinch) or the movement pinch.
 - **Weapon wheel is fixed at five sectors and has no icons.** It covers
   slot1–slot5 only (`Renderer.swift`, 12 o'clock = slot1, clockwise). It
   should become dynamic: sector count and contents from the slots the
@@ -112,11 +93,11 @@ instead of deleting them.
   carry non-weapon entries such as the flashlight. It should also show
   per-slot icons (from the `640hud*.spr` sprites listed in `weapon_*.txt`,
   see "HEV HUD next steps" under rendering).
-- **No quick save / quick load in any input method.** Nothing sends
-  `save`/`load` or quicksave/quickload from hands, gamepad or keyboard (no
-  bind in the first-run set; F5/F9 reach the engine as raw key events, but
-  nothing is bound to them). Needs at least a hand-reachable route (a menu
-  or wheel entry, or a gesture) plus gamepad and keyboard binds.
+- **No quick save / quick load with hand tracking.** Keyboard: F5/F6 save,
+  F9/F7 load (`savequick`/`loadquick`; F6/F7 were the engine's defaults all
+  along, F5/F9 come with bind set v2). Gamepad: View/Options tap saves,
+  holding it 1 s loads. Hands still need a route (a menu or wheel entry, or
+  a gesture).
 
 ## Open — rendering
 
@@ -428,6 +409,29 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~Keyboard + mouse and controller play ("flat HL1 in 3D")~~ (79a6bf7, 43a028a; device check
+  pending). One input mode (`InputMode.swift`: hands / keyboard+mouse /
+  gamepad; Settings > Keyboard, mouse & gamepad > Input mode, Auto by
+  default) switches the weapon pass (stock viewmodel drawn flat at the
+  view), the aim source (zero aim offset, so `VR_ItemPostFrame` and the
+  client events fire along the view; stock crosshair on) and the body IK
+  (arms hang) together. Auto follows the last device; a look-and-pinch takes
+  hands back after a second of device silence, as does unplugging it.
+  Gestures pause in flat modes (and still on keyboard use in a pinned Hands
+  mode). Mouse via `GCMouse` (`MouseInput.swift`): buttons/wheel as engine
+  key events (stock `mouse1`/`mouse2` binds, wheel = `invprev`/`invnext`),
+  motion applied app-side (`-noenginemouse` stays): menu cursor while the
+  menu is up, nothing while the console is down, else smooth yaw through the
+  snap-turn path at HL scale (sensitivity × 0.022°/count). Right stick turns
+  smoothly (stock `joy_yaw` 100°/s, adjustable, or snap). Opt-in mouse/stick
+  look-pitch. Keyboard binds for fire/alt-fire without a mouse and quick
+  save/load via a versioned bind migration (`lambda_binds_migrate`,
+  `lambdavision_binds.txt` beside `config.cfg`, unbound keys only). The
+  diagnostics' first line shows the mode. On device: confirm GCMouse
+  reaches a full immersive space (and no duplicate pointer clicks), mouse
+  turn feel and sensitivity, the flat viewmodel's placement, the menu
+  cursor, and the auto switches both ways.
 
 - ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
   orientation came from Valve's hand bone, which sits differently on every
