@@ -1,38 +1,24 @@
 #!/usr/bin/env bash
-# Build xash3d-fwgs (dedicated, no GL) and hlsdk-portable (server + client
-# game logic) for arm64 visionOS device, then bundle every .o file into a
-# single libxash.a that the Xcode project links via -force_load. visionOS
-# forbids dlopen of external dylibs, so engine + filesystem + 3rdparty +
-# HLSDK ship as one static archive; HLSDK entity factories are reached at
-# runtime via dlsym(RTLD_DEFAULT) into the app's main exec.
+# Build xash3d-fwgs (dedicated, no GL) and Half-Life's game code for arm64
+# visionOS device, then bundle every .o file into a single libxash.a that the
+# Xcode project links via -force_load. visionOS forbids dlopen of external
+# dylibs, so engine + filesystem + 3rdparty + game code ship as one static
+# archive; the engine reaches the game code's exports via dlsym(RTLD_DEFAULT)
+# into the app's main exec (per-game prefix, see build_game.sh).
+#
+# The engine part ends up in libxash.a first; Half-Life then goes through
+# build_game.sh like any other game (games/libgame-valve.a), and
+# pack_libxash.sh folds every games/ archive into libxash.a (so an Opposing
+# Force or Blue Shift built earlier stays in). SKIP_HLSDK=1 skips building
+# Half-Life.
 #
 # XR_SIM=1 builds the same archive for the visionOS Simulator instead, as
 # Vendor/libxash/libxash-sim.a (the app links it for xrsimulator builds).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-if [ "${XR_SIM:-0}" = "1" ]; then
-  WAF_PLATFORM=--xros-simulator; SDK_NAME=xrsimulator; LD_PLATFORM=xros-simulator
-  CLANG_TARGET=arm64-apple-xros2.0-simulator; ARCHIVE=libxash-sim.a
-else
-  WAF_PLATFORM=--xros; SDK_NAME=xros; LD_PLATFORM=xros
-  CLANG_TARGET=arm64-apple-xros2.0; ARCHIVE=libxash.a
-fi
-
-# llvm-objcopy is needed for the --redefine-sym prelink fixups below (Apple's
-# toolchain ships no objcopy). Prefer an explicit $LLVM_OBJCOPY, then Homebrew
-# LLVM, then PATH, then the emsdk's bundled LLVM — any recent build handles
-# Mach-O.
-OBJCOPY="${LLVM_OBJCOPY:-}"
-for cand in /opt/homebrew/opt/llvm/bin/llvm-objcopy \
-            "$(command -v llvm-objcopy 2>/dev/null || true)" \
-            "$HOME/Projects/emsdk/upstream/bin/llvm-objcopy"; do
-  [[ -n "$OBJCOPY" && -x "$OBJCOPY" ]] && break
-  [[ -n "$cand" && -x "$cand" ]] && OBJCOPY="$cand"
-done
-if [[ -z "$OBJCOPY" || ! -x "$OBJCOPY" ]]; then
-  echo "ERROR: llvm-objcopy not found — brew install llvm, or set LLVM_OBJCOPY=/path/to/llvm-objcopy" >&2
-  exit 1
-fi
+# shellcheck source=xros_env.sh
+. "$HERE/xros_env.sh"
+xros_find_objcopy
 echo "Using llvm-objcopy: $OBJCOPY"
 
 # --- xash3d-fwgs ---
@@ -147,86 +133,6 @@ xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
 "$OBJCOPY" --redefine-sym _FI=_xash_fs_FI "$FS_OBJ" "$FS_OBJ"
 XASH_OBJS+=("$FS_OBJ")
 
-# --- hlsdk-portable ---
-# Only the server side (dlls/) goes into libxash.a today. The client side
-# (cl_dll/) duplicates a large chunk of dlls/'s C++ classes (CBaseEntity,
-# CBasePlayer, weapons, etc.) compiled with CLIENT_DLL — bundling both
-# triggers ~hundreds of duplicate-symbol errors at app link time. We'll
-# wire cl_dll back in once we tackle the renderer (HUD lives there);
-# for now the server is enough to get the engine past entity init.
-# hlsdk-portable cross-compiles through plain compiler flags rather than a
-# waf platform option, so its build scripts stay stock and a mod branch with
-# an older waifulib builds the same way.
-cd "$HERE/hlsdk-portable"
-rm -rf build
-XFLAGS="-isysroot $(xcrun --show-sdk-path --sdk $SDK_NAME) --target=$CLANG_TARGET"
-CC=clang CXX=clang++ CFLAGS="$XFLAGS" CXXFLAGS="$XFLAGS" LINKFLAGS="$XFLAGS" \
-  python3 ./waf configure
-python3 ./waf build
-# dlls/, game_shared/, pm_shared/ — only the .1.o flavor. waf compiles
-# weapons + pm_shared TWICE (once for dlls without CLIENT_DLL/CLIENT_WEAPONS,
-# once for cl_dll with both defined). The .1.o files are the dlls (server)
-# build; .2.o is cl_dll's. We don't link cl_dll yet, so skipping .2.o
-# avoids both duplicate symbols and the cl_dll-only externs (vJumpOrigin,
-# iJumpSpectator) that would otherwise leak in.
-mapfile -t HLSDK_RAW_OBJS < <(find "$PWD/build/dlls" "$PWD/build/game_shared" "$PWD/build/pm_shared" -type f -name '*.1.o' \
-  ! -name 'vcs_info.c.*.o' | sort)
-# vcs_info.c is intentionally kept raw (NOT in either prelink) so its
-# globals (_g_VCSInfo_Commit / _g_VCSInfo_Branch) stay externally visible —
-# both server's and cl_dll's Initialize() reference them via the prelinks'
-# undefined-import slots, and resolve at app-link time to this single .o.
-HLSDK_VCS_OBJ="$PWD/build/game_shared/vcs_info.c.1.o"
-
-# Hide HLSDK's pm_math/util internals that collide with engine globals
-# under -force_load. Currently only _VectorAngles overlaps; if more turn
-# up, append them here. Entity factories + GiveFnptrsToDll/etc. stay
-# visible because they aren't listed.
-HLSDK_UNEXPORTS="$HERE/hlsdk-portable/build/unexports.list"
-printf '_VectorAngles\n' > "$HLSDK_UNEXPORTS"
-HLSDK_OBJ="$HERE/hlsdk-portable/build/hlsdk.combined.o"
-xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
-  -unexported_symbols_list "$HLSDK_UNEXPORTS" \
-  -o "$HLSDK_OBJ" "${HLSDK_RAW_OBJS[@]}"
-HLSDK_OBJS=("$HLSDK_OBJ" "$HLSDK_VCS_OBJ")
-
-# --- hlsdk-portable client (cl_dll) ---
-# Engine's CL_LoadProgs dlsyms HUD_VidInit / HUD_Init / Initialize / etc. from
-# the client.dll. visionOS forbids dlopen, so prelink cl_dll's .2.o files into
-# one .o with ONLY the C-style HUD_*/CAM_*/CL_*/IN_*/V_*/KB_*/Demo_* exports
-# visible. C++ class method symbols (Z-mangled) overlap with server side and
-# stay hidden — engine never resolves them via cl_dll anyway.
-HLSDK_CL_RAW_OBJS=( $(find "$HERE/hlsdk-portable/build/cl_dll" "$HERE/hlsdk-portable/build/game_shared" "$HERE/hlsdk-portable/build/pm_shared" "$HERE/hlsdk-portable/build/dlls" -type f -name '*.2.o' \
-  ! -name 'vcs_info.c.*.o' | sort) )
-HLSDK_CL_EXPORTS="$HERE/hlsdk-portable/build/cl_exports.list"
-nm -gU "$HERE/hlsdk-portable/build/cl_dll/client_arm64.dylib" \
-  | awk '/ T / {print $NF}' | grep -v '^__Z' \
-  | grep -vE '^_IN_(ActivateMouse|DeactivateMouse|MouseEvent)$' > "$HLSDK_CL_EXPORTS"
-# VR data globals (the awk above only passes T/text symbols): written by
-# Lambda_Bridge.c each tick, composed into the hand-anchored weapon entity
-# in entity.cpp. Without these the prelink localizes them and the app link
-# fails on the bridge's externs.
-printf '_g_vr_hand_pose\n_g_vr_hand_pose_active\n_g_vr_cam_override\n' >> "$HLSDK_CL_EXPORTS"
-# Client-side barrel-aim offset (view.cpp), written by the bridge so the
-# bullet decal/tracer trace (ev_hldm.cpp) matches the server damage trace.
-printf '_g_vr_aim_offset_cl\n' >> "$HLSDK_CL_EXPORTS"
-# Muzzle origin mirror and the aim trace's hit distance (view.cpp): the bridge
-# writes the first, the reticle reads the second.
-printf '_g_vr_muzzle_offset_cl\n_g_vr_aim_hit\n' >> "$HLSDK_CL_EXPORTS"
-# Viewmodel publish (view.cpp), read by Lambda_WeaponModel.c to bake the
-# skinned weapon mesh and pose its bones for the external (visionOS) renderer.
-printf '_g_vr_weapon_hdr\n_g_vr_weapon_modelindex\n_g_vr_weapon_body\n' >> "$HLSDK_CL_EXPORTS"
-printf '_g_vr_weapon_sequence\n_g_vr_weapon_frame\n_g_vr_weapon_animtime\n_g_vr_weapon_framerate\n_g_vr_weapon_time\n' >> "$HLSDK_CL_EXPORTS"
-# The weapon's p_ model header, which the platform fills the viewmodel's holes from.
-printf '_g_vr_weapon_world_hdr\n' >> "$HLSDK_CL_EXPORTS"
-# World light sampled at the eye, read by Lambda_WeaponModel.c to shade the gun.
-printf '_g_vr_weapon_light\n' >> "$HLSDK_CL_EXPORTS"
-# Player floor/onground/velocity (view.cpp), read by Lambda_WeaponModel.c for
-# the first-person body's legs.
-printf '_g_vr_body_state\n' >> "$HLSDK_CL_EXPORTS"
-# Native HUD (hud_redraw.cpp): the stock-readout switch the bridge writes and
-# the health/ammo state the Metal HUD reads.
-printf '_g_vr_hud_native\n_g_vr_hud_state\n' >> "$HLSDK_CL_EXPORTS"
-
 # IN_ActivateMouse / IN_DeactivateMouse / IN_MouseEvent collide three ways:
 # (a) engine's input.c defines them (used by SDL hosts we don't compile,
 #     and by in_keys.c which DOES need them callable),
@@ -245,12 +151,6 @@ ENGINE_INPUT_OBJ="$HERE/xash3d-fwgs/build/engine/client/input/input.c.2.o"
   --redefine-sym _IN_DeactivateMouse=_xash_engine_IN_DeactivateMouse \
   --redefine-sym _IN_MouseEvent=_xash_engine_IN_MouseEvent \
   "$ENGINE_INPUT_OBJ" "$ENGINE_INPUT_OBJ"
-HLSDK_CL_OBJ="$HERE/hlsdk-portable/build/cl_dll.combined.o"
-xcrun ld -r -arch arm64 -platform_version $LD_PLATFORM 2.0 26.4 \
-  -exported_symbols_list "$HLSDK_CL_EXPORTS" \
-  -o "$HLSDK_CL_OBJ" "${HLSDK_CL_RAW_OBJS[@]}"
-HLSDK_OBJS+=("$HLSDK_CL_OBJ")
-
 OUT="$HERE/../LambdaVision/Vendor/libxash"
 mkdir -p "$OUT"
 
@@ -260,14 +160,14 @@ STUB_OBJ="$HERE/lambda_hlsdk_stubs.o"
 xcrun clang --target=$CLANG_TARGET -isysroot "$SDK" -c \
   "$HERE/lambda_hlsdk_stubs.c" -o "$STUB_OBJ"
 
-if [ "${SKIP_HLSDK:-0}" = "1" ]; then
-  echo "Bundling ${#XASH_OBJS[@]} engine + 1 stub (HLSDK skipped) into $ARCHIVE"
-  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/$ARCHIVE" \
-    "${XASH_OBJS[@]}" "$STUB_OBJ"
-else
-  echo "Bundling ${#XASH_OBJS[@]} engine + ${#HLSDK_OBJS[@]} HLSDK + 1 stub object files into $ARCHIVE"
-  xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/$ARCHIVE" \
-    "${XASH_OBJS[@]}" "${HLSDK_OBJS[@]}" "$STUB_OBJ"
+echo "Bundling ${#XASH_OBJS[@]} engine + 1 stub object files into $ARCHIVE"
+xcrun libtool -static -no_warning_for_no_symbols -o "$OUT/$ARCHIVE" \
+  "${XASH_OBJS[@]}" "$STUB_OBJ"
+
+# --- Half-Life game code (hlsdk-portable + the VR layer), then the games ---
+if [ "${SKIP_HLSDK:-0}" != "1" ]; then
+  "$HERE/build_game.sh" --no-pack "$HERE/hlsdk-portable"
 fi
+"$HERE/pack_libxash.sh"
 file "$OUT/$ARCHIVE"
 echo "Wrote $OUT/$ARCHIVE ($(stat -f%z "$OUT/$ARCHIVE") bytes)"

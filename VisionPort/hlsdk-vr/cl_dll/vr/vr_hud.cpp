@@ -31,10 +31,15 @@
 #undef private
 #undef protected
 
+// Platform-facing globals are weak: every compiled-in game defines the same
+// set, and the single static link keeps one copy that the bridge and the
+// running game share (only one game runs per process).
+#define VR_SHARED extern "C" __attribute__((weak, visibility("default")))
+
 // Non-zero initializers keep both in __DATA,__data rather than common
 // storage (see the gpGlobals common-symbol merge in the static link).
-extern "C" __attribute__((visibility("default"))) int g_vr_hud_native = 1;
-extern "C" __attribute__((visibility("default"))) float g_vr_hud_state[14] = { 0, 0, 0, 0, -1, -1, -1, 0, -1, 0, 0, 0, 0, -1 };
+VR_SHARED int g_vr_hud_native = 1;
+VR_SHARED float g_vr_hud_state[14] = { 0, 0, 0, 0, -1, -1, -1, 0, -1, 0, 0, 0, 0, -1 };
 int VR_WeaponMaxClip( int id );	// vr_weapons.cpp
 
 // Hook for the stock readouts' Draw functions.

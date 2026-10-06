@@ -151,7 +151,9 @@ Lambda_VisionPro/                   ← this repo
 │   ├── xash3d-visionos.patch       ← waf patch adding --xros / --xros-simulator
 │   ├── hlsdk-vr/                   ← VR layer for hlsdk-portable games: our sources + a small hook patch (apply.sh)
 │   ├── angle-visionos.patch        ← visionOS target support for ANGLE's gn build
-│   ├── build_xash_libxash.sh       ← builds libxash.a for device
+│   ├── build_xash_libxash.sh       ← builds libxash.a for device (engine + Half-Life via build_game.sh)
+│   ├── build_game.sh               ← builds one hlsdk-portable game/mod → Vendor/libxash/games/libgame-<gamedir>.a
+│   ├── pack_libxash.sh             ← folds games/*.a into libxash.a + generates Lambda_CompiledGames
 │   ├── build_angle_visionos.sh     ← builds libEGL/libGLESv2 for device+simulator
 │   ├── build_xash_xrsim.sh         ← one-shot smoke build for simulator
 │   └── xash3d-fwgs/                ← gitignored clone

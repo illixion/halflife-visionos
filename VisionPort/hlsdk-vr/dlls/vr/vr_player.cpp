@@ -11,20 +11,25 @@
 #include "weapons.h"
 #include "vr_server.h"
 
+// Platform-facing globals are weak: every compiled-in game defines the same
+// set, and the single static link keeps one copy that the bridge and the
+// running game share (only one game runs per process).
+#define VR_SHARED extern "C" __attribute__((weak, visibility("default")))
+
 // VR (LambdaVision): angular offset of the aim ray from the view
 // direction (pitch, yaw — degrees), written per frame by the platform
 // bridge. Applied around the weapon frame in VR_ItemPostFrame so weapons
 // fire along the player's gaze/hand ray while view, movement and pmove
 // stay on the real view angles. Default visibility: the ld -r prelink
 // localizes hidden symbols and the bridge externs this by name.
-extern "C" __attribute__((visibility("default"))) float g_vr_aim_offset[2] = { 0.0f, 0.0f };
+VR_SHARED float g_vr_aim_offset[2] = { 0.0f, 0.0f };
 
 // VR (LambdaVision): where shots leave from. [0..2] = the gun's muzzle
 // relative to the eye (pev->origin + view_ofs), in units, in the level frame
 // of the view yaw (x forward, y left, z up); [3] > 0 while the platform has
 // a gun in the hand. Only read inside the weapon frame (see VR_ItemPostFrame),
 // where v_angle carries the aim offset, so the yaw is saved beforehand.
-extern "C" __attribute__((visibility("default"))) float g_vr_muzzle_offset[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
+VR_SHARED float g_vr_muzzle_offset[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
 static int   g_vr_weapon_frame = 0;
 static float g_vr_weapon_frame_yaw = 0.0f;
 
@@ -35,8 +40,8 @@ static float g_vr_weapon_frame_yaw = 0.0f;
 // the entity cone search also runs BEFORE the train-mount attempt, so
 // poking a button while standing on a controllable train presses the
 // button instead of grabbing the train.
-extern "C" __attribute__((visibility("default"))) float g_vr_use_offset[2] = { 0.0f, 0.0f };
-extern "C" __attribute__((visibility("default"))) int g_vr_use_active = 0;
+VR_SHARED float g_vr_use_offset[2] = { 0.0f, 0.0f };
+VR_SHARED int g_vr_use_active = 0;
 
 // VR train throttle: the platform stages a desired gear (-1 reverse, 0
 // neutral, 1..3 forward; VR_TRAIN_NO_TARGET = gesture inactive) and the
@@ -46,8 +51,8 @@ extern "C" __attribute__((visibility("default"))) int g_vr_use_active = 0;
 // the live status back to the platform: 0 = not controlling a train, else
 // 0x100 | (gear + 1).
 #define VR_TRAIN_NO_TARGET	99
-extern "C" __attribute__((visibility("default"))) int g_vr_train_target = VR_TRAIN_NO_TARGET;
-extern "C" __attribute__((visibility("default"))) int g_vr_train_state = 0;
+VR_SHARED int g_vr_train_target = VR_TRAIN_NO_TARGET;
+VR_SHARED int g_vr_train_state = 0;
 
 extern int TrainSpeed( int iSpeed, int iMax );	// player.cpp
 #ifndef TRAIN_NEW
