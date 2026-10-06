@@ -33,7 +33,7 @@ the live, granular list of what's open.
 | 5 | Spatial-ish audio (AudioQueue backend), performance HUD, console | ✅ |
 | 6 | Per-source spatial audio (AVAudioEnvironmentNode / PHASE) | ⛔ abandoned — both unusable on visionOS 26, see `.claude/research/visionos-spatial-audio.md` |
 | — | Reprojection depth (constant depth submitted; real per-pixel depth would reduce head-motion jelly) | 🔜 open |
-| 7 | Game library, on-device import (AirDrop/Files/Wi-Fi), mods (OF + BS as E2E tests), CI prebuilds | 🔜 planned, see Phase 7 |
+| 7 | Game library, on-device import (AirDrop/Files/Wi-Fi), mods (OF + BS as E2E tests), CI prebuilds | ✅ implemented 2026-10-06, awaiting headset test + first CI run |
 | — | Switch Pro controller / gyro aim as an alternative input | 🔜 idea, not started |
 
 ## Architecture
@@ -239,7 +239,27 @@ viewmodel workaround, shell-casing angles, gaze-ray freeze during pinch).
   exposing the stock HL menu and console.
 - Mod selection from imported `valve/`-likes: superseded by Phase 7.
 
-### Phase 7 — Game library, on-device import, mods, CI 🔜
+### Phase 7 — Game library, on-device import, mods, CI ✅ (pending headset test)
+
+Implemented 2026-10-06; verified by package tests, the unsigned Release
+build and Mac native runs (of0a0, of1a1, ba_tram1, ba_canal1 load), not
+yet on the headset or on GitHub's runners. Deviations from the plan below:
+
+- No GitHub fork for the VR layer: it lives in `VisionPort/hlsdk-vr/`
+  (our own files + a ~60-line `hooks.patch`, applied by `apply.sh`).
+- Contract 1/2 linkage: an undefined weak reference doesn't link into a
+  static binary, so each side ships a weak default definition
+  (`Lambda_RequestGameChange` in the engine, `Lambda_CompiledGames` in the
+  app) that the other side's strong definition overrides.
+- OF/BS are pinned (`VisionPort/games.list`) to the last commits before
+  their branches switched to FreeVGUI; `build_game.sh --latest` builds the
+  heads, which also load on the Mac after two engine fixes.
+- The Wi-Fi server is a `GameLibraryServer` target in the app-local
+  GameLibrary package with its own streaming HTTP parser (DebugTrace's is
+  internal and buffers bodies). Staged uploads survive closing the modal so
+  a transfer resumes next time. Save/config backup is not done.
+- Imports merge by default; replace exists in the API but has no button.
+
 
 Goal: a user who isn't a developer runs `steamcmd` on their own machine,
 sends the result to the headset (AirDrop, Files or a browser), and the app
