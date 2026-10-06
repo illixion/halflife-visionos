@@ -2,8 +2,9 @@
 //  MouseInput.swift
 //  LambdaVision
 //
-//  A Bluetooth/USB mouse via GameController's GCMouse, the only way to read
-//  one on visionOS (raw deltas, no pointer capture). Buttons and the wheel go
+//  A Bluetooth/USB mouse, read through RAVEInput's `RAVEMouseSource` (which
+//  owns the GCMouse handlers: raw deltas, no pointer capture, events on the
+//  main queue). This file is only the game's policy on top. Buttons and the wheel go
 //  to the engine as real key events (K_MOUSE1…5, K_MWHEELUP/DOWN), so the
 //  stock binds apply in game (mouse1 = +attack, mouse2 = +attack2, the wheel
 //  cycles weapons) and the engine routes clicks to the menu when it's up.
@@ -20,6 +21,7 @@
 import GameController
 import QuartzCore
 import DebugTrace
+import RAVEInput
 
 nonisolated final class MouseInput {
     nonisolated(unsafe) static let shared = MouseInput()
@@ -30,93 +32,55 @@ nonisolated final class MouseInput {
     static let degreesPerCount: Float = 0.022
 
     // Motion accumulated between frames, GCMouse convention (+y = up).
-    private var dx: Float = 0
-    private var dy: Float = 0
-    private let lock = NSLock()
-    private var scrollAccum: Float = 0
-    private var mice: [GCMouse] = []
-    private var observers: [NSObjectProtocol] = []
+    private let motion = RAVEMouseMotionAccumulator()
+    // Main queue only (RAVEMouseSource delivers there).
+    private var scroll = RAVEMouseStepAccumulator()
+    private var subscription: RAVEMouseSubscription?
 
     /// Whether any mouse is connected (spatial pointer events stand down).
-    nonisolated(unsafe) private(set) static var connected = false
+    static var connected: Bool { RAVEMouseSource.shared.isConnected }
 
     @MainActor func start() {
-        guard observers.isEmpty else { return }
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .GCMouseDidConnect, object: nil, queue: .main) { note in
-                guard let m = note.object as? GCMouse else { return }
-                MouseInput.shared.attach(m)
-            })
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .GCMouseDidDisconnect, object: nil, queue: .main) { note in
-                guard let m = note.object as? GCMouse else { return }
-                MouseInput.shared.detach(m)
-            })
-        for m in GCMouse.mice() { attach(m) }
+        guard subscription == nil else { return }
+        subscription = RAVEMouseSource.shared.subscribe { event in
+            MouseInput.shared.handle(event)
+        }
     }
 
-    private func attach(_ mouse: GCMouse) {
-        guard !mice.contains(where: { $0 === mouse }), let input = mouse.mouseInput else { return }
-        mice.append(mouse)
-        Self.connected = true
-        AppLog.input.log("[LambdaVision] mouse connected: \(mouse.vendorName ?? "unknown", privacy: .public)")
-
-        input.mouseMovedHandler = { _, x, y in
-            let s = MouseInput.shared
-            s.lock.lock()
-            s.dx += x
-            s.dy += y
-            s.lock.unlock()
-            MouseInput.used()
-        }
-        input.leftButton.pressedChangedHandler = Self.button(241)            // K_MOUSE1
-        input.rightButton?.pressedChangedHandler = Self.button(242)          // K_MOUSE2
-        input.middleButton?.pressedChangedHandler = Self.button(243)         // K_MOUSE3
-        if let aux = input.auxiliaryButtons {
-            for (i, b) in aux.prefix(2).enumerated() {
-                b.pressedChangedHandler = Self.button(Int32(244 + i))         // K_MOUSE4/5
+    @MainActor private func handle(_ event: RAVEMouseEvent) {
+        switch event {
+        case .connected(let name, _):
+            AppLog.input.log("[LambdaVision] mouse connected: \(name ?? "unknown", privacy: .public)")
+        case .disconnected(_, let count):
+            AppLog.input.log("[LambdaVision] mouse disconnected")
+            if count == 0, GCKeyboard.coalesced == nil {
+                InputModeState.deviceGone(.keyboardMouse)
             }
-        }
-        // One wheel notch ≈ 1.0 of axis value. Each whole step is a press and
-        // release of the wheel key, like a desktop wheel.
-        input.scroll.yAxis.valueChangedHandler = { _, value in
-            let s = MouseInput.shared
-            s.lock.lock()
-            s.scrollAccum += value
-            let steps = Int(s.scrollAccum)
-            s.scrollAccum -= Float(steps)
-            s.lock.unlock()
+        case .moved(let dx, let dy):
+            motion.add(dx: dx, dy: dy)
+            Self.used()
+        case .button(let button, let pressed):
+            let keynum: Int32
+            switch button {
+            case .left: keynum = 241                                   // K_MOUSE1
+            case .right: keynum = 242                                  // K_MOUSE2
+            case .middle: keynum = 243                                 // K_MOUSE3
+            case .auxiliary(let i) where i < 2: keynum = Int32(244 + i) // K_MOUSE4/5
+            case .auxiliary: return
+            }
+            lambda_key_event(keynum, pressed ? 1 : 0)
+            Self.used()
+        case .scroll(_, let y):
+            // One wheel notch ≈ 1.0 of axis value. Each whole step is a press and
+            // release of the wheel key, like a desktop wheel. Vertical only.
+            let steps = scroll.add(y)
             guard steps != 0 else { return }
             let key: Int32 = steps > 0 ? 240 : 239   // K_MWHEELUP / K_MWHEELDOWN
             for _ in 0..<min(abs(steps), 4) {
                 lambda_key_event(key, 1)
                 lambda_key_event(key, 0)
             }
-            MouseInput.used()
-        }
-    }
-
-    private func detach(_ mouse: GCMouse) {
-        if let input = mouse.mouseInput {
-            input.mouseMovedHandler = nil
-            input.leftButton.pressedChangedHandler = nil
-            input.rightButton?.pressedChangedHandler = nil
-            input.middleButton?.pressedChangedHandler = nil
-            input.auxiliaryButtons?.forEach { $0.pressedChangedHandler = nil }
-            input.scroll.yAxis.valueChangedHandler = nil
-        }
-        mice.removeAll { $0 === mouse }
-        Self.connected = !mice.isEmpty
-        AppLog.input.log("[LambdaVision] mouse disconnected")
-        if mice.isEmpty, GCKeyboard.coalesced == nil {
-            InputModeState.deviceGone(.keyboardMouse)
-        }
-    }
-
-    private static func button(_ keynum: Int32) -> GCControllerButtonValueChangedHandler {
-        { _, _, pressed in
-            lambda_key_event(keynum, pressed ? 1 : 0)
-            MouseInput.used()
+            Self.used()
         }
     }
 
@@ -127,9 +91,6 @@ nonisolated final class MouseInput {
     /// The motion since the last call, in GCMouse units (+y = up). Render
     /// thread, once a frame.
     func takeMotion() -> (dx: Float, dy: Float) {
-        lock.lock(); defer { lock.unlock() }
-        let m = (dx, dy)
-        dx = 0; dy = 0
-        return m
+        motion.take()
     }
 }
