@@ -13,7 +13,7 @@
 # inside, Half-Life first.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=xros_env.sh
+# shellcheck source=SCRIPTDIR/xros_env.sh
 . "$here/xros_env.sh"
 
 lib="$LIBXASH_DIR/$ARCHIVE"

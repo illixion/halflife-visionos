@@ -1,0 +1,13 @@
+# Built-in game ports (PLAN.md 7.5, tier 1): build_game.sh builds these
+# branches at the pinned commit unless --latest is given. CI's mod matrix
+# runs build_game.sh <url> <branch> for each line.
+#
+# Pinned to the last commits before the branches switched to FreeVGUI
+# (hlsdk-portable master 7a09e90, 2026-08-19), the same code generation as
+# Half-Life's pinned master (setup.sh). Newer heads also build and load on
+# the Mac (the engine got the VGUI SetPaintOffset entry they need), but
+# they run FreeVGUI's panels, which nobody has tried on the headset yet.
+#
+# gamedir  url                                     branch  commit
+gearbox    https://github.com/FWGS/hlsdk-portable  opfor   613eb55d5bcd257219c881297d1d43c1da4a7445
+bshift     https://github.com/FWGS/hlsdk-portable  bshift  cd04b6190b234b27abc31dd992947af3842f6d24

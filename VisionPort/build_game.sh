@@ -10,7 +10,8 @@
 #   ./build_game.sh --mac ...                   (native Mac dylibs, for build_xash_macos.sh)
 #
 # Options: --title "Name" (the library's display name; known gamedirs have
-# one), --no-pack (don't fold the result into libxash.a).
+# one), --no-pack (don't fold the result into libxash.a), --latest (build a
+# branch listed in games.list at its head instead of the pinned commit).
 #
 # Steps: fetch (a URL is cloned under VisionPort/games-src/, a path is used
 # as is), apply the VR layer (hlsdk-vr/apply.sh), build with waf, prelink
@@ -21,24 +22,25 @@
 # folds every games/ archive into libxash.a, which the app force-loads.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=xros_env.sh
+# shellcheck source=SCRIPTDIR/xros_env.sh
 . "$here/xros_env.sh"
 
 porting_guide="https://github.com/FWGS/xash3d-fwgs/blob/master/Documentation/development/mod-porting-guide.md"
-title="" pack=1 mac=0
+title="" pack=1 mac=0 latest=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --title) title="$2"; shift 2 ;;
         --no-pack) pack=0; shift ;;
         --mac) mac=1; shift ;;
-        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+        --latest) latest=1; shift ;;
+        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) break ;;
     esac
 done
 source_arg="${1:-}"
 ref="${2:-}"
 if [ -z "$source_arg" ]; then
-    echo "usage: $0 [--title Name] [--no-pack] [--mac] <git-url-or-path> [branch]" >&2
+    echo "usage: $0 [--title Name] [--no-pack] [--mac] [--latest] <git-url-or-path> [branch]" >&2
     exit 2
 fi
 
@@ -53,13 +55,22 @@ else
     name="$(basename "$source_arg" .git)"
     src="$here/games-src/$name${ref:+@$ref}"
     origin="$source_arg"
+    # The built-in ports build at a pinned commit (games.list).
+    fetch_ref="${ref:-HEAD}"
+    if [ "$latest" = 0 ] && [ -n "$ref" ]; then
+        pinned="$(awk -v u="$source_arg" -v r="$ref" '$1 !~ /^#/ && ($2 == u || $2 ".git" == u) && $3 == r { print $4 }' "$here/games.list")"
+        if [ -n "$pinned" ]; then
+            fetch_ref="$pinned"
+            echo "$ref is a built-in port, pinned to $pinned (games.list; --latest builds the branch head)"
+        fi
+    fi
     if [ ! -d "$src/.git" ]; then
         mkdir -p "$here/games-src"
         git init -q "$src"
         git -C "$src" remote add origin "$source_arg"
     fi
     echo "Fetching $source_arg ${ref:-(default branch)}"
-    git -C "$src" fetch -q --depth 1 origin "${ref:-HEAD}"
+    git -C "$src" fetch -q --depth 1 origin "$fetch_ref"
     # The VR layer edited tracked files last time; start from the fetched tree.
     git -C "$src" reset -q --hard FETCH_HEAD
     git -C "$src" submodule update -q --init --recursive --depth 1
@@ -119,6 +130,8 @@ fi
 echo "Built $title: gamedir $gamedir, gamedll $dll"
 
 if [ "$mac" = 1 ]; then
+    echo "gamedir: $gamedir"
+    echo "dll: $dll"
     echo "server: $(find "$src/$out/dlls" -maxdepth 1 -name '*.dylib' | head -n 1)"
     echo "client: $(find "$src/$out/cl_dll" -maxdepth 1 -name '*.dylib' | head -n 1)"
     exit 0

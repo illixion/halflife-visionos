@@ -126,6 +126,7 @@ VR_SHARED float g_vr_weapon_light[3] = { 0.5f, 0.5f, 0.5f };
 VR_SHARED float g_vr_body_state[7] = { 64.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 
 extern "C" float g_vr_hud_state[14];  // vr_hud.cpp
+int VR_WeaponEgonId( void );          // vr_weapons.cpp
 
 /*
 =========================
@@ -485,9 +486,9 @@ static void V_PublishAimHit( struct ref_params_s *pparams )
 {
 	// The egon fires along the view, not the hand (dlls/vr/vr_player.cpp
 	// VR_ItemPostFrame), so there is no barrel ray to mark. Weapon id from
-	// the HUD publish (vr_hud.cpp); 8 is WEAPON_EGON (dlls/weapons.h).
+	// the HUD publish (vr_hud.cpp), in this game's numbering.
 	cl_entity_t *local = gEngfuncs.GetLocalPlayer();
-	if( g_vr_muzzle_offset_cl[3] <= 0.0f || !local || (int)g_vr_hud_state[4] == 8 )
+	if( g_vr_muzzle_offset_cl[3] <= 0.0f || !local || (int)g_vr_hud_state[4] == VR_WeaponEgonId() )
 	{
 		g_vr_aim_hit[1] = -1.0f;
 		return;

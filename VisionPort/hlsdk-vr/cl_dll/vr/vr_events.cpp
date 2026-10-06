@@ -54,6 +54,10 @@ static const struct
 	{ "events/python.sc", 1 },
 	{ "events/gauss.sc", 1 },
 	{ "events/gaussspin.sc", 0 },
+	// Opposing Force (same shape: one args->angles copy, one EV_GetGunPosition)
+	{ "events/eagle.sc", 1 },
+	{ "events/m249.sc", 1 },
+	{ "events/sniper.sc", 1 },
 };
 
 #define VR_MAX_EVENTS 32

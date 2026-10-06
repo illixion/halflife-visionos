@@ -16,7 +16,7 @@
 # Vendor/libxash/libxash-sim.a (the app links it for xrsimulator builds).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=xros_env.sh
+# shellcheck source=SCRIPTDIR/xros_env.sh
 . "$HERE/xros_env.sh"
 xros_find_objcopy
 echo "Using llvm-objcopy: $OBJCOPY"
