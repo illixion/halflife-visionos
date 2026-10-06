@@ -19,6 +19,7 @@ import QuartzCore
 final class KeyboardInput {
     static let shared = KeyboardInput()
     private var observer: NSObjectProtocol?
+    private var disconnectObserver: NSObjectProtocol?
 
     // Shift state, tracked for character shifting. Touched from the (possibly
     // off-main) GameController handler; a plain bool with benign tearing.
@@ -46,6 +47,15 @@ final class KeyboardInput {
                     Task { @MainActor in KeyboardInput.shared.attach(kb) }
                 }
             }
+        // The last keyboard going away (and no mouse) hands the input mode
+        // back to the hands.
+        disconnectObserver = NotificationCenter.default.addObserver(
+            forName: .GCKeyboardDidDisconnect, object: nil, queue: .main) { _ in
+                if GCKeyboard.coalesced == nil, !MouseInput.connected {
+                    InputModeState.deviceGone(.keyboardMouse)
+                }
+            }
+        MouseInput.shared.start()
     }
 
     private func attach(_ kb: GCKeyboard) {
@@ -53,10 +63,15 @@ final class KeyboardInput {
         input.keyChangedHandler = { _, _, code, pressed in
             if pressed { KeyboardInput.keysDown.insert(code) } else { KeyboardInput.keysDown.remove(code) }
             KeyboardInput.lastKeyTime = CACurrentMediaTime()
+            InputModeState.deviceUsed(.keyboardMouse, now: KeyboardInput.lastKeyTime)
 
-            // Snap turn (Z/X): an exact yaw step, not an HL bind.
-            if pressed, code == .keyZ { Renderer.requestSnapTurn(-1); return }
-            if pressed, code == .keyX { Renderer.requestSnapTurn(1); return }
+            // Snap turn (Z/X): an exact yaw step, not an HL bind. Only in
+            // game: in the console or the menu they are letters.
+            let typing = lambda_console_active() != 0 || lambda_menu_active() != 0
+            if !typing, code == .keyZ || code == .keyX {
+                if pressed { Renderer.requestSnapTurn(code == .keyZ ? -1 : 1) }
+                return
+            }
 
             if code == .leftShift || code == .rightShift {
                 KeyboardInput.shiftDown = pressed

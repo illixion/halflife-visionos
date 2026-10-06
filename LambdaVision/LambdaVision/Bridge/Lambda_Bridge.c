@@ -2323,6 +2323,67 @@ const lambda_compiled_game_t *Lambda_CompiledGames(void) {
     return g_compiled_games_fallback;
 }
 
+// ---- Versioned default-bind migration ----
+// The default binds above are applied only on a game's first run, so binds
+// added later never reach a config.cfg that already exists. Each later set
+// is listed here with its version; a marker file next to config.cfg records
+// the version a config has seen (no marker = v1, the original set). Missing
+// sets are applied to keys that are still unbound, so a player's own binds
+// always win. Runs after Host_DoInit, which has already executed config.cfg.
+typedef struct { int key; const char *cmd; } lambda_default_bind_t;
+// v2: wheel = weapon cycle (stock HL), quick save/load on F5/F9 (F6/F7 are
+// the engine's own defaults; listed so a config that lost them gets them
+// back), and fire/alt-fire keys for keyboard-only players.
+static const lambda_default_bind_t g_binds_v2[] = {
+    { 240 /* K_MWHEELUP */,   "invprev" },
+    { 239 /* K_MWHEELDOWN */, "invnext" },
+    { 139 /* K_F5 */,         "savequick" },
+    { 143 /* K_F9 */,         "loadquick" },
+    { 140 /* K_F6 */,         "savequick" },
+    { 141 /* K_F7 */,         "loadquick" },
+    { 'j',                    "+attack" },
+    { 'k',                    "+attack2" },
+    { 13 /* K_ENTER */,       "+attack" },
+    { 0, NULL },
+};
+#define LAMBDA_BINDS_VERSION 2
+
+static void lambda_binds_migrate(const char *writable_dir, const char *gamedir, int first_run) {
+    extern const char *Key_GetBinding(int keynum);
+    extern void Key_SetBinding(int keynum, const char *binding);
+    extern void Cbuf_AddText(const char *text);
+    extern void Con_Printf(const char *fmt, ...);
+    char marker[1024];
+    snprintf(marker, sizeof marker, "%s/%s/lambdavision_binds.txt", writable_dir, gamedir);
+    int have = 1;
+    FILE *f = fopen(marker, "r");
+    if (f) {
+        if (fscanf(f, "%d", &have) != 1) have = 1;
+        fclose(f);
+    }
+    if (!first_run && have < LAMBDA_BINDS_VERSION) {
+        int applied = 0;
+        if (have < 2) {
+            for (const lambda_default_bind_t *b = g_binds_v2; b->cmd; ++b) {
+                const char *cur = Key_GetBinding(b->key);
+                if (cur && *cur) continue;
+                Key_SetBinding(b->key, b->cmd);
+                applied++;
+            }
+        }
+        // Persist now: config.cfg is otherwise rewritten only on pause, and
+        // the marker below would claim binds a killed app never saved.
+        if (applied) Cbuf_AddText("host_writeconfig\n");
+        Con_Printf("LambdaVision: binds migrated v%d -> v%d (%d keys)\n",
+                   have, LAMBDA_BINDS_VERSION, applied);
+    }
+    // First run: the full current set goes in through the Cbuf list.
+    if (first_run || have < LAMBDA_BINDS_VERSION) {
+        f = fopen(marker, "w");
+        if (f) { fprintf(f, "%d\n", LAMBDA_BINDS_VERSION); fclose(f); }
+    }
+}
+
 int lambda_engine_init(const char *writable_dir,
                        int extra_argc, const char *const *extra_argv,
                        char *status_out, int status_cap) {
@@ -2433,6 +2494,9 @@ int lambda_engine_init(const char *writable_dir,
         char cfg_path[1024];
         snprintf(cfg_path, sizeof cfg_path, "%s/%s/config.cfg", writable_dir, gamedir);
         int first_run = (access(cfg_path, F_OK) != 0);
+        // Binds added after the first set shipped reach existing configs
+        // through lambda_binds_migrate (versioned, unbound keys only).
+        lambda_binds_migrate(writable_dir, gamedir, first_run);
         if (first_run) Cbuf_AddText(
             "bind \"w\" \"+forward\"\n"       "bind \"s\" \"+back\"\n"
             "bind \"a\" \"+moveleft\"\n"      "bind \"d\" \"+moveright\"\n"
@@ -2447,7 +2511,13 @@ int lambda_engine_init(const char *writable_dir,
             "bind \"4\" \"slot4\"\n" "bind \"5\" \"slot5\"\n" "bind \"6\" \"slot6\"\n"
             "bind \"7\" \"slot7\"\n" "bind \"8\" \"slot8\"\n" "bind \"9\" \"slot9\"\n"
             "bind \"0\" \"slot10\"\n"
-            "bind \"[\" \"invprev\"\n"        "bind \"]\" \"invnext\"\n");
+            "bind \"[\" \"invprev\"\n"        "bind \"]\" \"invnext\"\n"
+            // Bind set v2 (see g_binds_v2): the wheel, quick save/load and
+            // fire keys for players without a mouse.
+            "bind \"mwheelup\" \"invprev\"\n" "bind \"mwheeldown\" \"invnext\"\n"
+            "bind \"f5\" \"savequick\"\n"     "bind \"f9\" \"loadquick\"\n"
+            "bind \"j\" \"+attack\"\n"        "bind \"k\" \"+attack2\"\n"
+            "bind \"enter\" \"+attack\"\n");
     }
     if (status_out) snprintf(status_out, status_cap,
                              "engine init ok (argc=%d, basedir=%s)", argc, writable_dir);
@@ -2695,6 +2765,15 @@ int lambda_menu_active(void) {
     return atomic_load(&g_menu_active);
 }
 
+// Cached Con_Visible(): the console is down. Mouse look and the app-side
+// snap-turn keys stand down while it is, so typing and the mouse don't turn
+// the view.
+static _Atomic int g_console_active;
+
+int lambda_console_active(void) {
+    return atomic_load(&g_console_active);
+}
+
 // GL worker, each frame BEFORE the tick.
 static void lambda_menu_input_apply(void) {
     extern void UI_MouseMove(int x, int y);
@@ -2712,7 +2791,9 @@ static void lambda_menu_input_apply(void) {
 // GL worker, each frame AFTER the tick — publish menu visibility for Swift.
 static void lambda_menu_state_publish(void) {
     extern int UI_IsVisible(void);
+    extern int Con_Visible(void);
     atomic_store(&g_menu_active, UI_IsVisible());
+    atomic_store(&g_console_active, Con_Visible());
 }
 
 // ---- Hardware keyboard → engine key/char events ---------------------------
@@ -3699,8 +3780,10 @@ static int worker_engine_frame(void) {
         // cursor/clicks — all BEFORE the tick.
         lambda_render_size_apply();
         lambda_cmd_queue_apply();
-        lambda_key_queue_apply();
+        // Cursor before keys: a mouse click (a K_MOUSE1 key event the
+        // engine routes to the menu) lands where the mouse moved it.
         lambda_menu_input_apply();
+        lambda_key_queue_apply();
         double t0 = ft_now_ms();
         lambda_engine_frame();
         double t1 = ft_now_ms();

@@ -249,6 +249,20 @@ actor Renderer {
     // read on the render/input threads. Simple value types with benign
     // tearing (like the other cross-thread scalars here) — no lock needed.
     nonisolated(unsafe) static var snapTurnDegrees: Float = 30
+    /// Mouse and right-stick Y look up and down outside hands mode
+    /// (Settings > Input > Look up/down). Off by default: the pitch is then
+    /// added to the head's, which tilts the game's horizon away from the
+    /// room's, and the room-space body cannot follow it.
+    nonisolated(unsafe) static var lookPitchEnabled = false
+    /// That pitch, degrees (xash: + = down). Render thread only.
+    private var viewPitchOffset: Float = 0
+    /// Last frame's input mode, to act on a change (crosshair, resets).
+    private var lastInputMode: InputMode?
+    private var lastInputPollTime: TimeInterval?
+    /// The mouse-driven menu cursor (render-target pixels) and whether the
+    /// menu was up last frame, to start it centred.
+    private var mouseMenuCursor: SIMD2<Float> = .zero
+    private var mouseMenuWasUp = false
     // Engine render scale and the FXAA+MetalFX upscale chain size the render
     // targets, so these are read once at drawable setup — a change applies on
     // the next immersive-space open, not live.
@@ -387,6 +401,7 @@ actor Renderer {
     nonisolated static func aimDiagLines() -> [String] {
         let d = aimDiag
         return [
+            InputModeState.diagLine(now: CACurrentMediaTime()),
             "hand: \(d.handOutcome)   dom: \(dominantHandIsLeft ? "L" : "R")",
             "fire aims at: \(d.fireAlongGaze ? "gaze (setting)" : "barrel (setting)")",
             "aim source: \(d.aimSource)",
@@ -415,15 +430,84 @@ actor Renderer {
     }
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
+        requestTurn(degrees: direction * snapTurnDegrees)
+    }
+
+    /// A turn of any size (+ = right): snap steps, and the smooth turns of
+    /// the mouse and the right stick, all through the same path.
+    nonisolated static func requestTurn(degrees: Float) {
         snapLock.lock()
-        pendingSnapDeg += direction * snapTurnDegrees
+        pendingSnapDeg += degrees
         snapLock.unlock()
     }
 
+    /// The pending turn in whole centidegrees (what the bridge can carry);
+    /// the remainder waits for the next frame, so slow smooth turns add up.
     private static func takePendingSnap() -> Float {
         snapLock.lock()
-        defer { pendingSnapDeg = 0; snapLock.unlock() }
-        return pendingSnapDeg
+        defer { snapLock.unlock() }
+        let taken = (pendingSnapDeg * 100).rounded(.towardZero) / 100
+        pendingSnapDeg -= taken
+        return taken
+    }
+
+    /// The keyboard/mouse/gamepad side of a frame: gamepad poll, mouse
+    /// motion, and what changes when the input mode does.
+    private func pollFlatInput() {
+        let now = CACurrentMediaTime()
+        let dt = Float(min(max(now - (lastInputPollTime ?? now), 0), 0.05))
+        lastInputPollTime = now
+        let flat = InputModeState.current != .hands
+        let pitchOK = flat && Renderer.lookPitchEnabled
+        let menuUp = lambda_menu_active() != 0
+        let typing = menuUp || lambda_console_active() != 0
+
+        GamepadInput.shared.poll(dt: dt,
+                                 snapTurn: { if !typing { Renderer.requestSnapTurn($0) } },
+                                 turn: { if !typing { Renderer.requestTurn(degrees: $0) } },
+                                 look: { if !typing, pitchOK { self.addViewPitch($0) } })
+
+        let m = MouseInput.shared.takeMotion()
+        if menuUp {
+            // The menu reads the synthetic cursor (lambda_menu_*): the mouse
+            // moves it, starting from the centre when the menu opens. About
+            // a thousand counts cross the menu.
+            let w = Float(Renderer.renderTargetW), h = Float(Renderer.renderTargetH)
+            if w > 0, h > 0 {
+                if !mouseMenuWasUp { mouseMenuCursor = SIMD2(w / 2, h / 2) }
+                if m.dx != 0 || m.dy != 0 {
+                    let k = w / 1000
+                    mouseMenuCursor.x = min(max(mouseMenuCursor.x + m.dx * k, 0), w - 1)
+                    mouseMenuCursor.y = min(max(mouseMenuCursor.y - m.dy * k, 0), h - 1)
+                    lambda_menu_set_cursor(Int32(mouseMenuCursor.x), Int32(mouseMenuCursor.y))
+                }
+            }
+        } else if !typing {
+            let k = MouseInput.sensitivity * MouseInput.degreesPerCount
+            if m.dx != 0 { Renderer.requestTurn(degrees: m.dx * k) }
+            if m.dy != 0, pitchOK { addViewPitch(-m.dy * k) }
+        }
+        mouseMenuWasUp = menuUp
+
+        // Hands own the view's pitch: drop any mouse/stick pitch when they
+        // take over or the setting goes off.
+        if !pitchOK { viewPitchOffset = 0 }
+        let mode = InputModeState.current
+        if mode != lastInputMode {
+            if let last = lastInputMode {
+                AppLog.input.log("[LambdaVision] input mode \(last.label, privacy: .public) → \(mode.label, privacy: .public)")
+            }
+            lastInputMode = mode
+            // The stock crosshair marks the middle of the view, which is
+            // where shots go outside hands mode (and with gaze fire).
+            // (Queued; the engine takes it on its next frame.)
+            let on = mode != .hands || Renderer.fireAlongGaze
+            _ = "crosshair \(on ? 1 : 0)".withCString { lambda_gl_worker_cmd($0) }
+        }
+    }
+
+    private func addViewPitch(_ deg: Float) {
+        viewPitchOffset = min(max(viewPitchOffset + deg, -89), 89)
     }
 
     // Gaze aim: the pinch handler stages the spatial event's selectionRay
@@ -654,6 +738,7 @@ actor Renderer {
     /// Nil when fire follows gaze, since the barrel then is not the aim.
     private func reticleAim(headTransform: simd_float4x4) -> HEVHUD.Aim? {
         guard Renderer.aimReticle != .off, !Renderer.fireAlongGaze,
+              InputModeState.current == .hands,   // else the stock crosshair marks the view
               let hand = sampleDominantHand(headTransform: headTransform),
               let muzzle = muzzlePoint(hand), let direction = barrelDirection(hand) else { return nil }
         var d: Float = 0
@@ -721,6 +806,9 @@ actor Renderer {
     private func avatarBodyDraw(deviceAnchor: DeviceAnchor?, time: Double,
                                 gripFingers: [String: simd_quatf]? = nil) -> WeaponPass.BodyDraw? {
         guard Renderer.avatarBodyEnabled, Renderer.avatarAvailable, let deviceAnchor else { return nil }
+        // A look-pitch tilts the game world off the room, which the body
+        // (posed in the room) cannot follow: leave it out while one is set.
+        guard viewPitchOffset == 0 else { return nil }
         if avatarRig == nil && !avatarRigFailed {
             do {
                 avatarRig = try AvatarRig()
@@ -769,10 +857,14 @@ actor Renderer {
 
         var targets = AvatarRig.Targets(headPosition: eye, bodyYaw: yaw, leftHand: nil, rightHand: nil,
                                         headRotation: AvatarRig.headRotation(forward: fwd, up: up))
-        if let l = avatarWrist(handTracking.latestAnchors.leftHand, left: true) {
+        // The arms follow the tracked hands in hands mode only; with a
+        // keyboard, mouse or gamepad they hang (hands on the keys or the pad
+        // aren't the player's in-game hands).
+        let armsFollowHands = InputModeState.current == .hands
+        if armsFollowHands, let l = avatarWrist(handTracking.latestAnchors.leftHand, left: true) {
             targets.leftHand = l.position; targets.leftHandRotation = l.rotation; targets.leftElbow = l.elbow
         }
-        if let r = avatarWrist(handTracking.latestAnchors.rightHand, left: false) {
+        if armsFollowHands, let r = avatarWrist(handTracking.latestAnchors.rightHand, left: false) {
             targets.rightHand = r.position; targets.rightHandRotation = r.rotation; targets.rightElbow = r.elbow
         }
         // The hand holding the gun closes around it the way the viewmodel's
@@ -1671,10 +1763,9 @@ actor Renderer {
 
         // Poll the gamepad once per frame: sticks stage engine joystick
         // axes (applied on the GL worker at tick start), buttons dispatch
-        // commands, right-stick X requests snap turns consumed below.
-        GamepadInput.shared.poll { direction in
-            Renderer.requestSnapTurn(direction)
-        }
+        // commands, right-stick X requests turns consumed below. Then the
+        // mouse's motion since last frame.
+        pollFlatInput()
 
         self.updateDynamicBufferState(frameIndex: frame.frameIndex)
 
@@ -1844,7 +1935,9 @@ actor Renderer {
 
             var dyaw = yawDeg - headBaselineYaw!
             if dyaw > 180 { dyaw -= 360 } else if dyaw < -180 { dyaw += 360 }
-            headAngles = SIMD3<Float>(pitchDeg, dyaw, rollDeg)
+            // Mouse/stick look-pitch (outside hands mode, opt-in) adds to the
+            // head's; zero otherwise.
+            headAngles = SIMD3<Float>(min(max(pitchDeg + viewPitchOffset, -89), 89), dyaw, rollDeg)
 
             // Positional tracking: room-space translation since baseline,
             // re-expressed in the baseline-forward frame (rotate by
@@ -1861,11 +1954,19 @@ actor Renderer {
             // hlsdk-side) and fires along the hand's pointing direction;
             // otherwise fall back to the pinch gaze ray, then view center.
             // Offsets in xash conventions (pitch positive down, yaw CCW).
+            // Outside hands mode the hands step aside: no hand weapon pose,
+            // and the aim offset is zero so shots go along the view, as on
+            // the desktop (server ItemPostFrame and the client events read
+            // the same offset).
             var aimDir: SIMD3<Float>? = nil  // Apple world basis
-            let handSample = frameDeviceAnchor.flatMap {
+            let inputMode = InputModeState.current
+            let handSample = inputMode != .hands ? nil : frameDeviceAnchor.flatMap {
                 sampleDominantHand(headTransform: $0.originFromAnchorTransform)
             }
-            if let hand = handSample {
+            if inputMode != .hands {
+                lambda_clear_hand_pose()
+                Renderer.aimDiag.aimSource = "view (\(inputMode.label))"
+            } else if let hand = handSample {
                 let p = hand.localPos * appleToXash
                 lambda_set_hand_pose(p.x, p.y, p.z,
                                      hand.localFwd.x, hand.localFwd.y, hand.localFwd.z,
@@ -1913,7 +2014,11 @@ actor Renderer {
                 Renderer.aimDiag.aimSource = "gaze(fallback)"
             }
             Renderer.aimDiag.fireAlongGaze = Renderer.fireAlongGaze
-            if let g = aimDir {
+            if inputMode != .hands {
+                lambda_set_aim_offset(0, 0)
+                Renderer.aimDiag.pitch = 0
+                Renderer.aimDiag.yaw = 0
+            } else if let g = aimDir {
                 let gx = SIMD3<Float>(-g.z, -g.x, g.y)  // Apple → xash basis
                 let gPitch = atan2f(-gx.z, sqrtf(gx.x * gx.x + gx.y * gx.y)) * rad2deg
                 let gYaw   = atan2f(gx.y, gx.x) * rad2deg
@@ -1947,10 +2052,13 @@ actor Renderer {
             // must stand down (a fist is an index curl and a thumb curl at
             // once). Pointing it leaves the swing to the off arm and frees
             // it. HandMovement.poll drives the movement itself, later.
-            // Gestures stand down while the keyboard is in use: hands on
-            // the keys pinch, curl and poke without meaning to.
+            // Gestures belong to hands mode, and stand down there too while
+            // the keyboard is in use (a forced Hands setting with keyboard
+            // movement): hands on the keys pinch, curl and poke without
+            // meaning to.
             let keyboardInUse = KeyboardInput.inUse(now: CACurrentMediaTime())
             let gesturesLive = Renderer.gestureInputEnabled && lambda_menu_active() == 0 && !keyboardInUse
+                && inputMode == .hands
             Renderer.aimDiag.keyboardInUse = keyboardInUse
             var gunHandBusy = false
             if let da = frameDeviceAnchor {
@@ -2331,12 +2439,15 @@ actor Renderer {
             weaponPass = WeaponPass(device: device, layerRenderer: layerRenderer,
                                     maxBuffersInFlight: maxBuffersInFlight)
         }
-        weaponPass.preferWorldModel = Renderer.weaponWorldModel
+        // Outside hands mode the weapon is the stock viewmodel, drawn flat
+        // at the view as authored (its own hands, its own animation).
+        let handsMode = InputModeState.current == .hands
+        weaponPass.preferWorldModel = Renderer.weaponWorldModel && handsMode
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
         var gripFingers: [String: simd_quatf]? = nil
-        let flatViewmodel = weaponPass.drawsFlat && !weaponPass.showsWorldModel
+        let flatViewmodel = (weaponPass.drawsFlat || !handsMode) && !weaponPass.showsWorldModel
         if weaponActive, !flatViewmodel, let grip = weaponPass.grip, !weaponPass.palette.isEmpty {
             gripFingers = ViewmodelGrip.fingerPose(boneNames: weaponPass.boneNames,
                                                    palette: weaponPass.palette, grip: grip,
@@ -2647,10 +2758,18 @@ actor Renderer {
                 ))
             }
 
+            // Outside hands mode: the stock viewmodel, locked to the view the
+            // way the engine drew it (the head is the camera; mouse or stick
+            // pitch turns the world, not the screen, so the view's centre
+            // stays at head-forward and the gun with it).
+            if weaponActive, !handsMode {
+                drawWeapon = true
+                model = anchorM * studioToWorld
+            }
             // Hand-anchored placement from the LIVE hand frame this frame — no
             // engine round-trip, so head rotation can't shear it (the drift the
             // engine-side path had). Skip drawing when the hand isn't tracked.
-            if weaponActive, let hand = sampleDominantHand(headTransform: anchorM) {
+            if weaponActive, handsMode, let hand = sampleDominantHand(headTransform: anchorM) {
                 drawWeapon = true
                 let fwd = hand.worldForward
                 let up  = hand.worldUp
