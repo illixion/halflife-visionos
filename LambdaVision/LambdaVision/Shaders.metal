@@ -332,8 +332,6 @@ static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float
     return normalize(n - slope * (dot(tilt, along) * along + 0.25 * dot(tilt, across) * across));
 }
 
-static inline float glassLuma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
-
 static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
                                 texture2d_array<uint> engineStencil, depth2d_array<float> engineDepth,
                                 texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
@@ -433,13 +431,18 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     env = mix(env, sharp, sharpWeight);
     const float amount = min(F * k.x, k.z);
     if (water) {
-        // Water keeps its own colour: the reflection modulates it by how
-        // bright the reflected room is against the room's light (glassTint.w,
-        // the engine's light at the eye), so the mirror image reads as darker
-        // and lighter water, and only bright things (lamps) add light. Mixing
-        // the room in, as glass does, turned the flood grey on the headset.
-        const float ratio = clamp((glassLuma(env) + 0.04) / (p.glassTint.w + 0.04), 0.2, 3.0);
-        return rgb * mix(1.0, ratio, amount) + amount * max(env - 0.6, 0.0);
+        // Water blends toward its reflection by Fresnel, the reflection
+        // tinted by the water's own hue so it stays watery. The headset
+        // showed both earlier blends failing: mixing the probe's soft room in
+        // at full weight washed the flood grey, and modulating the water by
+        // the reflection's brightness against the room's light cancelled a
+        // mid-grey room to nothing even with a crisp mirror. The sharp mirror
+        // gets the full Fresnel weight and a light tint, so at grazing angles
+        // it dominates as on a calm lake; the probe's blurry room alone gets
+        // half the weight and more tint, which keeps the water's colour.
+        const float3 hue = rgb / max(max(rgb.r, max(rgb.g, rgb.b)), 0.05);
+        const float3 tinted = env * mix(float3(1.0), hue, mix(0.5, 0.3, sharpWeight));
+        return mix(rgb, tinted, amount * mix(0.5, 1.0, sharpWeight));
     }
     const float3 seen = rgb * mix(float3(1.0), p.glassTint.rgb, p.glass.w);
     return mix(seen, env, amount);
@@ -449,7 +452,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // For horizontal water (one plane per eye, DisplayParams.sspr: the highest
 // water row below the eye), each eye's own engine image mirrored in that
 // plane, in two compute passes at a fraction of the engine's resolution
-// (sspr.w, default 1/3) — a projection-hash SSPR in the manner of Remedy's
+// (sspr.w, default 1/4) — a projection-hash SSPR in the manner of Remedy's
 // and Far Cry 5's. The first point-splat version measured 5.4 ms on the
 // headset; this does two light dispatches instead.
 //
@@ -465,9 +468,20 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // confidence that falls off as the source nears the frame's edge, where the
 // next head turn cuts it off, so the composite blends to the probe there.
 // Each eye mirrors its own image: the parallax is exactly a mirror's.
+// Both passes skip texels that are not this plane's water in the engine's
+// stencil: a mirrored point landing elsewhere is never read, so it takes no
+// atomic, and the resolve writes nothing there.
+static inline bool ssprIsWater(texture2d_array<uint> engineStencil, float2 uv, ushort eye,
+                               constant DisplayParams &p)
+{
+    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
+    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
+    return code >= 16 && code - 16 == uint(p.sspr[eye].x);
+}
+
 static inline uint3 ssprSize(texture2d_array<half> colorMap, constant DisplayParams &p, ushort eye)
 {
-    const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 3;
+    const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 4;
     return uint3((colorMap.get_width() + div - 1) / div, (colorMap.get_height() + div - 1) / div, div);
 }
 
@@ -475,7 +489,8 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
                         constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
                         device atomic_uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
-                        depth2d_array<float> engineDepth [[ texture(1) ]])
+                        depth2d_array<float> engineDepth [[ texture(1) ]],
+                        texture2d_array<uint> engineStencil [[ texture(3) ]])
 {
     const ushort eye = ushort(gid.z);
     const uint3 size = ssprSize(colorMap, p, eye);
@@ -504,6 +519,8 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     if (any(uv2 < 0.0) || any(uv2 >= 1.0))
         return;
     const uint2 target = min(uint2(uv2 * float2(size.xy)), size.xy - 1);
+    if (!ssprIsWater(engineStencil, (float2(target) + 0.5) / float2(size.xy), eye, p))
+        return;
     const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 4095.0);
     const uint key = (dist << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
     atomic_fetch_min_explicit(&keys[(uint(eye) * size.y + target.y) * size.x + target.x], key, memory_order_relaxed);
@@ -513,13 +530,18 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]],
+                        texture2d_array<uint> engineStencil [[ texture(3) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
     const uint3 size = ssprSize(colorMap, p, eye);
     if (gid.x >= size.x || gid.y >= size.y)
         return;
+    if (p.sspr[eye].z < 0.5 || !ssprIsWater(engineStencil, (float2(gid.xy) + 0.5) / float2(size.xy), eye, p)) {
+        mirror.write(half4(0.0h), gid.xy, gid.z);
+        return;
+    }
     const uint base = uint(eye) * size.y * size.x;
     uint key = keys[base + gid.y * size.x + gid.x];
     if (key == 0xFFFFFFFFu) {
@@ -531,7 +553,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         }
     }
     half4 out = 0.0h;
-    if (key != 0xFFFFFFFFu && p.sspr[eye].z > 0.5) {
+    if (key != 0xFFFFFFFFu) {
         const float2 src = (float2(key & 1023u, (key >> 10) & 1023u) + 0.5) / float2(size.xy);
         const float2 edge = min(src, 1.0 - src);
         const float confidence = smoothstep(0.0, 0.15, min(edge.x, edge.y));

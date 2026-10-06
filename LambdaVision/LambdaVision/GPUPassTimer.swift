@@ -36,13 +36,17 @@ final class GPUPassTimer {
     /// mark after `start` closes the pass named by its key; a pass that
     /// did not run this frame writes no mark and records nothing.
     enum Mark: Int, CaseIterable {
-        case start = 0, mirror, composite, arms, weapon, hud, depth
+        case start = 0, mirrorFill, mirrorProject, mirror, composite, arms, weapon, hud, depth
 
         /// FrameTimingStats column for the pass this mark closes.
         var key: String? {
             switch self {
             case .start:     return nil
-            case .mirror:    return "gMirror"     // sharp water (SharpWater), before the composite
+            // sharp water (SharpWater), before the composite: the key-buffer
+            // fill, the projection (atomics) and the resolve
+            case .mirrorFill:    return "gMirrorFill"
+            case .mirrorProject: return "gMirrorProject"
+            case .mirror:        return "gMirror"
             case .composite: return "gComposite"
             case .arms:      return "gArms"
             case .weapon:    return "gWeapon"
@@ -56,7 +60,7 @@ final class GPUPassTimer {
     /// Diagnostics → "GPU pass timing"). Read on the render thread.
     nonisolated(unsafe) static var enabled = false
 
-    private static let marksPerSlot = 8
+    private static let marksPerSlot = 12
     private let heap: MTL4CounterHeap?
     private let msPerTick: Double
     private let slots: Int
@@ -109,6 +113,12 @@ final class GPUPassTimer {
         guard let slot = activeSlot, let heap else { return }
         encoder.writeTimestamp(granularity: precise ? .precise : .relaxed,
                                after: .fragment, counterHeap: heap, index: index(slot, mark))
+    }
+
+    /// A pass boundary inside a compute encoder (precise: between dispatches).
+    func mark(_ mark: Mark, _ encoder: MTL4ComputeCommandEncoder) {
+        guard let slot = activeSlot, let heap else { return }
+        encoder.writeTimestamp(granularity: .precise, counterHeap: heap, index: index(slot, mark))
     }
 
     private func index(_ slot: Int, _ mark: Mark) -> Int { slot * Self.marksPerSlot + mark.rawValue }

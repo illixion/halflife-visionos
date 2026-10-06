@@ -426,8 +426,9 @@ func sharpPlane(_ dump: Dump) -> SIMD4<Float> {
 }
 
 /// The mirror target (one slice, shared for read-back), as the app makes it.
-func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture) -> MTLTexture {
-    let div = params.sspr.0.w > 0.5 ? Int(params.sspr.0.w) : 3
+func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture,
+                 _ stencil: MTLTexture) -> MTLTexture {
+    let div = params.sspr.0.w > 0.5 ? Int(params.sspr.0.w) : 4
     let w = (color.width + div - 1) / div, h = (color.height + div - 1) / div
     let d = MTLTextureDescriptor()
     d.textureType = .type2DArray
@@ -445,6 +446,7 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
     enc.setTexture(color, index: 0)
     enc.setTexture(engineDepth, index: 1)
     enc.setTexture(out, index: 2)
+    enc.setTexture(stencil, index: 3)
     let grid = MTLSize(width: w, height: h, depth: 1), group = MTLSize(width: 16, height: 8, depth: 1)
     enc.setComputePipelineState(sharpProject)
     enc.dispatchThreads(grid, threadsPerThreadgroup: group)
@@ -470,7 +472,7 @@ for path in args {
     let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
     var params = DisplayParams()
     params.glass = SIMD4(3, 0.04, 0.7, 0.35)           // the app's defaults (Renderer)
-    params.water = SIMD4(1.8, 0.02, 0.6, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.008)
+    params.water = SIMD4(1.8, 0.02, 0.85, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.008)
     params.reflectExtra = SIMD4(0.06, 0.04, 12.5, 1)  // a fixed moment of the ripples
     params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
     params.glassTint = SIMD4(0.80, 0.90, 0.88, 0.35)   // w: the room's light (luma)
@@ -519,7 +521,7 @@ for path in args {
         plane.w = Float(ProcessInfo.processInfo.environment["SSPRDIV"] ?? "") ?? 0
         params.sspr = (plane, plane)
         if plane.z > 0 {
-            let t = renderSharp(params, color, engineDepthTex)
+            let t = renderSharp(params, color, engineDepthTex, stencilTex)
             textures[5] = t
             var px = [Float16](repeating: 0, count: t.width * t.height * 4)
             t.getBytes(&px, bytesPerRow: t.width * 8, from: MTLRegionMake2D(0, 0, t.width, t.height), mipmapLevel: 0)

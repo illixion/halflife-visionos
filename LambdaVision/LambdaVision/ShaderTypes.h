@@ -170,8 +170,7 @@ typedef struct
     // (gamma-encoded) colour space.
     simd_float4 glassAmbient;
     // rgb = the pane's own colour, multiplied into what is seen through it;
-    // w = the room's light (luma, engine colour space): what water's
-    // reflection is measured against.
+    // w unused.
     simd_float4 glassTint;
     // Per eye: the engine frustum's left, right, top, bottom tangents, for
     // each pixel's view ray.

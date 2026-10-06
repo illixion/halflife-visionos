@@ -71,7 +71,7 @@ extension LayerRenderer.Clock.Instant {
 enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
     /// The GPU-execution columns (GPUPassTimer), logged on their own line.
-    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gMirror", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
+    static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gMirrorFill", "gMirrorProject", "gMirror", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
                            "gProbe", "probeCPU"]   // glass probe face (GlassProbe), on frames that draw one
 
     static let shared: RAVEFrameProfiler = {
@@ -327,7 +327,7 @@ actor Renderer {
     /// may replace (glass, water), so it never turns opaque; water's ripple
     /// slope (0 = a flat mirror).
     static let reflectionHeadOn = SIMD2<Float>(0.06, 0.04)
-    static let reflectionCap = SIMD2<Float>(0.7, 0.6)
+    static let reflectionCap = SIMD2<Float>(0.7, 0.85)   // water: dominates at grazing, as on a lake
     /// Water's ripple slope at "Water ripples" 1×: a calm lake. The first
     /// water build used 0.08 with 11–39-unit waves and read as "thick, like
     /// an oil spill"; the waves are now a few units long and slow.
@@ -337,10 +337,10 @@ actor Renderer {
     /// Sharp water (SharpWater, screen-space planar reflection) under
     /// waterReflections; off leaves the probe-only look. Live.
     nonisolated(unsafe) static var sharpWaterReflections: Bool = false
-    /// The sharp-water target's size divisor against the engine image: 3 =
-    /// a third of each side (one texel per nine engine pixels); 4 is cheaper
-    /// and softer, 2 sharper and dearer.
-    static let sharpWaterDivisor = 3
+    /// The sharp-water target's size divisor against the engine image: 4 =
+    /// a quarter of each side (one texel per 16 engine pixels). gMirror at 3
+    /// measured 1.24 ms p50 on the headset; 4 has 56% of the threads.
+    static let sharpWaterDivisor = 4
     /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
     /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
     nonisolated(unsafe) static var waterMirrorView: Int = 0
@@ -3000,10 +3000,12 @@ actor Renderer {
                     }
                     #endif
                     if encodeUpscale {
+                        let timer = timed ? gpuTimer : nil
                         sharpWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineDepth: engineDepth,
+                                          engineStencil: engineStencil!,
                                           paramsAddress: displayParamsBuffer.gpuAddress
-                                              + UInt64(Self.displayParamsStride * uniformBufferIndex))
-                        if timed { gpuTimer.mark(.mirror, commandBuffer) }
+                                              + UInt64(Self.displayParamsStride * uniformBufferIndex),
+                                          mark: { timer?.mark($0, $1) })
                     }
                 } else {
                     ssprPlanes = (.zero, .zero)
@@ -3108,8 +3110,7 @@ actor Renderer {
                 var light: [Float] = [0.3, 0.3, 0.3]
                 light.withUnsafeMutableBufferPointer { lambda_weapon_get_light($0.baseAddress!) }
                 params.glassAmbient = SIMD4(SIMD3(light[0], light[1], light[2]) * 0.5, 0)
-                params.glassTint = SIMD4(Renderer.glassTint,
-                                         0.299 * light[0] + 0.587 * light[1] + 0.114 * light[2])
+                params.glassTint = SIMD4(Renderer.glassTint, 0)
                 let t = drawable.views.indices.map { drawable.frustumTangents(viewIndex: $0) }
                 params.eyeTangents = (t[0], t[min(1, t.count - 1)])
                 let probe = glassProbe.shaderParams(now: CACurrentMediaTime())
