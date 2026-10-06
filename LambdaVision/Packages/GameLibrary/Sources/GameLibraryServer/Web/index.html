@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>LambdaVision</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark">λ</span><span>LambdaVision</span></div>
+  <div class="space" id="space" hidden></div>
+</header>
+
+<main>
+  <!-- Pairing -->
+  <section id="pair" class="card pair" hidden>
+    <h1>Enter the PIN</h1>
+    <p class="muted">Open <strong>Manage over Wi-Fi</strong> in LambdaVision on your Vision Pro and type the six digits it shows.</p>
+    <form id="pair-form" autocomplete="off">
+      <input id="pin" inputmode="numeric" pattern="[0-9 ]*" maxlength="7" placeholder="000000" aria-label="PIN" autofocus>
+      <button type="submit" class="primary">Connect</button>
+    </form>
+    <p id="pair-error" class="error" role="alert"></p>
+  </section>
+
+  <!-- Lost connection -->
+  <section id="offline" class="card notice" hidden>
+    <h2>Can't reach LambdaVision</h2>
+    <p class="muted">The server stops when the Manage over Wi-Fi window closes or the headset sleeps. Open it again; this page reconnects on its own and picks up any unfinished upload.</p>
+  </section>
+
+  <div id="app" hidden>
+    <!-- Library -->
+    <section>
+      <div class="section-head">
+        <h2>Games</h2>
+        <span id="running" class="muted small"></span>
+      </div>
+      <div id="games" class="games"></div>
+      <p id="games-empty" class="muted" hidden>No games yet. Add Half-Life below.</p>
+    </section>
+
+    <!-- Upload -->
+    <section>
+      <h2>Add games and mods</h2>
+      <div id="drop" class="drop" tabindex="0">
+        <p class="drop-title">Drop a game folder, .zip, .7z or .rar here</p>
+        <p class="muted small">Only files that differ from what's on the headset are sent, so an interrupted upload continues where it stopped.</p>
+        <div class="row">
+          <label class="button" id="pick-folder-label">Choose folder…<input type="file" id="pick-folder" webkitdirectory multiple hidden></label>
+          <label class="button">Choose archive…<input type="file" id="pick-archive" accept=".zip,.7z,.rar,application/zip,application/x-7z-compressed,application/vnd.rar" hidden></label>
+        </div>
+      </div>
+
+      <div id="staged" class="card notice" hidden>
+        <p id="staged-text"></p>
+        <div class="row">
+          <button id="staged-install" class="primary">Install now</button>
+          <button id="staged-discard">Discard</button>
+        </div>
+      </div>
+
+      <div id="plan" class="card" hidden>
+        <h3>Ready to send</h3>
+        <div id="plan-roots" class="roots"></div>
+        <p id="plan-note" class="muted small"></p>
+        <div class="row">
+          <button id="plan-start" class="primary">Upload</button>
+          <button id="plan-cancel">Cancel</button>
+        </div>
+      </div>
+
+      <div id="progress" class="card" hidden>
+        <div class="progress-head">
+          <strong id="progress-title">Uploading…</strong>
+          <span id="progress-detail" class="muted small"></span>
+        </div>
+        <div class="bar"><div id="progress-bar"></div></div>
+        <p id="progress-note" class="muted small"></p>
+        <div class="row">
+          <button id="progress-stop">Stop</button>
+          <button id="progress-resume" class="primary" hidden>Resume</button>
+        </div>
+      </div>
+
+      <div class="card log-card">
+        <div class="section-head"><h3>Import log</h3><span id="import-state" class="muted small"></span></div>
+        <ol id="log" class="log" aria-live="polite"></ol>
+      </div>
+    </section>
+  </div>
+
+  <!-- Getting the files -->
+  <section id="howto">
+    <h2>Getting the game files</h2>
+    <p class="muted">LambdaVision plays your own copy from Steam. SteamCMD, Valve's command-line Steam client, downloads it on a computer; you'll be asked for your Steam password and Steam Guard code.</p>
+    <label class="steam-name">Steam account name <input id="steam-name" autocomplete="username" placeholder="YOUR_STEAM_NAME" spellcheck="false"></label>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-os="mac">macOS</button>
+      <button role="tab" data-os="windows">Windows</button>
+      <button role="tab" data-os="linux">Linux</button>
+    </div>
+    <div id="howto-steps"></div>
+  </section>
+</main>
+
+<template id="game-card">
+  <article class="card game">
+    <div class="game-head">
+      <div>
+        <h3 class="title"></h3>
+        <code class="dir muted small"></code>
+      </div>
+      <span class="badge"></span>
+    </div>
+    <p class="explain small"></p>
+    <ul class="facts small muted"></ul>
+    <ul class="warnings small"></ul>
+    <div class="row actions">
+      <button class="activate">Play this</button>
+      <button class="delete danger">Delete…</button>
+    </div>
+    <div class="confirm" hidden>
+      <p class="small"></p>
+      <div class="row">
+        <button class="confirm-yes danger">Delete</button>
+        <button class="confirm-no">Keep</button>
+      </div>
+    </div>
+  </article>
+</template>
+</body>
+</html>
