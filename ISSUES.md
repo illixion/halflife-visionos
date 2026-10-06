@@ -184,6 +184,10 @@ instead of deleting them.
   reflection by Fresnel (dominant at grazing). Mirror at 1/4 resolution with
   stencil early-outs, timed per dispatch (gMirrorFill / gMirrorProject /
   gMirror). See `docs/plans/modern-lighting.md` (3f).
+- **Sharp water, round 4:** blend confirmed on device; the resolve (1.23 ms)
+  drops its per-texel stencil read and the key fill becomes a timed
+  dispatch. Expected mirror total ~0.5–0.7 ms; see
+  `docs/plans/modern-lighting.md` (3g).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

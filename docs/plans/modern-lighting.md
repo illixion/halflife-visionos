@@ -574,6 +574,39 @@ mirror looks too soft and there is headroom.
 0 of 122 k under a fake occluder; final image between gazes 2.1/255; a
 mirrored point in both eyes' mirrors 8.0/255 against a 4.5 baseline.
 
+### 3g. Sharp water, round 4: the resolve
+
+**Device (190007a, c1a2):** the blend fix works — the mirrored bench,
+drawers, legs and vent show, the water stays blue, and a headcrab in front
+gets no tint. Short sample, p50: gMirrorProject 0.36 ms, **gMirror (resolve)
+1.23 ms** (p95 2.2), gMirrorFill missing from /perf, gComposite 3.56,
+gpuQueue 6.44 (4.63 with water off).
+
+**Changes:**
+
+- The resolve no longer reads the engine's stencil. That read — the
+  stencil aspect of a depth32Float_stencil8 texture, once per texel, before
+  anything else — was the one thing the resolve did per texel that the
+  projection did only for points that survive its tests, and is the likely
+  cost. The projection already stores keys on this plane's water only, so
+  a key means water; an empty texel takes the nearest of its four
+  neighbours' keys from the key buffer (cheap, cached buffer reads), which
+  fills holes inside the water and the one-texel rim the composite's
+  bilinear read sees at the water's edge, and leaves the rest empty.
+- The 0xFF buffer fill is now a compute dispatch (`ssprClear`, four keys
+  per thread). A precise timestamp after a fill command in a compute encoder
+  evidently does not record, which is why gMirrorFill never appeared; it now
+  brackets a dispatch.
+- Unchanged: 1/4 resolution, 16 × 8 threadgroups, the projection, the
+  composite, the quality (the Mac render of the device view matches 3f).
+
+**Expected:** gMirrorFill ~0.02 ms, gMirrorProject ~0.36 (as measured),
+gMirror ~0.15–0.3 — about 0.5–0.7 ms for the mirror in total. If the
+resolve stays high, the next step is folding it into the composite: read the
+key at each water pixel there and sample the engine image at its source
+(no mirror texture, no extra pass), at the price of 4 key reads per water
+pixel to keep it smooth.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new
