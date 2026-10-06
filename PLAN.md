@@ -362,18 +362,44 @@ The friendliest route, and a full replacement for `push-assets.sh`:
 - Backup/export of saves and configs (download a zip, via DebugTrace's
   `ZipWriter`) — nice-to-have.
 
-#### 7.5 — Compiled-in ports: Opposing Force, then Blue Shift
+#### 7.5 — Compiled game code: built-in ports and user-compiled mods
 
-- Each port is built from its hlsdk-portable branch, server + client
-  prelinked to one object, exported symbols renamed with a per-game prefix
-  (`--redefine-syms` from `nm -gU`). `COM_LoadLibrary` returns a handle
-  carrying that prefix and `COM_GetProcAddress` prepends it — required
-  because entity factories are exported **by classname** (`monster_zombie`
-  exists in both HL and OF).
-- The VR patch moves from `hlsdk-visionos.patch` to a branch in a fork,
-  merged into each mod branch, instead of N diverging patch files.
-- `fetch-assets.sh` takes optional app IDs (50 OF, 130 BS) and a `--zip`
-  output. Whether those apps carry a `steam_legacy` branch is unverified.
+Every user already builds and signs the app themselves (no App Store
+build), so a user-compiled mod is one more Mac-side step before sideloading
+— never on-device (no compiler, no code loading on visionOS). Opposing
+Force and Blue Shift are the first two entries of a small built-in port
+list, built with exactly the same tooling a user would run.
+
+1. **VR-hook refactor (prerequisite).** `hlsdk-visionos.patch` (56 KB of
+   edits inside game code — `ItemPostFrame` aim, body state, …) shrinks to
+   a handful of small hook call sites, with the logic in separate files of
+   our own. Then applying it to unseen mod code merges cleanly or fails
+   with an obvious conflict. It moves from a patch file to a branch in a
+   fork, merged into each mod branch.
+2. **Per-game symbol namespace.** Each game's server + client are prelinked
+   to one object with exported symbols renamed by a per-game prefix
+   (`--redefine-syms` from `nm -gU`). `COM_LoadLibrary` returns a handle
+   carrying that prefix and `COM_GetProcAddress` prepends it — required
+   because entity factories are exported **by classname**
+   (`monster_zombie` exists in both HL and OF).
+3. **`./VisionPort/build_game.sh <git-url-or-path> [branch]`** applies the
+   VR hooks, builds `libgame-<mod>.a`, applies the prefix and registers the
+   game in the generated compiled-games table; the next app build links it
+   and the library shows the mod as kind B. CI's best-effort matrix (7.0)
+   runs the same script for the built-in list.
+4. **Built-in ports:** Opposing Force, then Blue Shift — the end-to-end
+   tests for all of the above. `fetch-assets.sh` takes optional app IDs
+   (50 OF, 130 BS) and a `--zip` output; whether those apps carry a
+   `steam_legacy` branch is unverified.
+
+Support tiers for game code:
+
+| Tier | Source | Support |
+|---|---|---|
+| 1 | Built-in ports (OF, BS) | maintained by us, in CI releases |
+| 2 | Any hlsdk-portable-based source, via `build_game.sh` | supported; VR hooks applied automatically when they merge cleanly |
+| 3 | Source targeting the original Windows HLSDK | best-effort: the script tries, and on failure points at FWGS's porting guide (MSVC-isms, include case, 64-bit) |
+| 4 | Windows-DLL-only mods | no source, so no compiled support — content runs on Half-Life's code (kind C, experimental) |
 
 #### Experiments (not committed to)
 
