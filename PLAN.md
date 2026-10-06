@@ -33,6 +33,7 @@ the live, granular list of what's open.
 | 5 | Spatial-ish audio (AudioQueue backend), performance HUD, console | ✅ |
 | 6 | Per-source spatial audio (AVAudioEnvironmentNode / PHASE) | ⛔ abandoned — both unusable on visionOS 26, see `.claude/research/visionos-spatial-audio.md` |
 | — | Reprojection depth (constant depth submitted; real per-pixel depth would reduce head-motion jelly) | 🔜 open |
+| 7 | Game library, on-device import (AirDrop/Files/Wi-Fi), mods (OF + BS as E2E tests), CI prebuilds | 🔜 planned, see Phase 7 |
 | — | Switch Pro controller / gyro aim as an alternative input | 🔜 idea, not started |
 
 ## Architecture
@@ -234,8 +235,146 @@ viewmodel workaround, shell-casing angles, gaze-ray freeze during pinch).
   gamma/brightness, snap-turn angle, audio volumes, dominant hand,
   accessibility fire-along-gaze, gesture toggles, plus an "Advanced" section
   exposing the stock HL menu and console.
-- Mod selection from imported `valve/`-likes: not implemented, not currently
-  planned.
+- Mod selection from imported `valve/`-likes: superseded by Phase 7.
+
+### Phase 7 — Game library, on-device import, mods, CI 🔜
+
+Goal: a user who isn't a developer runs `steamcmd` on their own machine,
+sends the result to the headset (AirDrop, Files or a browser), and the app
+does every preparation step on-device — no `devicectl`, no
+`push-assets.sh`, no Steam anything in CI. Opposing Force and Blue Shift
+are the end-to-end tests for the mod path.
+
+**Constraints the design follows from (verified in code, 2026-10-06):**
+
+- Game code is static. hlsdk-portable `master` (server + `cl_dll`) is
+  linked into `libxash.a`; `COM_LoadLibrary` returns `RTLD_DEFAULT` and every
+  export is `dlsym`'d from the app binary, so *any* `gamedll` in a mod's
+  `liblist.gam` silently gets Half-Life's code today.
+- `Sys_NewInstance` (the engine's change-game path) restarts via `execv`,
+  which visionOS can't do.
+- `-game valve` is hardcoded (`Renderer.swift`), as are the `valve_hd`/`valve`
+  model directories (`GameData.modelDirectories`) behind WeaponPass and the
+  avatar.
+- The engine's filesystem is already case-insensitive (`FS_FixFileCase`,
+  `filesystem/dir.c`), so the `Hgrunt03.mdl` crash most likely came from the
+  app-side model loaders opening exact paths. Confirm on device before
+  choosing the fix.
+
+**Mod kinds** — every gamedir is classified on scan:
+
+| Kind | How detected | Support |
+|---|---|---|
+| A — content-only | no `dlls/`, `gamedll` pointing at valve's, or a shipped DLL whose hash matches HL's | full: `-game <dir>` |
+| B — compiled-in port | `liblist.gam` `gamedll` / dir matches an entry in the generated compiled-games table | full, per port (OF, BS first) |
+| C — custom Windows DLL | anything else | experimental "try with Half-Life game code": maps load, mod entities missing |
+
+#### 7.0 — CI (best-effort for mods)
+
+- `workflow_dispatch` job builds ANGLE at a **pinned** revision (the script
+  clones HEAD today) and publishes `libANGLE{,-sim}.a` as a Release asset
+  keyed by revision + hash of `angle-visionos.patch` and the build script.
+- Same for `libxash.a`; each mod port is a separate archive
+  (`libgame-<mod>.a`) built in a matrix job with `continue-on-error`. A
+  failing mod build never blocks the release — the app links whatever game
+  archives exist and a generated `compiled_games` table tells the app which
+  ports are inside. Local compilation stays the full-support path.
+- `scripts/fetch-prebuilts.sh`, called from `pre-build.sh`, downloads the
+  release assets when local builds are missing.
+- Push/PR: unsigned `xcodebuild` compile check, no assets, no signing.
+
+#### 7.1 — Game library + import (AirDrop / Files)
+
+- `GameLibrary`: scans `Documents/GameData/*` for gamedirs (`liblist.gam` /
+  `gameinfo.txt`), parses `game`, `gamedll*`, `fallback_dir`, `type`;
+  attaches `<dir>_hd` / `<dir>_addon` overlays to their base game rather than
+  listing them; classifies A/B/C.
+- Importer core (shared by every route): stream-extract to a staging dir
+  (ZIPFoundation), reject `..`, absolute paths and symlinks, find gamedir
+  roots at any depth (ModDB wrapper folders; a whole zipped
+  `HalfLifeAssets/` with several gamedirs), per-gamedir replace/merge, atomic
+  move, delete the archive. Writes to the currently loaded game are refused
+  while the engine is running.
+- Normalize pass (after import, and on launch for changed dirs): write
+  `vfs.cfg` `fs_mount_hd "1"` where an `_hd` overlay exists (replaces
+  `push-assets.sh`'s), flag a post-anniversary `valve/`. Case: make the
+  app-side loaders resolve paths case-insensitively like the engine does;
+  mass-lowercasing only as fallback.
+- Routes: `.fileImporter`, a declared zip document type ("Open in
+  LambdaVision" from AirDrop), and `UIFileSharingEnabled` +
+  `LSSupportsOpeningDocumentsInPlace` so `Documents/GameData` is visible in
+  Files for drag-in.
+- The "GameData missing" warning becomes onboarding with an Import button.
+
+#### 7.2 — Game picker + launch
+
+- Main-window list of installed games with kind badges; selection persists
+  and launches with `-game <dir>` (+ fallback dir).
+- `Sys_NewInstance` patched on XROS to call back into Swift (persist choice,
+  ask to reopen) instead of `execv`. In-process engine restart is a separate
+  investigation (static globals).
+
+#### 7.3 — VR layer per game
+
+- Model search chain `<mod>_hd` → `<mod>` → `fallback_dir` → `valve_hd` →
+  `valve`, replacing the hardcoded `modelDirectories`.
+- `WeaponWarmup` cache keyed per gamedir (precompute before immersive).
+- Avatar: the game's player model, falling back to `gordon.mdl`.
+- Viewmodels the hand-cut / grip derivation can't handle fall back to the
+  stock flat viewmodel instead of a broken hand-anchored one. OF's new
+  weapons and PCV hands are the first real test of this.
+
+#### 7.4 — Wi-Fi management (browser)
+
+The friendliest route, and a full replacement for `push-assets.sh`:
+
+- **Pairing:** a "Manage over Wi-Fi" toggle on the library screen shows a
+  QR code + `http://<device>.local:<port>/?t=<token>`; scanning on a phone or
+  typing it on a laptop opens the page. Bonjour-advertised, token-gated, only
+  while the screen is open, auto-off after idle. Listener/pairing pattern
+  from RAVESDK's `RAVESetupReceiver`, HTTP parsing from DebugTraceServer's
+  `HTTPMessage` (extended for streamed bodies) — extract to RAVESDK only if a
+  second app turns out to want a LAN file-manager server.
+- **Page (bundled, works offline):** library cards with kind badge, size,
+  HD overlay state, warnings; set active game; delete; free space; the exact
+  `steamcmd` command for the visitor's OS (with app IDs 70 / 50 / 130) and a
+  copy button.
+- **Upload without zipping:** drag a *folder* (directory upload) — the
+  browser sends files with relative paths. Before sending, the page fetches
+  a manifest (path, size, hash) and uploads only what differs, so an
+  interrupted 500 MB transfer resumes and a mod update sends a delta. Zips
+  are accepted too.
+- **7z / rar (ModDB's usual formats):** unpacked *in the browser* with a
+  bundled libarchive WASM build, then uploaded as files — no native archive
+  dependency in the app.
+- **Live import log:** classification result, renamed/flagged files,
+  missing `fallback_dir`, kind C warning, streamed to the page as it runs.
+- **Scriptable:** the same API backs a `scripts/push-assets.sh --wifi` mode,
+  so developers keep a CLI path without `devicectl`.
+- Backup/export of saves and configs (download a zip, via DebugTrace's
+  `ZipWriter`) — nice-to-have.
+
+#### 7.5 — Compiled-in ports: Opposing Force, then Blue Shift
+
+- Each port is built from its hlsdk-portable branch, server + client
+  prelinked to one object, exported symbols renamed with a per-game prefix
+  (`--redefine-syms` from `nm -gU`). `COM_LoadLibrary` returns a handle
+  carrying that prefix and `COM_GetProcAddress` prepends it — required
+  because entity factories are exported **by classname** (`monster_zombie`
+  exists in both HL and OF).
+- The VR patch moves from `hlsdk-visionos.patch` to a branch in a fork,
+  merged into each mod branch, instead of N diverging patch files.
+- `fetch-assets.sh` takes optional app IDs (50 OF, 130 BS) and a `--zip`
+  output. Whether those apps carry a `steam_legacy` branch is unverified.
+
+#### Experiments (not committed to)
+
+- **Multiplayer:** Xash LAN / internet play — AVP ↔ AVP, AVP ↔ desktop
+  Xash. HLDM is in `master`'s game code already; the open questions are VR
+  input over the network and the server-side aim path.
+- **Decay:** PS2-only co-op; needs a community PC port branch (check
+  whether hlsdk-portable carries one) and PS2-extracted assets, so it can't
+  use the Steam path at all.
 
 ## Build & run
 
