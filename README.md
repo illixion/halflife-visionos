@@ -431,6 +431,40 @@ xcrun devicectl device process launch \
 
 Find your AVP's UDID with `xcrun xctrace list devices`.
 
+### Debug server (screenshots and remote control)
+
+Development builds serve a debug API over the local network or tailnet
+through [DebugTrace](https://github.com/illixion/DebugTrace)
+(`LambdaVision/LambdaVision/DebugEndpoints.swift`). It runs when the build was
+signed by `build-and-sign` or launched with `DEBUGTRACE_SERVER=1`
+(`build-and-sign --mcp` does both); Settings → Advanced → Debug server
+switches it On (an Xcode run too) or Off. App Store and TestFlight builds
+never serve it. The port is the first free one in 8651–8691 (the app logs
+`listening on port N`); every request needs the build's bearer token, and the
+first request from each client asks for approval in the main window.
+
+```bash
+# Save what the player sees (both eyes side by side) and print the path
+scripts/avp-screenshot.sh                       # → build/screenshots/<time>-both.png
+scripts/avp-screenshot.sh --eye left --width 0  # one eye, native resolution
+scripts/avp-screenshot.sh --source engine       # the engine image, no Metal overlays
+
+# Or talk to it directly (GET / lists every endpoint with curl examples)
+curl -H "Authorization: Bearer $TOKEN" http://avp:8651/state
+curl -H "Authorization: Bearer $TOKEN" -X POST "http://avp:8651/console?command=impulse%20101"
+```
+
+Queries: `state` (map, game, player origin/angles/velocity, HUD, input
+mode), `screenshot`, `settings`, `perf`, `diagnostics`, `cvar`. Commands:
+`console`, `setCvar` (omit `value` to toggle), `setting`, `map`, `immersive`
+(open or close the game). Agents reach the same endpoints through the `apps`
+MCP. A screenshot is the drawable after every pass the app encodes (engine
+image, arms, gun, body, HEV holograms), unwarped from foveation; it does not
+include what the compositor adds afterwards (system UI, reprojection). The
+Console window's trace button shares or uploads a debug trace with the same
+state. `LambdaVision/Tools/CaptureProbe/build.sh` checks the image path on the
+Mac, and `--serve` fakes the endpoint for testing the script.
+
 ## Layout
 
 ```
