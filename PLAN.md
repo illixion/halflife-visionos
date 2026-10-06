@@ -328,13 +328,21 @@ are the end-to-end tests for the mod path.
 
 The friendliest route, and a full replacement for `push-assets.sh`:
 
-- **Pairing:** a "Manage over Wi-Fi" toggle on the library screen shows a
-  QR code + `http://<device>.local:<port>/?t=<token>`; scanning on a phone or
-  typing it on a laptop opens the page. Bonjour-advertised, token-gated, only
-  while the screen is open, auto-off after idle. Listener/pairing pattern
-  from RAVESDK's `RAVESetupReceiver`, HTTP parsing from DebugTraceServer's
-  `HTTPMessage` (extended for streamed bodies) — extract to RAVESDK only if a
-  second app turns out to want a LAN file-manager server.
+- **Pairing:** a "Manage over Wi-Fi" modal on the library screen. The
+  server lives exactly as long as the modal is up — opening it starts the
+  listener, closing it tears the listener and every session down (the modal
+  says so, since closing it mid-upload stops the upload). It shows a short
+  URL (`http://<device>.local:<port>`, plus the IP as a fallback for
+  networks without mDNS) and a **6-digit PIN**, freshly generated each
+  time the modal opens. No QR: only the wearer can see the headset's
+  display, so nothing else can scan it. The page asks for the PIN once and
+  swaps it for a session cookie; wrong attempts are rate-limited and a
+  handful of failures regenerates the PIN, so a LAN neighbour can't brute
+  force 10⁶ codes inside the modal's lifetime. Listener + Bonjour pattern
+  from RAVESDK's `RAVESetupReceiver` (its QR pairing is not reused), HTTP
+  parsing from DebugTraceServer's `HTTPMessage` (extended for streamed
+  bodies) — extract to RAVESDK only if a second app turns out to want a
+  LAN file-manager server.
 - **Page (bundled, works offline):** library cards with kind badge, size,
   HD overlay state, warnings; set active game; delete; free space; the exact
   `steamcmd` command for the visitor's OS (with app IDs 70 / 50 / 130) and a
