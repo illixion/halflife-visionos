@@ -376,6 +376,8 @@ instead of deleting them.
 
 ## Ideas / someday
 
+- **Modern lighting** (glass, reflections, shadows, eventually ray tracing).
+  Plan and tiers: [docs/plans/modern-lighting.md](docs/plans/modern-lighting.md).
 - **Speedrunner mode.** An in-game run timer and a speed gauge. Unblocked:
   build it as another RAVEHolo panel in `HEVHUD.swift` (the native HEV HUD
   replaced the stock readouts), not in the stock 2D HUD. The ground speed is

@@ -354,6 +354,7 @@ VisionPort/        Engine cross-compile workspace (xash3d-fwgs + hlsdk-portable
 scripts/           Asset fetch/push scripts, prebuilt fetch and the Xcode pre-build hook
 .github/workflows/ CI compile check and the prebuilt ANGLE / libxash releases
 PLAN.md            Architecture, phase plan, risks
+docs/plans/        Design plans for planned work (one file per plan)
 ISSUES.md          Known problems
 README.md          You are here
 
