@@ -30,6 +30,10 @@ VR_SHARED float g_vr_aim_offset[2] = { 0.0f, 0.0f };
 // a gun in the hand. Only read inside the weapon frame (see VR_ItemPostFrame),
 // where v_angle carries the aim offset, so the yaw is saved beforehand.
 VR_SHARED float g_vr_muzzle_offset[4] = { 0.0f, 0.0f, 0.0f, -1.0f };
+// VR (LambdaVision): 1 while the gun on screen is the head-locked viewmodel
+// (the client decides, g_vr_weapon_flat_cl in cl_dll/vr/vr_client.cpp; the
+// bridge copies it here each tick): it fires along the view, to match.
+VR_SHARED int g_vr_weapon_flat = 0;
 static int   g_vr_weapon_frame = 0;
 static float g_vr_weapon_frame_yaw = 0.0f;
 
@@ -86,11 +90,10 @@ void VR_ItemPostFrame( CBasePlayer *pPlayer )
 	// scoped to the weapon frame — UTIL_MakeVectors, GetAutoaimVector and
 	// GetGunPosition all read v_angle, so every weapon inherits the ray;
 	// GetGunPosition also moves the shot's origin to the muzzle.
-	// The egon is exempt: it renders as the camera-locked viewmodel
-	// (its backpack clips the body when hand-anchored, see vr_client.cpp),
-	// so it must fire along the view direction — where the player looks —
-	// to match the gun the player sees, not the hand ray.
-	if( pItem->m_iId == WEAPON_EGON )
+	// A gun drawn as the head-locked viewmodel (g_vr_weapon_flat: one the
+	// hand can't hold) fires along the view direction — where the player
+	// looks — to match the gun the player sees, not the hand ray.
+	if( g_vr_weapon_flat )
 	{
 		pItem->ItemPostFrame();
 	}

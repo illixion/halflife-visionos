@@ -335,6 +335,10 @@ extern float g_vr_weapon_animtime;
 extern float g_vr_weapon_framerate;
 extern float g_vr_weapon_time;
 extern void *g_vr_weapon_world_hdr;
+// The companion <name>T.mdl of either model when its textures live there
+// (read by the client from the game's files), else NULL.
+extern void *g_vr_weapon_tex_hdr;
+extern void *g_vr_weapon_world_tex_hdr;
 
 // --- dynamic-array helpers -------------------------------------------------
 static uint32_t push_vertex(snapshot_t *s, const lambda_weapon_vertex_t *v) {
@@ -789,8 +793,13 @@ static int rest_sequence(const uint8_t *base, const studiohdr_t *hdr) {
 }
 
 // Bake `hdr` into `slot`'s back snapshot and publish it. Returns 1 on success.
+// `tex`, when not NULL, is the model's companion <name>T.mdl as read from
+// disk: its texture pixels are baked from there (the engine copies only the
+// texture headers and skin table of such a model into its own, see
+// Mod_LoadStudioModel, so the pixels are nowhere in `hdr`).
 static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t *hdr,
-                      int modelindex, int body, const char *dump_path) {
+                      int modelindex, int body, const char *dump_path,
+                      const studiohdr_t *tex) {
     if (hdr->numbones <= 0 || hdr->numbones > LAMBDA_WEAPON_MAX_BONES) {
         fprintf(stderr, "[lambda_weapon] modelindex=%d has %d bones (max %d)\n",
                 modelindex, hdr->numbones, LAMBDA_WEAPON_MAX_BONES);
@@ -806,7 +815,10 @@ static int bake_model(model_slot_t *slot, const uint8_t *base, const studiohdr_t
     matrix3x4 bind[LAMBDA_WEAPON_MAX_BONES];
     compute_bind_bones(base, hdr, bind);
 
-    bake_textures(s, base, hdr);
+    if (tex && tex->numtextures == hdr->numtextures)
+        bake_textures(s, (const uint8_t *)tex, tex);
+    else
+        bake_textures(s, base, hdr);
 
     // Bone table.
     const mstudiobone_t *pb = (const mstudiobone_t *)(base + hdr->boneindex);
@@ -937,7 +949,8 @@ static void extract_world_model(void) {
         slot->last_valid = 0;
         return;
     }
-    slot->last_valid = bake_model(slot, (const uint8_t *)hdrp, hdr, -1, 0, NULL);
+    slot->last_valid = bake_model(slot, (const uint8_t *)hdrp, hdr, -1, 0, NULL,
+                                  (const studiohdr_t *)g_vr_weapon_world_tex_hdr);
 }
 
 void lambda_weapon_extract(void) {
@@ -964,7 +977,8 @@ void lambda_weapon_extract(void) {
                     hdr->ident, hdr->version);
             return;
         }
-        slot->last_valid = bake_model(slot, base, hdr, modelindex, body, "weapon_dump.obj");
+        slot->last_valid = bake_model(slot, base, hdr, modelindex, body, "weapon_dump.obj",
+                                      (const studiohdr_t *)g_vr_weapon_tex_hdr);
     }
     if (!slot->last_valid) return;
 
@@ -1065,40 +1079,95 @@ uint32_t lambda_weapon_world_copy_pose(lambda_weapon_pose_t *out) { return slot_
 // any authored sequence, so the pose this slot publishes is only the rest
 // pose, which the IK uses as its reference.
 
+// Reads a whole file into a malloc'd buffer; NULL on failure.
+static void *read_file(const char *path, long *size_out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    void *buf = NULL;
+    long size = 0;
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > (long)sizeof(studiohdr_t)) {
+        rewind(f);
+        buf = malloc((size_t)size);
+        if (buf && fread(buf, 1, (size_t)size, f) != (size_t)size) { free(buf); buf = NULL; }
+    }
+    fclose(f);
+    if (buf) *size_out = size;
+    return buf;
+}
+
+static int is_studio(const void *buf) {
+    const studiohdr_t *h = (const studiohdr_t *)buf;
+    return h && h->ident == IDSTUDIOHEADER && h->version == STUDIO_VERSION;
+}
+
+// A model whose textures live in a companion <name>T.mdl (older mods split
+// them out): reads that file next to `path` and returns the main model with
+// the T file's texture headers and skin table appended, the way the engine
+// merges them (Mod_LoadStudioModel), so skin references resolve. *tex_out is
+// the T file itself, which the pixels are baked from. NULL when there is no
+// readable T file.
+static void *load_with_texture_file(const char *path, const void *main, studiohdr_t **tex_out) {
+    char tpath[1024];
+    size_t n = strlen(path);
+    if (n < 4 || n + 2 > sizeof(tpath)) return NULL;
+    static const char *const suffixes[] = { "T.mdl", "t.mdl" };
+    void *tbuf = NULL;
+    long tsize = 0;
+    for (int i = 0; i < 2 && !tbuf; i++) {
+        memcpy(tpath, path, n - 4);
+        memcpy(tpath + n - 4, suffixes[i], 6);
+        tbuf = read_file(tpath, &tsize);
+        if (tbuf && (!is_studio(tbuf) || ((studiohdr_t *)tbuf)->numtextures <= 0)) { free(tbuf); tbuf = NULL; }
+    }
+    if (!tbuf) return NULL;
+    const studiohdr_t *mh = (const studiohdr_t *)main, *th = (const studiohdr_t *)tbuf;
+    size_t size1 = (size_t)th->numtextures * sizeof(mstudiotexture_t);
+    size_t size2 = (size_t)th->numskinfamilies * (size_t)th->numskinref * sizeof(int16_t);
+    if ((int64_t)th->textureindex + (int64_t)(size1 + size2) > tsize) { free(tbuf); return NULL; }
+    uint8_t *merged = calloc(1, (size_t)mh->length + size1 + size2);
+    if (!merged) { free(tbuf); return NULL; }
+    memcpy(merged, main, (size_t)mh->length);
+    studiohdr_t *h = (studiohdr_t *)merged;
+    h->numskinfamilies = th->numskinfamilies;
+    h->numtextures = th->numtextures;
+    h->numskinref = th->numskinref;
+    h->textureindex = h->length;
+    h->skinindex = h->textureindex + (int32_t)size1;
+    memcpy(merged + h->textureindex, (const uint8_t *)tbuf + th->textureindex, size1 + size2);
+    h->length += (int32_t)(size1 + size2);
+    *tex_out = (studiohdr_t *)tbuf;
+    return merged;
+}
+
 // Reads a studio model off disk and bakes it into `slot`, which then owns the
 // file buffer (snapshots point into it).
 static int slot_load_file(model_slot_t *slot, const char *path, int body, const char *dump_path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
+    long size = 0;
+    void *buf = read_file(path, &size);
+    if (!buf) {
         fprintf(stderr, "[lambda_model] cannot open %s\n", path);
         return 0;
     }
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    long size = ftell(f);
-    if (size <= (long)sizeof(studiohdr_t)) { fclose(f); return 0; }
-    rewind(f);
-    void *buf = malloc((size_t)size);
-    if (!buf) { fclose(f); return 0; }
-    size_t got = fread(buf, 1, (size_t)size, f);
-    fclose(f);
-    if (got != (size_t)size) { free(buf); return 0; }
-
-    const studiohdr_t *hdr = (const studiohdr_t *)buf;
-    if (hdr->ident != IDSTUDIOHEADER || hdr->version != STUDIO_VERSION) {
+    if (!is_studio(buf) || ((const studiohdr_t *)buf)->length > size) {
         fprintf(stderr, "[lambda_model] %s is not a studio v10 model\n", path);
         free(buf);
         return 0;
     }
-    // Textures may live in a companion <name>T.mdl; the models we read
-    // embed theirs, so an external table is a hard failure rather than a
-    // silent magenta model.
-    if (hdr->numtextures <= 0) {
-        fprintf(stderr, "[lambda_model] %s has no embedded textures\n", path);
+    // Textures may live in a companion <name>T.mdl.
+    studiohdr_t *tex = NULL;
+    if (((const studiohdr_t *)buf)->numtextures <= 0) {
+        void *merged = load_with_texture_file(path, buf, &tex);
         free(buf);
-        return 0;
+        if (!merged) {
+            fprintf(stderr, "[lambda_model] %s has no textures, embedded or in a T.mdl\n", path);
+            return 0;
+        }
+        buf = merged;
     }
+    const studiohdr_t *hdr = (const studiohdr_t *)buf;
 
-    int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, dump_path);
+    int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, dump_path, tex);
+    free(tex);                  // its pixels are baked; nothing points into it
     if (!ok) { free(buf); return 0; }
 
     free(slot->owned);          // release any previous buffer

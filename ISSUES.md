@@ -33,27 +33,6 @@ instead of deleting them.
     movement speeds (every mode reaches stock full speed).
   - First-run UI should show these bindings once it exists.
 
-- **Hand-anchored weapon polish.** v1 is in (p_ model at the dominant hand,
-  skeleton-aligned grip, hand-directed fire, gaze fallback; dominant hand +
-  fire-along-gaze accessibility now in Settings): remaining items — muzzle
-  flash is lost while the viewmodel is hidden (`CL_AddEntity` clears effects
-  on index-0 entities, so `EF_MUZZLEFLASH` can't ride the gun entity as-is).
-  Shots now leave the drawn muzzle (see Resolved).
-  This is the default engine-drawn path; an opt-in Metal renderer that fixes
-  the rotation drift now exists — see "Weapon Metal-pass polish" under
-  rendering.
-- **Egon renders/aims as a viewmodel, not hand-anchored** (workaround, not
-  a true fix). The gluon gun's backpack is rigged to the player body and
-  `p_egon` has no `Bip01 R Hand` bone, so hand-anchoring drives the pack
-  into the player's chest. Current behavior: `VR_AddHandWeapon`
-  (`entity.cpp`) skips the egon via `strstr(mdl->name, "egon")` and leaves
-  the stock viewmodel up (`g_vr_hand_weapon_drawn = 0`); to keep the
-  visuals and the hits consistent, `CBasePlayer::ItemPostFrame`
-  (`player.cpp`) also exempts `WEAPON_EGON` from the aim offset so it fires
-  along the view (where the player looks) instead of the hand ray. Two
-  files must agree on "egon" — the render skip and the aim exemption. A
-  proper fix would anchor only the gun portion to the hand (hide/detach
-  the backpack submesh) so it behaves like every other weapon.
 - **Arm-swing walking needs tuning on device.** `RAVEArmSwinger` (RAVEInput)
   drives the same joy axes as the pinch joystick: both fists plus a swing
   pattern engage it, and the stroke-speed envelope maps 0.4–2.0 m/s onto
@@ -64,8 +43,6 @@ instead of deleting them.
   hand clenched blocks fire. Once running, pointing the gun hand frees it
   and the off arm carries the run; watch that sweeping the aim while firing
   never reads as a rejoin (`rejoinHold` 0.3 s).
-- **Shell casings eject off-axis** relative to the aim ray (client event
-  shell math uses its own attachment angles). Cosmetic.
 - **Gaze ray freezes during a held pinch** — visionOS only updates
   `selectionRay` with hand drift after the pinch starts (privacy: gaze is
   revealed at tap). Automatic fire tracks the pinch-start gaze, not the
@@ -188,9 +165,7 @@ instead of deleting them.
   (`Renderer.gripRollDeg/gripYawDeg/gripPushM`) were tuned against the p_
   hand bone and want a re-check on device; the model's own right hand is
   rigid Valve animation, not the user's fingers (skin it to ARKit joints
-  next); arms end mid-forearm (see "Arms" below); no muzzle flash, external
-  `…T.mdl` textures fall back to magenta, classic `v_9mmAR`/`v_hgun` have no
-  hand bone (origin-at-hand), and it's a manual cvar (wire into Settings).
+  next); arms end mid-forearm (see "Arms" below).
   Physical per-weapon reloads can build on the exported bone table (mag =
   `Box02` / `clip`, pump = `Charger`, cylinder = `revolver` +
   `speed_loader`).
@@ -295,13 +270,6 @@ instead of deleting them.
   recompiles, not remakes — their player models are 595 and 755 vertices with
   *single-bone* rigid skinning, exactly like GoldSrc, so a whole Source asset
   pipeline buys a 1.7x vertex bump and nothing else.
-- **Viewmodel parts parked out of frame float beside the gun.** Valve parks
-  what an animation does not need yet just outside the flat viewmodel's
-  field of view — the Glock's spare magazine (`Box02`, a root bone), the
-  shotgun's shell — and a hand-anchored gun has no frame edge to hide them
-  behind. Seen in the probe's grip renders; likely visible on device near the
-  gun. A fix wants a rule for "what the flat viewmodel would not have shown",
-  e.g. culling against the original view frustum in viewmodel space.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
 - **`tangents` API deprecation** warning in Renderer.swift.
@@ -325,26 +293,36 @@ instead of deleting them.
 
 ## Open — compiled games and mods
 
-- **Opposing Force weapons in the VR layer.** OF and BS build, load and
-  spawn their own entities (Mac: of0a0, of1a1, ba_tram1, ba_canal1, no
-  missing factories), but OF's new arsenal hasn't been checked on device:
-  - *Hand-anchored weapon pass:* displacer, Desert Eagle (laser spot),
-    knife, M249, pipe wrench, shock rifle, sniper rifle (zoom), spore
-    launcher, barnacle grapple and penguins have never been through
-    `ViewmodelGrip` / `WeaponPass`, and OF's viewmodels use the PCV
-    hands. The 7.3 fallback (stock flat viewmodel when grip derivation
-    fails) is what should catch the odd ones.
-  - *Client barrel aim:* only eagle.sc, m249.sc and sniper.sc are in
-    `hlsdk-vr/cl_dll/vr/vr_events.cpp`'s table. The server already fires
-    every weapon along the aim offset; the shock rifle, spore launcher and
-    displacer events draw their beams/projectiles from the head view.
-    Adding a name is enough when the event copies `args->angles` once and
-    calls `EV_GetGunPosition` once.
-  - *Weapon ids differ per game:* OF renumbers (`WEAPON_EGON` 10, RPG 8).
-    The VR layer now asks the game (`VR_WeaponEgonId`); anything app-side
-    that keys on HL ids (HUD icons, per-weapon tuning) needs the same care.
-  - The egon exemption (fires along the view) is keyed on `WEAPON_EGON`
-    and the model name; OF's displacer/shock rifle may want the same.
+- **Opposing Force weapons: device check pending.** OF and BS build, load
+  and spawn their own entities (Mac: of0a0, of1a1, ba_tram1, ba_canal1, no
+  missing factories). Done offline:
+  - *Grips:* every OF, BS and HD viewmodel goes through `ViewmodelGrip` in
+    the avatar probe (`build.sh --grips --anchor=…/gearbox/models`, renders
+    under `<game>/`), and all of them hold in the hand. The PCV, Barney and
+    HD hand textures were already cut; Blue Shift's `L_wristbone` sleeve now
+    is too. Fixed on the way: the sniper rifle (`v_m40a1` opens with its draw
+    sequence, so the rest pose is now the first idle sequence), and the shock
+    roach and gluon gun (their grip bone sits 16.5 and 8 units off the gun;
+    such a gun is pulled into the hand, `ViewmodelGrip.pulledIn`).
+  - *Client barrel aim:* `vr_events.cpp` adds `penguinfire`, `snarkfire`,
+    `tripfire` (throw checks along the barrel, matching the server),
+    `crossbow2` and the spore launcher's spit spray, which a new origin mode
+    moves onto the muzzle. The displacer's event draws nothing from the view,
+    and the shock roach's arcs and the gluon beam start from the gun's
+    attachments, which now follow the drawn gun (see Resolved, muzzle flash).
+  - *Exemptions:* none needed. The displacer and shock rifle hold in the hand
+    like any gun; only a gun drawn flat fires along the view
+    (`g_vr_weapon_flat`).
+  - *Weapon ids:* nothing app-side keys on weapon ids (the HUD reads clip
+    sizes from the game, `VR_WeaponMaxClip`); the VR layer's last one, the
+    egon exemption, is gone.
+  Still open: projectile weapons spawn at the stock offset from the gun
+  position (`GetGunPosition() + forward·16 + right·8 − up·8`: RPG, hornet
+  gun, spore launcher, shock rifle), i.e. 8–9 units right of and below the
+  drawn muzzle. A fix needs a per-weapon offset table in `VR_GunPosition`
+  that would also shift the RPG's laser trace, so it's not done. On device:
+  each OF weapon in the hand, its fire, arcs and projectiles, the sniper zoom,
+  the Desert Eagle's laser spot, and the barnacle grapple (held, gap 6).
 - **FreeVGUI clients on this engine pin.** hlsdk-portable branches after
   2026-08-19 link FreeVGUI into the client, which needs the VGUI
   `SetPaintOffset` entry our xash3d-fwgs pin predates (NULL call on the
@@ -428,6 +406,55 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~Muzzle flash lost while the viewmodel is hidden~~ (device check
+  pending). The hidden viewmodel was hidden by clearing its model, which
+  also stopped its animation events, and with them every muzzle flash,
+  its light and the attachments beams start from. It is now drawn fully
+  transparent instead (`VR_HideViewModel`), so the engine still runs its
+  events, and `VR_StudioAttachments` (hook at the end of the client's
+  `StudioCalcAttachments`) moves its attachments onto the drawn gun: the
+  Metal pass's live attachment points (`lambda_set_weapon_draw`), or a point
+  ahead of the engine-drawn p_ model. The flash sprite, its dynamic light,
+  the gluon beam and the shock roach's arcs leave the gun in the hand. The
+  headset renders each frame twice, so viewmodel events now run on the first
+  render only (`VR_StudioDrawModel`; reload sounds would double too).
+  Verified on the Mac build (flash, arcs, beam and spit all appear with the
+  viewmodel hidden; head-locked there, no bridge). On device: the flash at
+  the drawn muzzle for the Glock, MP5, shotgun, .357, M249 and Desert Eagle;
+  the gluon beam from the nozzle; the shock roach's arcs on the roach; one
+  reload sound, not two.
+- ~~Egon renders/aims as a viewmodel~~ (device check pending). In the Metal
+  pass the egon's viewmodel holds in the hand like any gun (its grip pulled
+  in, see the OF item), and the two "egon" special cases are gone: one flag,
+  `g_vr_weapon_flat_cl` (client, copied to the server's `g_vr_weapon_flat` by
+  the bridge), says when the gun on screen is the head-locked viewmodel — the
+  Metal pass's flat fallback, or the engine path's for a p_ model with no
+  right hand (that rule replaced the `strstr("egon")`) — and the server aim,
+  the bullet events and the reticle all follow it. On device: the egon in the
+  hand, its beam and damage along the barrel.
+- ~~Shell casings eject off-axis~~ (device check pending). Stock places the
+  shell at an offset from the eye: a point on the flat viewmodel. The
+  platform now publishes the drawn gun's model transform and
+  `VR_EV_ShellInfo` carries that point (and the throw) onto it, so shells
+  leave the gun in the hand. On device: MP5, Glock, shotgun, M249.
+- ~~Viewmodel parts parked out of frame float beside the gun~~ (device
+  check pending). Loose parts — bones wholly outside the flat viewmodel's 90°
+  frame in the rest pose and at least 7 units from everything in it: the
+  Glock's and Desert Eagle's `Box02`, the speed loaders, the shotgun's shell,
+  the spore launcher's spare spore — are hidden while they are out of that
+  frame, and show once a reload brings them in (`ViewmodelGrip.looseParts` /
+  `parkedBones`). Settings > Input > "Hide parked weapon parts". On device:
+  nothing floats beside the Glock, .357 or shotgun; reloads still show the
+  magazine, speed loader and shell.
+- ~~Weapon Metal-pass backlog: external `…T.mdl` textures, MP5/hivehand
+  grips, Settings~~. A model whose textures live in a companion `<name>T.mdl`
+  is baked from it (the client loads it through the engine's file system,
+  `g_vr_weapon_tex_hdr`; the warm-up reads it beside the model). No stock or
+  expansion weapon needs it; checked against Blue Shift HD's split
+  `barney.mdl`. The classic MP5 and hivehand already hold by a synthesised
+  and a worn grip, and the Metal pass is Settings > Input > "Hand-tracked
+  weapon model".
 
 - ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
   orientation came from Valve's hand bone, which sits differently on every

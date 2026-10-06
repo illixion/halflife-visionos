@@ -2543,6 +2543,32 @@ void lambda_set_muzzle(float fwd, float left, float up, int active) {
     atomic_store(&g_pending_muzzle_active, active);
 }
 
+// The drawn gun's attachments and whether it is drawn flat (client side,
+// cl_dll/vr/vr_client.cpp), and the server's copy of the client's verdict on
+// flat drawing (dlls/vr/vr_player.cpp). Same staging as the muzzle.
+extern float g_vr_weapon_attach_cl[13];
+extern float g_vr_weapon_xform_cl[13];
+extern int   g_vr_weapon_flat_app;
+extern int   g_vr_weapon_flat_cl;
+extern int   g_vr_weapon_flat;
+static _Atomic int g_pending_attach_cu[12];
+static _Atomic int g_pending_attach_count;
+static _Atomic int g_pending_weapon_flat;
+static _Atomic int g_pending_xform_m[12];   // milli-units (rotation in milli)
+static _Atomic int g_pending_xform_valid;
+
+void lambda_set_weapon_draw(int flat, const float *xform, const float *attachments, int count) {
+    for (int i = 0; xform && i < 12; i++)
+        atomic_store(&g_pending_xform_m[i], (int)lroundf(xform[i] * 1000.0f));
+    atomic_store(&g_pending_xform_valid, xform ? 1 : 0);
+    if (count < 0 || !attachments) count = 0;
+    if (count > 4) count = 4;
+    for (int i = 0; i < count * 3; i++)
+        atomic_store(&g_pending_attach_cu[i], (int)lroundf(attachments[i] * 100.0f));
+    atomic_store(&g_pending_attach_count, count);
+    atomic_store(&g_pending_weapon_flat, flat ? 1 : 0);
+}
+
 // Flashlight beam, engine side (engine/client/cl_tent.c), same staging.
 extern float cl_vr_flashlight[6];
 static _Atomic int g_pending_flashlight_cu[5];
@@ -2609,6 +2635,17 @@ static void lambda_aim_offset_apply(void) {
     float muzzleActive = atomic_load(&g_pending_muzzle_active) ? 1.0f : -1.0f;
     g_vr_muzzle_offset[3] = muzzleActive;
     g_vr_muzzle_offset_cl[3] = muzzleActive;
+    int attachCount = atomic_load(&g_pending_attach_count);
+    for (int i = 0; i < attachCount * 3; i++)
+        g_vr_weapon_attach_cl[i] = (float)atomic_load(&g_pending_attach_cu[i]) / 100.0f;
+    g_vr_weapon_attach_cl[12] = (float)attachCount;
+    for (int i = 0; i < 12; i++)
+        g_vr_weapon_xform_cl[i] = (float)atomic_load(&g_pending_xform_m[i]) / 1000.0f;
+    g_vr_weapon_xform_cl[12] = atomic_load(&g_pending_xform_valid) ? 1.0f : 0.0f;
+    g_vr_weapon_flat_app = atomic_load(&g_pending_weapon_flat);
+    // The client decided last frame whether the gun on screen is the flat
+    // viewmodel (whichever path draws it); the server fires to match.
+    g_vr_weapon_flat = g_vr_weapon_flat_cl;
     for (int i = 0; i < 5; i++)
         cl_vr_flashlight[1 + i] = (float)atomic_load(&g_pending_flashlight_cu[i]) / 100.0f;
     cl_vr_flashlight[0] = atomic_load(&g_pending_flashlight_active) ? 1.0f : -1.0f;
