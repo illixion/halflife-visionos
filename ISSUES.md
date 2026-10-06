@@ -188,6 +188,12 @@ instead of deleting them.
   drops its per-texel stencil read and the key fill becomes a timed
   dispatch. Expected mirror total ~0.5–0.7 ms; see
   `docs/plans/modern-lighting.md` (3g).
+- **Sharp water, round 5: stable mirror, device check pending.** The vent
+  grate's reflection flickered (one sample per texel at the winning source
+  texel; 190007a and 963b205 alike). The resolve now verifies candidate
+  surfaces per exact mirrored ray (2 × 2 per texel). DepthProbe gains a
+  sub-pixel stability check that fails both old builds. Expected mirror cost
+  ~1.4–1.8 ms; see `docs/plans/modern-lighting.md` (3h).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

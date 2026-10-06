@@ -607,6 +607,53 @@ key at each water pixel there and sample the engine image at its source
 (no mirror texture, no extra pass), at the price of 4 key reads per water
 pixel to keep it smooth.
 
+### 3h. Sharp water, round 5: a stable mirror
+
+**Device (abc500f, c1a2):** the vent grate's reflection flickers; the user
+remembers 190007a without it. Cost p50/p95: gMirrorFill 0.03/0.12,
+gMirrorProject 0.32/0.42, gMirror 0.65/2.20, gpuQueue 6.08. Quality first.
+
+**What DepthProbe shows** (new temporal check: the engine frame shifted by a
+sub-pixel δ — colour bilinear, depth/stencil nearest, frustum widened to
+match — must move the final image by δ and change nothing else; compared on
+water pixels away from the mask edge, against the plain composite's own
+resampling noise). At the device view (c1a2, vent wall and bench), p99 /
+mean of the change, plain image's in brackets:
+
+| δ (px) | 190007a | 963b205 | now |
+|---|---|---|---|
+| (0.3, 0) | 4 / 0.7 (0 / 0.3) | same | 2 / 0.5 |
+| (0, 0.3) | 21 / 2.0 (1 / 0.3) | same | 9 / 1.0 |
+| (0.5, 0.5) | 24 / 2.6 (0 / 0.4) | same | 12 / 1.4 |
+
+190007a and 963b205 are identical on water pixels: 963b205 changed only
+which texels off the water get filled, and the composite never reads those
+except at the very rim. So the flicker is in both, a vertical popping at
+every horizontal edge of the mirrored scene (the grate's slats are all
+edges): one sample per 4 × 4-pixel texel, taken at the winning source
+texel, so an edge in the mirror sat on the texel grid and jumped a whole
+texel as the head moved a fraction of a pixel. The check fails both (limit:
+p99 +14, mean +1.2 over the plain image).
+
+**The resolve now** (`ssprResolve`): the keys of the texel and its four
+neighbours are candidate surfaces (merged when about equally far); for 2 × 2
+exact mirrored rays across the texel — each from the water point under it,
+reflected — each candidate gives the point on the ray at its distance,
+projected back into the eye; the engine depth there says which candidate the
+ray really hits; that colour is sampled at the exact, continuously moving
+coordinate, and the four are averaged. Interior texels (one surface) skip
+the check. The key only chooses the surface; the coordinate no longer snaps.
+Stability as above; the mirror itself also agrees better between gazes
+(5.9/255, was 10.6) and between eyes (6.0, was 8.6). A 1 × 2 / 3-candidate
+variant (`SSPR_SUB_X`, `SSPR_CANDIDATES`) is cheaper but fails the check.
+
+**Expected cost:** the projection and reset unchanged (0.32 + 0.03 ms). The
+resolve does, per texel near water, 5 key reads, up to 5 depth reads for the
+candidates and 4 colour samples, plus up to 20 depth reads on the texels
+where surfaces meet: roughly 2× the 963b205 resolve, so gMirror ≈ 1.0–1.4 ms
+p50 and the mirror ≈ 1.4–1.8 ms in total. Divisor stays 4: at 3 the
+stability is no better (p99 10/11) and the cost is 1.8× more texels.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new
