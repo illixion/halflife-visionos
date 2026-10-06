@@ -1,4 +1,4 @@
-# Sharp water reflections — handoff (2026-10-06, branch p8-water @ b2e7e18)
+# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 11)
 
 Self-contained state of the glass/water reflection work for the next agent.
 Longer history: `docs/plans/modern-lighting.md` sections 3–3l, `ISSUES.md`.
@@ -49,20 +49,29 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
   target = engine size / `Renderer.sharpWaterDivisor` (4)):
   1. `ssprClear` — keys = 0xFFFFFFFF (uint4/thread). Timer `gMirrorFill`.
   2. `ssprProject` — per target-grid source texel: engine depth → W; drop
-     viewmodel (z<6), glass/water-marked sources (stencil ≥ 16), W below
-     plane; mirror W in plane `sspr[eye].y`, project, keep only targets that
-     are this plane's water (stencil), atomic_min key = 12-bit log distance |
-     10-bit src y | 10-bit src x. Timer `gMirrorProject`.
-  3. `ssprResolve` — candidates: own key, nearest key up/down within
-     `SSPR_FILL` (8) rows, left/right; candidate world points merged if same
-     distance; **hidden-surface march** (`SSPR_MARCH` 8 steps, `SSPR_THICK`
-     16 units): texel's reflected ray passing just behind on-screen geometry
-     above water → texel empty (probe). Then `SSPR_SUB_X×Y` (2×2) exact
-     mirrored rays per texel: each candidate's depth → exact source coord →
-     verify with engine depth (smallest miss wins; single candidate skips
-     verify; none → first candidate's own source); colour = 4 bilinear taps
-     ±0.5 px (2×2 box); confidence = edge fade (15%) of the **mean exact
-     projection of all candidates**. Timer `gMirror`.
+     viewmodel (z<6), W below plane; mirror W in plane `sspr[eye].y`,
+     project, keep only targets that are this plane's water (stencil).
+     **Back faces → occluders**: facing from the engine depth's +x/+y
+     neighbours (the other side where one steps off an edge) against the
+     mirrored eye (`SSPR_BACKFACE` 0.1); a table/counter top is one. Glass/
+     water-marked sources (stencil ≥ 16) keep only occluders (the counter
+     under the sink's water box). atomic_min key = 11-bit log distance |
+     occluder flag | 10-bit src y | 10-bit src x (a surface wins a tie).
+     Timer `gMirrorProject`.
+  3. `ssprResolve` — candidates: own key, the **nearest** (by distance)
+     surface key and the nearest occluder key up and down within `SSPR_FILL`
+     (8) rows, left/right; surfaces merged if same distance, occluders if same
+     height (≤ 5 surfaces, ≤ 2 occluder heights). `SSPR_SUB_X×Y` (2×2) exact
+     mirrored rays per texel: each surface's depth → exact source coord →
+     verify with engine depth (smallest miss wins; single surface skips
+     verify; none → first surface's own source). **Occluder test**, only
+     short of the chosen sample's real distance: where the ray climbs to the
+     occluder's height − `SSPR_SLAB` (4) and to its height, a surface on
+     screen on or in front of that point and no higher than the occluder →
+     blocked; then the nearest-checking surface short of the block, else the
+     sub-ray is empty (probe). Colour = 4 bilinear taps ±0.5 px (2×2 box);
+     confidence = edge fade (15%) of the **mean exact projection of all
+     surfaces**. Timer `gMirror`.
   Plane choice: `SharpWater.planes` = highest horizontal water row below the
   eye. Renderer encodes it before the composite only when an eye has one.
 - GPU timers: `GPUPassTimer` marks start, mirrorFill, mirrorProject, mirror,
@@ -82,14 +91,39 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Moiré in mirrored sink water box | fixed on device per first capture (glass/water sources rejected + 2×2 box) |
 | Prefilter pass 1.75 ms | fixed (box taps in resolve) |
 | Wavy lines following ripple (comb) | reduced in 96c7ddc (composite neighbour search removed, 8-row fill); **b2e7e18 untested on device**: smooth confidence + ripple-free coverage |
-| Comb across the whole mirrored table underside | **b2e7e18 untested** (hidden-surface march should send it to the probe) |
-| Underside looks transparent, depends on head pitch | **b2e7e18 untested** (same march). Offline the pitch series still differs 4–6/255 between pitches, from on-screen dependence of the mirror; whether the transparency is gone needs the headset |
+| Comb across the whole mirrored table underside | b2e7e18 failed on device (rows of locker); **round 11 untested**: occluders, see below |
+| Underside looks transparent, depends on head pitch | b2e7e18 failed on device; **round 11 untested**: see-through 1.5–2.2% over −5…33° offline (b2e7e18 6–19%) |
 
-Next steps if the headset still shows them: tune `SSPR_THICK` (16) /
-`SSPR_MARCH` (8); march per sub-ray instead of per texel; consider an
-"object footprint" pass (above-water geometry claims the mirror region below
-its mirror image as known-empty); check `waterMirrorView=confidence` for
-bands.
+### Round 11: why the table was transparent, and the fix
+The eye sees the steel table's top; the reflected ray always climbs, so it
+meets that top from below — a back face, behind the underside no frame
+holds. b2e7e18 mirrored the top as a colour; seen more head-on in the mirror
+than on screen, its texels landed on every other mirror row, and the room
+behind (the locker) won the rows between by atomic min: the comb, the
+transparency, and its change with pitch (the magnification changes). The
+8-step march could not catch it: its steps (reach/9, ~12 units of climb)
+jumped over a layer a few units thick, and it marched only the texel centre.
+Fix (`Shaders.metal`, project + resolve, above): back faces are stored as
+occluders, so they win those texels without a colour, and each sub-ray is
+tested exactly where it climbs to an occluder's height (a table top is
+level; the ray's nearest point to one sparse texel can sit 20 units under
+it). Two details mattered: the sample's real distance (`length(A − P)` at
+bestSrc, not the candidate's projection on the ray — an unverified candidate
+showed the far wall from "28 units" away) and choosing among surfaces short
+of the block (else rows alternated between the bench's cabinet face and the
+wall behind, and the block turned that into rows of probe).
+
+What to look at on the headset (c1a2, 963 −471 −542, yaw 15, pitch −5…30):
+under the table the mirror should fall smoothly to the probe (watery room)
+with straight edges along the table's outline, the legs and rim still
+reflected, no locker; at the bench (1110 −330 −540) no comb under the
+counter, `waterMirrorView=confidence` without step-shaped strips. Residuals
+offline: 1-texel strips at the bench's waterline and the table's far
+corners (≤ 2.9% of hidden-underside rays), and sparse light dots in the
+counter's shadow band at view 62.
+
+If it still shows: `SSPR_SLAB` (4) is the assumed thickness (thicker tops
+need more); `SSPR_BACKFACE` (0.1) decides what counts as a top.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror
@@ -117,6 +151,20 @@ Runs the real shaders on Mac dumps. Env: `SHARP=0` (probe only), `RIPPLE=x`
   (does **not** reproduce the device moiré; guard only)
 - mirror rows comb: 2× composite, ripple on, worst 48-px tile ≤ soft+2.0
   (aadfa42 fails +2.86 at dump 51)
+- **see-through** (round 11): each mirror sub-ray's reflected ray traced in
+  fine steps through the engine depth, every visible surface a slab 4 units
+  deep (climbing to it must keep the visible depth continuous, so the region
+  behind a table's edge does not count); of the rays that meet a hidden
+  underside first, the confidence-weighted share the mirror shows clearly
+  farther (> 1.05·hit + 8; the resolve's `SSPR_DEBUG` record) must be ≤ 3%.
+  b2e7e18: 81–88 6–19%, 41 12%, 71–73 4–6.5%, 33 4%; round 11 ≤ 2.9%.
+Tool switches: `SHADERS=path` runs another Shaders.metal (A/B; add the
+`SSPR_DEBUG` blocks to an old one), `SSPR_TIMING=1` times project/resolve on
+the Mac GPU (50 dispatches per command buffer; only ratios carry over),
+`SSPR_KEYS=prefix` dumps the key buffer and the debug record.
+Known failing, not regressions: gaze pairs that differ in pitch/yaw at
+views 62/63, 71–74 and 81–88 (4–7/255; the mirror holds only what is on
+screen) and the probe view at 63 (13.0, probe from 62's origin).
 Known limit: the device composite runs at ~2.3× the engine resolution with
 foveation; some artifacts (box moiré) never reproduced on the Mac.
 
@@ -129,6 +177,10 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
 - 51 (1160 −390, yaw ≈45, pitch ≈35: bench face meeting the flood — comb).
 - 61 (1170 −330 looking down), 62/63 (1110 −330 −540, pitch ≈35).
 - 71–74 (1230 −400, yaw 199, pitch 0/12/25/37: steel table, pitch series).
+- 81–88 (eye 963 −471 −514 = origin z −542, yaw 15.2: the device's
+  transparent-table view; pitch −2/3/8/15/23/33, 87 −5, 88 11.6); probe 81.
+  Groups as run: 9 10 11 +probe9; 31 32 33 +31; 41 +41; 51 +51; 61 +61;
+  62 63 +62; 71–74 +71; 81–88 +81 (one probe per run: the first).
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
 Each dump needs its own probe (`r_vrprobedump`) from the same origin.
 
@@ -140,8 +192,11 @@ SDL_MAC_BACKGROUND_APP=1 timeout 150 ./xash3d -game valve -dev 1 -window -nomsgb
 ```
 Keep `valve/video.cfg` at `fullscreen "0"` (else dumps are 5120×2880).
 cfg: `sv_cheats 1; sv_enttools_enable 1; r_vrglass 1; r_vrwater 1; map c1a2;`
-wait chains (`alias w1 "wait;…×100"`), `noclip; host_framerate 0.01;
-cl_yawspeed 100; ent_fire 1 set origin "x y z"` (exact; eye = origin+28),
+wait chains (`alias w1 "wait;…×100"`), `noclip; god; host_framerate 0.01;
+cl_yawspeed 100; ent_fire 1 set origin "x y z"` (exact; eye = origin+28;
+`god` because the c1a2 flood is electrified and kills a player standing in
+it mid-script; spawn view is yaw 180, pitch −2; at `cl_yawspeed 10` /
+`cl_pitchspeed 10` a held key turns ≈0.1°/frame),
 turn with `+left/+right` N waits (≈1°/frame after a ramp), pitch `+lookdown`,
 then `r_vrdump N`, `r_vrprobedump N`, `quit`. A generator lives in the
 session scratchpad only (mk.py); recreate as needed. `impulse 101` gives a
@@ -155,6 +210,12 @@ viewmodel.
 - probe face (256², old): gProbe 2.2 GPU / 0.6 CPU; now 128², no dlights
 - b2e7e18 adds the 8-step march per resolve texel near water: expect the
   resolve +0.2–0.4 ms (≈1.0–1.2), not measured.
+- round 11 vs b2e7e18 on the Mac GPU (`SSPR_TIMING=1`): project ×1.25–1.4
+  (four neighbour depth reads for facing), resolve ×0.9–1.2 (march gone;
+  occluder tests only short of the chosen sample). Against the device's
+  project 0.39 / resolve 0.77 / fill 0.03: expect ≈0.5 + ≈0.9 + 0.03 ≈
+  1.45 ms. A first version that tested occluders on every sub-ray cost
+  resolve ×2.2.
 
 ## Rules that bit before
 - Mac engine runs must use the background/no-mouse flags above.

@@ -485,7 +485,8 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // viewmodel or anything mirrored behind the eye is dropped; W is mirrored to
 // W' = (W.x, W.y, 2h − W.z) and projected back into the same eye, and the
 // texel it lands on keeps, by atomic min, the key of the nearest such point:
-// its mirrored distance (12 bits, log scale) over its source texel (10 + 10).
+// its mirrored distance (11 bits, log scale), an occluder flag (a back face,
+// below) and its source texel (10 + 10).
 // ssprResolve: each target texel decodes its key (or, if empty, the nearest
 // of its four neighbours', filling the gaps a forward projection leaves),
 // samples the engine image at the source and writes it premultiplied by a
@@ -507,6 +508,22 @@ static inline uint3 ssprSize(texture2d_array<half> colorMap, constant DisplayPar
 {
     const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 4;
     return uint3((colorMap.get_width() + div - 1) / div, (colorMap.get_height() + div - 1) / div, div);
+}
+
+#ifndef SSPR_BACKFACE
+#define SSPR_BACKFACE 0.1   // cosine past which a source faces away from the mirrored eye (an occluder)
+#endif
+
+// The world point an engine pixel shows (its depth along its own ray).
+static inline float3 ssprPoint(depth2d_array<float> engineDepth, int2 pix, ushort eye, constant DisplayParams &p)
+{
+    const int2 dsize = int2(engineDepth.get_width(), engineDepth.get_height());
+    pix = clamp(pix, int2(0), dsize - 1);
+    const float ndc = engineDepth.read(uint2(pix), eye) * 2.0 - 1.0;
+    const float zn = p.probeMix.y, zf = p.probeMix.z;
+    const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
+    const float3 d = glassViewRay((float2(pix) + 0.5) / float2(dsize), eye, p);
+    return p.glassEye[eye][0].xyz + d * (z / dot(d, p.glassEye[eye][1].xyz));
 }
 
 kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
@@ -531,10 +548,11 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     // pixels hold the pane's colour over what is behind it (they write no
     // depth), and the warped water texture mirrored at the grid's rate came
     // out as moiré on the headset (the c1a2 sink's water box in the flood).
+    // What is behind them still occludes, though (below).
+    bool marked;
     {
         const uint2 ssize = uint2(engineStencil.get_width(), engineStencil.get_height());
-        if (engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r >= 16)
-            return;
+        marked = engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r >= 16;
     }
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
@@ -554,8 +572,40 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     const uint2 target = min(uint2(uv2 * float2(size.xy)), size.xy - 1);
     if (!ssprIsWater(engineStencil, (float2(target) + 0.5) / float2(size.xy), eye, p))
         return;
-    const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 4095.0);
-    const uint key = (dist << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
+    // Back faces. The reflected ray always travels upward, so it meets a
+    // surface the eye sees from above (a table top, a counter) from below —
+    // its back. In the mirrored scene such a point is a back face behind the
+    // object's underside, which is never on screen: mirrored as a colour, the
+    // top showed through as the underside, and where its sparse texels left
+    // gaps the room behind the table won them (the table looked transparent,
+    // in rows, on the headset). Such a point is stored as an occluder instead
+    // ("hole": nearer than the room behind it, so it wins those texels, and
+    // the resolve sends rays it blocks to the probe). Facing comes from the
+    // engine depth's neighbours (the other side of an axis where one side
+    // steps off an edge, so the edge does not bend it), against the mirrored
+    // eye: the reflected ray arrives from there.
+    uint hole = 0;
+    {
+        const int2 c = int2(min(uint2(uv * float2(dsize)), dsize - 1));
+        const float3 W0 = ssprPoint(engineDepth, c, eye, p);
+        const float edge = 0.5 + 0.02 * z;      // a step this long between neighbours is an edge
+        float3 dx = ssprPoint(engineDepth, c + int2(1, 0), eye, p) - W0;
+        if (length_squared(dx) > edge * edge) dx = W0 - ssprPoint(engineDepth, c - int2(1, 0), eye, p);
+        float3 dy = ssprPoint(engineDepth, c + int2(0, 1), eye, p) - W0;
+        if (length_squared(dy) > edge * edge) dy = W0 - ssprPoint(engineDepth, c - int2(0, 1), eye, p);
+        float3 n = cross(dx, dy);
+        if (dot(n, E - W0) < 0.0) n = -n;                 // the side the eye sees
+        const float3 mirroredEye = float3(E.xy, 2.0 * height - E.z);
+        if (dot(normalize(n + 1e-9), normalize(mirroredEye - W0)) < -SSPR_BACKFACE)
+            hole = 1;
+    }
+    // behind glass or water only an occluder is kept (the c1a2 counter top
+    // under the sink's water box: without it the room showed through the
+    // counter there)
+    if (marked && hole == 0)
+        return;
+    const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 2047.0);
+    const uint key = (dist << 21) | (hole << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
     atomic_fetch_min_explicit(&keys[(uint(eye) * size.y + target.y) * size.x + target.x], key, memory_order_relaxed);
 }
 
@@ -568,14 +618,11 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
 #ifndef SSPR_FILL
 #define SSPR_FILL 8u    // rows searched up and down for a surface to fill a gap
 #endif
-#ifndef SSPR_MARCH
-#define SSPR_MARCH 8    // steps of the hidden-surface march per texel
-#endif
-#ifndef SSPR_THICK
-#define SSPR_THICK 16.0 // units behind on-screen geometry a ray counts as hitting its hidden side
+#ifndef SSPR_SLAB
+#define SSPR_SLAB 4.0   // units under an occluder's surface where a ray counts as inside it (a steel table top's thickness)
 #endif
 #ifndef SSPR_CANDIDATES
-#define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
+#define SSPR_CANDIDATES 5   // surfaces: this texel's key, then the one below and above, then right and left (plus two occluders)
 #endif
 
 // The key buffer's reset to "empty", four keys per thread (a compute pass
@@ -622,43 +669,59 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     // surface the eye barely sees — a face just above the water, the
     // underside an overhang hides — must cover many mirror rows: the headset
     // showed those as a comb of alternating rows that the ripple then
-    // dragged across the water. Each gap texel now finds the surface above
-    // or below it, and the exact-ray check below decides which one.
-    uint cand[5] = { keys[i], 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
-    for (uint k = 1; k <= SSPR_FILL && gid.y + k < size.y; k++)
-        if (keys[i + k * size.x] != 0xFFFFFFFFu) { cand[1] = keys[i + k * size.x]; break; }
-    for (uint k = 1; k <= SSPR_FILL && gid.y >= k; k++)
-        if (keys[i - k * size.x] != 0xFFFFFFFFu) { cand[2] = keys[i - k * size.x]; break; }
+    // dragged across the water. "Nearest" is by distance (the key's high
+    // bits), not by rows: a gap the room behind a table filled must still
+    // see the table's occluder a few rows away. The exact-ray check below
+    // decides which candidate each ray really meets.
+    uint cand[7] = { keys[i], 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+    for (uint k = 1; k <= SSPR_FILL && gid.y + k < size.y; k++) {
+        const uint key = keys[i + k * size.x];
+        if ((key >> 20) & 1u) cand[5] = min(cand[5], key); else cand[1] = min(cand[1], key);
+    }
+    for (uint k = 1; k <= SSPR_FILL && gid.y >= k; k++) {
+        const uint key = keys[i - k * size.x];
+        if ((key >> 20) & 1u) cand[6] = min(cand[6], key); else cand[2] = min(cand[2], key);
+    }
     if (gid.x + 1 < size.x) cand[3] = keys[i + 1];
     if (gid.x > 0)          cand[4] = keys[i - 1];
-    if (min(min(cand[0], cand[1]), min(min(cand[2], cand[3]), cand[4])) == 0xFFFFFFFFu) {
+    if (min(min(min(cand[0], cand[1]), min(cand[2], cand[3])), min(cand[4], min(cand[5], cand[6]))) == 0xFFFFFFFFu) {
         mirror.write(half4(0.0h), gid.xy, gid.z);
         return;
     }
-    // Each candidate's world point (its source texel's depth).
+    // Each candidate's world point (its source texel's depth). Occluders
+    // (ssprProject's back faces) are kept apart from surfaces.
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
     const float height = p.sspr[eye].y;
     const float4 t = p.eyeTangents[eye];
     const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
     const float zn = p.probeMix.y, zf = p.probeMix.z;
-    float3 Wc[5];
-    bool valid[5];
-    int candidates = 0;
-    for (int k = 0; k < 5; k++) {
-        valid[k] = k < SSPR_CANDIDATES && cand[k] != 0xFFFFFFFFu;
-        Wc[k] = 0.0;
-        if (!valid[k]) continue;
+    // Surfaces (their world points and own sources) and occluders (their
+    // heights: one is tested only at its height, so another at the same
+    // height — the rest of a level top — adds nothing), packed.
+    float3 Ws[5];
+    float2 Wsrc[5];
+    float hz[2];
+    int ns = 0, nh = 0;
+    for (int k = 0; k < 7; k++) {
+        if (cand[k] == 0xFFFFFFFFu || (k >= SSPR_CANDIDATES && k < 5)) continue;
+        const bool isHole = ((cand[k] >> 20) & 1u) != 0;
         const float2 src = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
         const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
         const float3 dk = glassViewRay(src, eye, p);
-        Wc[k] = E + dk * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(dk, F));
-        // a neighbour on the same surface (about the same distance) adds
-        // nothing: one candidate covers it, and needs no check below
-        for (int m = 0; m < k; m++)
-            if (valid[m] && abs(length(Wc[m] - E) - length(Wc[k] - E)) < 2.0 + 0.02 * length(Wc[m] - E))
-                valid[k] = false;
-        if (valid[k]) candidates++;
+        const float3 W = E + dk * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(dk, F));
+        bool fresh = true;
+        if (isHole) {
+            for (int m = 0; m < nh; m++)
+                if (abs(hz[m] - W.z) < 1.0) fresh = false;
+            if (fresh && nh < 2) hz[nh++] = W.z;
+        } else {
+            // a neighbour on the same surface (about the same distance) adds
+            // nothing: one candidate covers it
+            for (int m = 0; m < ns; m++)
+                if (abs(length(Ws[m] - E) - length(W - E)) < 2.0 + 0.02 * length(Ws[m] - E)) fresh = false;
+            if (fresh && ns < 5) { Ws[ns] = W; Wsrc[ns] = src; ns++; }
+        }
     }
     // The texel covers several engine pixels and the boundary between two
     // mirrored surfaces can cross it: one sample per texel, taken at the
@@ -671,44 +734,17 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     // there: the candidate whose check lands back on the ray is the surface
     // that ray really mirrors. Its colour is sampled at that exact,
     // continuously moving coordinate, and the samples are averaged.
-    // Hidden surfaces: the underside of a table is never on screen (the eye
-    // sees its top), so nothing mirrors into its footprint but the
-    // background past its edge — a table that looked transparent, more or
-    // less depending on head pitch, on the headset. March this texel's
-    // reflected ray (from the water under its centre) up to the farthest
-    // candidate: where it passes just behind on-screen geometry above the
-    // water (within SSPR_THICK of it), it would hit a surface the eye cannot
-    // see, and the texel is left to the probe.
-    float hidden = 0.0;
-    {
-        const float3 d0 = glassViewRay((float2(gid.xy) + 0.5) / float2(size.xy), eye, p);
-        if (d0.z < -1e-4) {
-            const float3 P0 = E + d0 * ((height - E.z) / d0.z);
-            const float3 r0 = float3(d0.x, d0.y, -d0.z);
-            float reach = 0.0;
-            for (int k = 0; k < 5; k++)
-                if (valid[k]) reach = max(reach, dot(Wc[k] - P0, r0));
-            reach = min(reach, 2048.0);
-            for (int k = 1; k <= SSPR_MARCH && hidden == 0.0; k++) {
-                const float3 X = P0 + r0 * (reach * float(k) / float(SSPR_MARCH + 1));
-                const float3 q = X - E;
-                const float qz = dot(q, F);
-                if (qz < 4.0) break;
-                const float2 xs = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
-                if (any(xs < 0.0) || any(xs >= 1.0)) break;
-                const float ndc = engineDepth.read(min(uint2(xs * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
-                const float zv = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
-                const float3 dv = glassViewRay(xs, eye, p);
-                const float3 V = E + dv * (zv / dot(dv, F));
-                if (V.z > height + 1.0 && qz > zv + 1.0 && qz < zv + SSPR_THICK + 0.02 * zv)
-                    hidden = 1.0;
-            }
-        }
-    }
-    if (hidden > 0.0) {
-        mirror.write(half4(0.0h), gid.xy, gid.z);
-        return;
-    }
+    // Occluders: short of the surface chosen, the ray is checked where it
+    // climbs to each occluder's height and to SSPR_SLAB under it: if a
+    // surface on screen there is on or in front of the ray's point and no
+    // higher than the occluder, the ray has run into the object from below —
+    // a table's underside, which no frame holds. The nearest surface short
+    // of that point is shown instead, or nothing (the probe fills in). Each
+    // ray decides for itself, so the edge of an occluded patch follows the
+    // geometry instead of the mirror's rows. (b2e7e18 marched each texel's
+    // centre ray in 8 even steps up to the farthest candidate instead: the
+    // steps jumped over a thin table top, and the headset still saw through
+    // it.)
     half3 sum = 0.0h;
     float conf = 0.0;
     for (int sj = 0; sj < SSPR_SUB_Y; sj++) {
@@ -718,46 +754,84 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             if (d.z > -1e-4) d = float3(d.xy, -1e-4);
             const float3 P = E + d * ((height - E.z) / d.z);
             const float3 r = float3(d.x, d.y, -d.z);
-            float best = 1e30;
+            float best = 1e30, bestLen = -1.0;
             float2 bestSrc = float2(-1.0);
-            // if no candidate checks out (the ray's point lands on the water
-            // itself, or off the frame), the first candidate's own source
-            // stands in: a skipped sample left the texel part-empty, and
-            // texels of uneven coverage showed as fine horizontal hatching
-            // and dark smudges on the headset
-            float2 fallback = float2(-1.0);
-            for (int k = 0; k < 5 && fallback.x < 0.0; k++)
-                if (valid[k]) fallback = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
+            float sMiss[5], sLen[5];
+            float2 sSrc[5];
             float2 exactSum = 0.0;
             float exactN = 0.0;
-            for (int k = 0; k < 5; k++) {
-                if (!valid[k]) continue;
-                const float along = max(dot(Wc[k] - P, r), 0.0);
+            for (int k = 0; k < ns; k++) {
+                sLen[k] = 1e30; sMiss[k] = 1e30; sSrc[k] = float2(-1.0);
+                const float along = max(dot(Ws[k] - P, r), 0.0);
                 const float3 q = P + r * along - E;
                 const float qz = dot(q, F);
                 if (qz < 4.0) continue;
                 const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
                 exactSum += src; exactN += 1.0;
                 if (any(src < 0.0) || any(src >= 1.0)) continue;
-                if (candidates == 1) { bestSrc = src; break; }     // one surface: no check needed
+                if (ns == 1) { bestSrc = src; best = 0.0; continue; }   // one surface: no check needed
                 const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
                 const float3 ds = glassViewRay(src, eye, p);
                 const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
                 const float3 off = A - P;
                 const float miss = length(off - r * dot(off, r)) + 0.01 * along;   // nearer wins a tie
-                if (A.z > height && miss < best) { best = miss; bestSrc = src; }
+                if (A.z <= height) continue;
+                sMiss[k] = miss; sLen[k] = length(off); sSrc[k] = src;
+                if (miss < best) { best = miss; bestSrc = src; bestLen = sLen[k]; }
             }
+            // if no surface checks out (the ray's point lands on the water
+            // itself, or off the frame), the first surface's own source
+            // stands in: a skipped sample left the texel part-empty, and
+            // texels of uneven coverage showed as fine horizontal hatching
+            // and dark smudges on the headset
+            if (bestSrc.x < 0.0 && ns > 0) { bestSrc = Wsrc[0]; bestLen = -1.0; }
+            if (nh > 0) {
+                // how far along the ray the sample really is: the surface on
+                // screen at bestSrc (for an unverified candidate that can lie
+                // far past the candidate's own distance)
+                if (bestSrc.x >= 0.0 && bestLen < 0.0) {
+                    const float ndc = engineDepth.read(min(uint2(bestSrc * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                    const float3 ds = glassViewRay(bestSrc, eye, p);
+                    bestLen = length(E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F)) - P);
+                }
+                const float reach = bestSrc.x >= 0.0 ? bestLen - 2.0 : 1e30;
+                float blocked = 1e30;
+                for (int k = 0; k < nh; k++) {
+                    for (int lv = 1; lv >= 0 && blocked > 1e29; lv--) {
+                        const float along = max((hz[k] - SSPR_SLAB * float(lv) - P.z) / max(r.z, 1e-4), 0.0);
+                        if (along >= reach) continue;
+                        const float3 q = P + r * along - E;
+                        const float qz = dot(q, F);
+                        if (qz < 4.0) continue;
+                        const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
+                        if (any(src < 0.0) || any(src >= 1.0)) continue;
+                        const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                        const float zv = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
+                        const float3 ds = glassViewRay(src, eye, p);
+                        const float Az = E.z + ds.z * (zv / dot(ds, F));
+                        if (Az > height + 1.0 && qz > zv - (1.0 + 0.01 * zv) && Az < hz[k] + 1.0 + 0.01 * zv)
+                            blocked = along;
+                    }
+                }
+                if (blocked < 1e29) {
+                    // the nearest-checking surface short of the occluder,
+                    // or nothing: the ray has run into the object
+                    best = 1e30; bestSrc = float2(-1.0);
+                    for (int k = 0; k < ns; k++)
+                        if (sLen[k] < blocked + 2.0 && sMiss[k] < best) { best = sMiss[k]; bestSrc = sSrc[k]; }
+                    if (bestSrc.x < 0.0) continue;
+                }
+            }
+            if (bestSrc.x < 0.0) continue;
             // The confidence follows where this ray's mirrored point would be
-            // in the frame — the mean of every candidate's exact projection,
+            // in the frame — the mean of every surface's exact projection,
             // in the frame or not — which moves smoothly from texel to texel,
             // as neighbouring texels share candidates. Taken from the chosen
             // sample's source instead, it jumped between neighbouring rows
             // that chose surfaces at different distances from the frame's
             // edge: wavy bands of confidence in a sharp-edged patch on the
             // headset, where the mirror runs out at the top of the view.
-            if (bestSrc.x < 0.0) bestSrc = fallback;
             const float2 confAt = exactN > 0.0 ? exactSum / exactN : bestSrc;
-            if (bestSrc.x < 0.0) continue;
             const float2 edge = min(confAt, 1.0 - confAt);
             const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));
             // A 2 × 2-pixel box around the sample (four bilinear taps half a

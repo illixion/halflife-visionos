@@ -216,9 +216,19 @@ instead of deleting them.
   The resolve fills mirror gaps from up to 8 rows away. DepthProbe's new
   per-tile comb check at 2× fails aadfa42. See
   `docs/plans/modern-lighting.md` (3l).
-- **Sharp water, round 10 (b2e7e18): device check pending.** Smooth
-  confidence, ripple-free coverage, and a hidden-surface march for the
-  table-underside comb/transparency. Handoff: `docs/plans/sharp-water-handoff.md`.
+- **Sharp water, round 10 (b2e7e18):** smooth confidence, ripple-free
+  coverage, and a hidden-surface march for the table-underside
+  comb/transparency. The headset still saw through the c1a2 steel table
+  (the march's 8 even steps jumped over its thin top).
+- **Sharp water, round 11: see-through fixed offline, device check
+  pending.** Cause: a table top seen from above is a back face to the
+  reflected ray, and its sparse mirrored texels left gaps the room behind
+  won by atomic min. The projection now stores back faces as occluders; the
+  resolve stops each sub-ray where it climbs into one (at the occluder's
+  height and 4 units under it) and shows the nearest surface short of that,
+  or the probe. DepthProbe's new see-through check (fine trace, 3% rule)
+  fails b2e7e18 at the table's -5…33° pitch series (6–19%); now 1.5–2.2%,
+  every view ≤ 2.9%. Handoff: `docs/plans/sharp-water-handoff.md`.
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
