@@ -62,6 +62,12 @@ private enum MenuPinch {
     static var clicked = Set<SpatialEventCollection.Event.ID>()
 }
 
+// Pinches already counted as a bid for hands mode (once per pinch; .active
+// repeats every frame).
+private enum HandBid {
+    static var seen = Set<SpatialEventCollection.Event.ID>()
+}
+
 // Pinches that landed on a palm debug panel button (a tracking area). They
 // act once, on the first .active, and never fire or click the menu.
 private enum PanelPinch {
@@ -147,6 +153,10 @@ struct ImmersiveSpaceContent: CompositorContent {
                 // window), and must NOT fire the weapon.
                 let menuActive = lambda_menu_active() != 0
                 for event in events {
+                    // A mouse click can also arrive as a pointer event; with a
+                    // mouse connected GCMouse owns clicks (MouseInput), so it
+                    // must not fire or click the menu twice.
+                    if event.kind == .pointer, MouseInput.connected { continue }
                     // A pinch on a palm debug panel button: the system routed
                     // it to that tracking area, so it is the button's — not
                     // the trigger's, not the menu's.
@@ -180,6 +190,13 @@ struct ImmersiveSpaceContent: CompositorContent {
                             }
                             continue
                         }
+                        // A look-and-pinch is the hands' bid for the input mode;
+                        // outside hands mode it doesn't fire (the hands have
+                        // stepped aside for the keyboard, mouse or gamepad).
+                        if HandBid.seen.insert(event.id).inserted {
+                            InputModeState.deviceUsed(.hands, now: CACurrentMediaTime())
+                        }
+                        if InputModeState.current != .hands { continue }
                         // When immersive gesture input is on, the render-thread
                         // gestures own both hands (dominant index-curl fires,
                         // off-hand pinch drives the joystick), so the pinch must
@@ -195,6 +212,7 @@ struct ImmersiveSpaceContent: CompositorContent {
                             _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
                         }
                     case .ended, .cancelled:
+                        HandBid.seen.remove(event.id)
                         if menuActive { MenuPinch.clicked.remove(event.id); continue }
                         if PinchFire.active.remove(event.id) != nil,
                            PinchFire.active.isEmpty {

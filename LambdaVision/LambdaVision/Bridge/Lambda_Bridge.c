@@ -2765,6 +2765,15 @@ int lambda_menu_active(void) {
     return atomic_load(&g_menu_active);
 }
 
+// Cached Con_Visible(): the console is down. Mouse look and the app-side
+// snap-turn keys stand down while it is, so typing and the mouse don't turn
+// the view.
+static _Atomic int g_console_active;
+
+int lambda_console_active(void) {
+    return atomic_load(&g_console_active);
+}
+
 // GL worker, each frame BEFORE the tick.
 static void lambda_menu_input_apply(void) {
     extern void UI_MouseMove(int x, int y);
@@ -2782,7 +2791,9 @@ static void lambda_menu_input_apply(void) {
 // GL worker, each frame AFTER the tick — publish menu visibility for Swift.
 static void lambda_menu_state_publish(void) {
     extern int UI_IsVisible(void);
+    extern int Con_Visible(void);
     atomic_store(&g_menu_active, UI_IsVisible());
+    atomic_store(&g_console_active, Con_Visible());
 }
 
 // ---- Hardware keyboard → engine key/char events ---------------------------
@@ -3769,8 +3780,10 @@ static int worker_engine_frame(void) {
         // cursor/clicks — all BEFORE the tick.
         lambda_render_size_apply();
         lambda_cmd_queue_apply();
-        lambda_key_queue_apply();
+        // Cursor before keys: a mouse click (a K_MOUSE1 key event the
+        // engine routes to the menu) lands where the mouse moved it.
         lambda_menu_input_apply();
+        lambda_key_queue_apply();
         double t0 = ft_now_ms();
         lambda_engine_frame();
         double t1 = ft_now_ms();

@@ -422,6 +422,8 @@ void lambda_clear_hand_pose(void);
 void lambda_menu_set_cursor(int x, int y);
 void lambda_menu_click(void);
 int  lambda_menu_active(void);
+// Nonzero while the engine console is down (cached Con_Visible()).
+int  lambda_console_active(void);
 
 // Hardware keyboard → engine input (KeyboardInput.swift). Forward key events
 // (xash keynums, lowercase-ascii for printable keys; see engine keydefs.h)

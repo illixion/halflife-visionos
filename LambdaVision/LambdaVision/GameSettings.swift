@@ -166,7 +166,9 @@ final class GameSettings {
     /// where shots go only when they follow the gaze; with barrel aim it is
     /// a mark stuck on the view that nothing lands on (the aim reticle does
     /// that job, and stands down in gaze mode).
-    private var stockCrosshair: Int { fireAimMode == .gaze ? 1 : 0 }
+    /// Outside hands mode shots follow the view, so it is the aim mark
+    /// there too (the render thread re-pushes it when the mode changes).
+    private var stockCrosshair: Int { fireAimMode == .gaze || InputModeState.current != .hands ? 1 : 0 }
     /// Flashlight mounted on the weapon hand (default) or the stock headlamp.
     var flashlightOnGun: Bool = AppSettingsStore.flashlightOnGun {
         didSet { AppSettingsStore.flashlightOnGun = flashlightOnGun
@@ -249,6 +251,34 @@ final class GameSettings {
                  Renderer.weaponWorldModel = (weaponModel == .world) }
     }
 
+    // MARK: Keyboard, mouse and gamepad
+    /// Hands / keyboard+mouse / gamepad, or Auto from the last device used
+    /// (InputModeState).
+    var inputMode: InputModeSetting = AppSettingsStore.inputMode {
+        didSet { AppSettingsStore.inputMode = inputMode
+                 InputModeState.setting = inputMode }
+    }
+    /// Half-Life's mouse `sensitivity` scale (degrees per count = × 0.022).
+    var mouseSensitivity: Double = AppSettingsStore.mouseSensitivity {
+        didSet { AppSettingsStore.mouseSensitivity = mouseSensitivity
+                 MouseInput.sensitivity = Float(mouseSensitivity) }
+    }
+    /// Right stick turns smoothly; off = snap turn by the snap-turn angle.
+    var stickSmoothTurn: Bool = AppSettingsStore.stickSmoothTurn {
+        didSet { AppSettingsStore.stickSmoothTurn = stickSmoothTurn
+                 GamepadInput.smoothTurn = stickSmoothTurn }
+    }
+    /// Smooth-turn rate at full stick, degrees per second.
+    var stickTurnSpeed: Double = AppSettingsStore.stickTurnSpeed {
+        didSet { AppSettingsStore.stickTurnSpeed = stickTurnSpeed
+                 GamepadInput.turnSpeed = Float(stickTurnSpeed) }
+    }
+    /// Mouse and right-stick Y look up and down (outside hands mode).
+    var lookPitch: Bool = AppSettingsStore.lookPitch {
+        didSet { AppSettingsStore.lookPitch = lookPitch
+                 Renderer.lookPitchEnabled = lookPitch }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -274,6 +304,11 @@ final class GameSettings {
         Renderer.aimReticle = aimReticle.style
         Renderer.weaponWorldModel = (weaponModel == .world)
         Renderer.debugPanelEnabled = developerMode
+        InputModeState.setting = inputMode
+        MouseInput.sensitivity = Float(mouseSensitivity)
+        GamepadInput.smoothTurn = stickSmoothTurn
+        GamepadInput.turnSpeed = Float(stickTurnSpeed)
+        Renderer.lookPitchEnabled = lookPitch
         applyHEVHUD()
     }
 

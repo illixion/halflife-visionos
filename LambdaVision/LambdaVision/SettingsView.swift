@@ -145,6 +145,33 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("Input mode", selection: $settings.inputMode) {
+                        ForEach(InputModeSetting.allCases) { Text($0.label).tag($0) }
+                    }
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text("Now: \(InputModeState.current.label)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    slider("Mouse sensitivity", $settings.mouseSensitivity, 0.5...10, 0.5) {
+                        String(format: "%.1f", $0)
+                    }
+                    Toggle("Smooth stick turning", isOn: $settings.stickSmoothTurn)
+                    slider("Stick turn speed", $settings.stickTurnSpeed, 45...240, 15) {
+                        String(format: "%.0f°/s", $0)
+                    }
+                    .disabled(!settings.stickSmoothTurn)
+                    Toggle("Look up/down with mouse and stick", isOn: $settings.lookPitch)
+                    DisclosureGroup("Controls") {
+                        ControlsReferenceView()
+                    }
+                } header: {
+                    Text("Keyboard, mouse & gamepad")
+                } footer: {
+                    Text("“Input mode” on Auto follows the last thing you used: a key, the mouse or the gamepad switches to it at once, and a look-and-pinch brings the hands back (once the other device has been still for a second). With a keyboard, mouse or gamepad the game plays like the desktop original in stereo: the weapon is the classic viewmodel in front of you, shots go where you look (the crosshair marks it), the body’s arms stop following your hands and the hand gestures rest. Movement always reaches full run speed. The mouse and the right stick turn you smoothly; Z and X snap-turn. “Look up/down” adds mouse and stick pitch to your head’s; it tilts the game’s horizon away from the room’s, which some find uncomfortable, and hides the first-person body while a tilt is set. Rebind keys in the game’s menu (Configuration › Controls).")
+                }
+
+                Section {
                     // Open the stock menu at its main screen and let the
                     // player navigate. (Jumping straight to menu_options /
                     // menu_multiplayer pops the first-run "player name" box.)

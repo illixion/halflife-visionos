@@ -202,4 +202,36 @@ enum AppSettingsStore {
         }
         set { defaults.set(newValue, forKey: developerModeKey) }
     }
+
+    // MARK: Keyboard, mouse and gamepad
+    private static let inputModeKey        = "lambdavision.settings.inputMode"
+    private static let mouseSensitivityKey = "lambdavision.settings.mouseSensitivity"
+    private static let stickSmoothTurnKey  = "lambdavision.settings.stickSmoothTurn"
+    private static let stickTurnSpeedKey   = "lambdavision.settings.stickTurnSpeed"
+    private static let lookPitchKey        = "lambdavision.settings.lookPitch"
+
+    static var inputMode: InputModeSetting {
+        get {
+            guard let raw = defaults.string(forKey: inputModeKey),
+                  let v = InputModeSetting(rawValue: raw) else { return .auto }
+            return v
+        }
+        set { defaults.set(newValue.rawValue, forKey: inputModeKey) }
+    }
+    static var mouseSensitivity: Double {
+        get { double(mouseSensitivityKey, 3) }    // Half-Life's `sensitivity` default
+        set { defaults.set(newValue, forKey: mouseSensitivityKey) }
+    }
+    static var stickSmoothTurn: Bool {
+        get { bool(stickSmoothTurnKey, true) }
+        set { defaults.set(newValue, forKey: stickSmoothTurnKey) }
+    }
+    static var stickTurnSpeed: Double {
+        get { double(stickTurnSpeedKey, 100) }    // the engine's `joy_yaw` default
+        set { defaults.set(newValue, forKey: stickTurnSpeedKey) }
+    }
+    static var lookPitch: Bool {
+        get { bool(lookPitchKey, false) }
+        set { defaults.set(newValue, forKey: lookPitchKey) }
+    }
 }
