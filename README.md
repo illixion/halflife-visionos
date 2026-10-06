@@ -290,6 +290,7 @@ is played with hand tracking:
 | Aim | Point the weapon hand; the hand-tracked weapon follows it |
 | Fire | Curl your dominant index finger (finger-gun) |
 | Reload | Curl your thumb down with the index extended, hold until the ring fills |
+| Alt-fire | Press your thumb tip against the side of your curled middle finger (index still pointing); held while it stays there (Settings → *Alt-fire: thumb to middle finger*) |
 | Move | Pinch thumb+index with the other hand and drag like a joystick |
 | Jump / crouch | Raise or drop the pinched hand |
 | Long jump | Jump at a full run once you have the long jump module (Settings → *Long jump at a run*) |
@@ -313,8 +314,10 @@ the pinch joystick:
 *Swing direction* picks whether you go where you look or where your fists
 point, and *Swing sensitivity* (0.5×–2×) sets how hard you need to swing.
 
-Hand tracking has no flashlight, alt-fire or quick save gesture yet (see
-ISSUES.md); use a keyboard or gamepad for those.
+Alt-fire and reload are both thumb gestures: after one, lift the thumb before
+the other. Curl the index while holding alt-fire to press both buttons.
+*Alt-fire sensitivity* sets how close the thumb has to come; lower it if
+reloading sets off alt-fire.
 
 ### Keyboard, mouse and gamepad
 

@@ -235,6 +235,17 @@ final class GameSettings {
         didSet { AppSettingsStore.wheelUtilities = wheelUtilities
                  Renderer.weaponWheelUtilities = wheelUtilities }
     }
+    /// Thumb tip to the side of the middle finger holds +attack2
+    /// (ThumbGestures). Only does anything while gesture input is on.
+    var altFireGesture: Bool = AppSettingsStore.altFireGesture {
+        didSet { AppSettingsStore.altFireGesture = altFireGesture
+                 Renderer.altFireGestureEnabled = altFireGesture }
+    }
+    /// Scales the alt-fire contact distances: higher presses from farther.
+    var altFireSensitivity: Double = AppSettingsStore.altFireSensitivity {
+        didSet { AppSettingsStore.altFireSensitivity = altFireSensitivity
+                 Renderer.altFireSensitivity = Float(altFireSensitivity) }
+    }
     var fastWeaponSwitch: Bool = AppSettingsStore.fastWeaponSwitch {
         didSet { AppSettingsStore.fastWeaponSwitch = fastWeaponSwitch
                  cvar("hud_fastswitch", fastWeaponSwitch ? 1 : 0) }
@@ -353,6 +364,8 @@ final class GameSettings {
         HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
         HandMovement.longJumpEnabled = handLongJump
         Renderer.weaponWheelUtilities = wheelUtilities
+        Renderer.altFireGestureEnabled = altFireGesture
+        Renderer.altFireSensitivity = Float(altFireSensitivity)
         Renderer.avatarBodyEnabled = avatarBody
         Renderer.avatarLegsVisible = avatarLegs
         Renderer.aimReticle = aimReticle.style

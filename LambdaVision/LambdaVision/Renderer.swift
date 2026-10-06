@@ -347,6 +347,17 @@ actor Renderer {
     nonisolated(unsafe) static var thumbCurlOn: Float = 0.45   // extension below this → hold begins
     nonisolated(unsafe) static var thumbCurlOff: Float = 0.60  // extension above this → hold cancels
     nonisolated(unsafe) static var reloadHoldSeconds: Double = 0.75
+    // Alt-fire gesture (dominant hand): thumb tip to the side of the middle
+    // finger presses +attack2, held while contact holds (ThumbGestures, which
+    // also documents how it's kept apart from reload). Distances in metres
+    // from the thumb tip to the middle finger's radial side, both scaled by
+    // the Settings sensitivity (higher = presses from farther away).
+    nonisolated(unsafe) static var altFireGestureEnabled = true
+    nonisolated(unsafe) static var altFireSensitivity: Float = 1
+    nonisolated(unsafe) static var altFireContactOn: Float = 0.020   // closer than this → press (after settle)
+    nonisolated(unsafe) static var altFireContactOff: Float = 0.032  // farther than this → release
+    nonisolated(unsafe) static var altFireSettleSeconds: Double = 0.05
+    nonisolated(unsafe) static var altFireRadialOffset: Float = 0.008 // bone centre line → finger's thumb side
     // 🤌 radial weapon menu (dominant hand): pinch ALL fingertips to the
     // thumb to open, move the hand toward a sector, release to select. One
     // sector per occupied weapon slot plus the flashlight and quick
@@ -419,6 +430,10 @@ actor Renderer {
         var fireGesture = false   // finger-gun trigger currently held
         var thumbExt: Float = 0   // live thumb extension ratio (reload gesture)
         var reloadProg: Float = 0 // reload hold progress 0..1 (0 = idle/fired)
+        var altContact: Float = -1 // thumb tip ↔ middle finger side, m (-1 = no hand)
+        var altAlong: Float = 0    // where on the middle finger (0 knuckle, 1 PIP, 2 DIP)
+        var altState = "—"         // ThumbGestures.AltState
+        var reloadLocked = false   // reload waits for the thumb to re-extend after alt-fire
         var menuSpread: Float = 0 // live 🤌 fingertip spread, m
         var menuOpen = false      // radial weapon menu currently up
         var menuSel = -1          // armed sector (0-based; -1 = none/cancel)
@@ -463,8 +478,11 @@ actor Renderer {
               + "noSkel:\(d.nNoSkeleton) noAnchor:\(d.nNoAnchor) provDown:\(d.nProviderDown)",
             String(format: "finger-gun: %@  indexExt %.2f  trigger %@",
                    d.gestureOn ? (d.keyboardInUse ? "paused (keyboard)" : "on") : "off", d.indexExt, d.fireGesture ? "DOWN" : "up"),
-            String(format: "reload: thumbExt %.2f  hold %d%%",
-                   d.thumbExt, Int(d.reloadProg * 100)),
+            String(format: "reload: thumbExt %.2f  hold %d%%%@",
+                   d.thumbExt, Int(d.reloadProg * 100), d.reloadLocked ? "  locked" : ""),
+            String(format: "alt-fire: contact %.1f cm (on %.1f / off %.1f)  along %.2f  %@",
+                   d.altContact * 100, altFireContactOn * altFireSensitivity * 100,
+                   altFireContactOff * altFireSensitivity * 100, d.altAlong, d.altState),
             String(format: "wpn menu: spread %.3f  %@  sel %@",
                    d.menuSpread, d.menuOpen ? "OPEN \(d.menuCount)" : "—",
                    d.menuSel >= 0 ? d.menuLabel : "—"),
@@ -654,6 +672,9 @@ actor Renderer {
         var thumbExtension: Float                 // thumb tip↔index knuckle / palm length; low = curled (reload)
         var pinchAllSpread: Float                 // max fingertip↔thumb-tip distance, m; low = 🤌 (weapon menu)
         var middleCurlM: Float                    // middle tip↔metacarpal, m; low = fist (menu suppressor)
+        var altContactM: Float                    // thumb tip↔middle finger radial side, m (alt-fire)
+        var altContactAlong: Float                // where on the middle finger: 0 knuckle, 1 PIP, 2 DIP
+        var thumbToIndexTipM: Float               // thumb tip↔index tip, m (alt-fire pinch guard)
     }
 
     private func sampleDominantHand(headTransform m: simd_float4x4) -> HandSample? {
@@ -740,6 +761,15 @@ actor Renderer {
         }
         let middleCurl = simd_distance(worldPos(skel.joint(.middleFingerTip)),
                                        worldPos(skel.joint(.middleFingerMetacarpal)))
+        // Alt-fire: thumb tip to the middle finger's thumb side, the
+        // knuckle → PIP → DIP line shifted toward the index knuckle.
+        let altContact = ThumbContact.measure(
+            thumbTip: pThumbTip,
+            knuckle: worldPos(midK),
+            intermediateBase: worldPos(skel.joint(.middleFingerIntermediateBase)),
+            intermediateTip: worldPos(skel.joint(.middleFingerIntermediateTip)),
+            towardIndex: worldPos(idxK),
+            radialOffset: Renderer.altFireRadialOffset)
 
         // World → head-local (rotation only for directions), then Apple →
         // xash camera basis: (x,y,z) → (-z,-x,y).
@@ -758,7 +788,10 @@ actor Renderer {
                           indexExtension: idxExt,
                           thumbExtension: thumbExt,
                           pinchAllSpread: spread,
-                          middleCurlM: middleCurl)
+                          middleCurlM: middleCurl,
+                          altContactM: altContact.distance,
+                          altContactAlong: altContact.along,
+                          thumbToIndexTipM: simd_distance(pThumbTip, worldPos(skel.joint(.indexFingerTip))))
     }
 
     /// The dominant hand as a Bip01 hand frame in GoldSrc world (inches,
@@ -1134,12 +1167,11 @@ actor Renderer {
     // the index-curl gesture, so we only send +attack/-attack on transitions.
     private var fireGestureDown = false
 
-    // Reload gesture state (render thread). reloadStart is the timestamp the
-    // thumb-curl hold began (nil = not holding); reloadLatched blocks repeat
-    // fires until the thumb re-extends; reloadRingProgress is what the
-    // weapon pass draws this frame (0 = no ring).
-    private var reloadStart: Double? = nil
-    private var reloadLatched = false
+    // Thumb gesture state (render thread): the reload hold and the
+    // thumb-to-middle-finger alt-fire (ThumbGestures). reloadRingProgress is
+    // what the weapon pass draws this frame (0 = no ring).
+    private var thumbGestures = ThumbGestures()
+    private var altFireHeld = false   // +attack2 sent by the alt-fire gesture
     // +reload is held from the moment the hold completes until the thumb
     // re-extends (or the gesture is otherwise dropped). It must span frames:
     // an argument-less -reload is hlsdk's "typed at the console, unstick"
@@ -2282,49 +2314,47 @@ actor Renderer {
             Renderer.aimDiag.gestureOn = Renderer.gestureInputEnabled
             Renderer.aimDiag.fireGesture = fireGestureDown
 
-            // Reload gesture (opt-in, dominant hand): thumb curled down while
-            // the index stays extended (off the trigger). The hold must last
-            // reloadHoldSeconds before +reload fires — the progress ring the
-            // weapon pass draws makes a stray curl visible before it commits.
-            // Hysteresis on the thumb metric; curling the index (firing)
-            // cancels the hold outright. Latched until the thumb re-extends
-            // so one hold = one reload.
-            var thumbHold = reloadStart != nil
-            if gesturesLive,
-               !weaponMenuOpen, !gunHandBusy, let hand = handSample {
+            // Thumb gestures (opt-in, dominant hand): the reload hold (thumb
+            // curled down, index extended, held reloadHoldSeconds while the
+            // ring fills, latched until the thumb re-extends) and alt-fire
+            // (thumb tip on the middle finger's side, +attack2 held while it
+            // stays there). ThumbGestures keeps the two apart; edge-only
+            // commands, held across frames (never a +x/-x pair in one frame).
+            var thumbTuning = ThumbGestures.Tuning()
+            thumbTuning.thumbCurlOn = Renderer.thumbCurlOn
+            thumbTuning.thumbCurlOff = Renderer.thumbCurlOff
+            thumbTuning.reloadHoldSeconds = Renderer.reloadHoldSeconds
+            thumbTuning.indexCurled = Renderer.fireCurlOn
+            thumbTuning.indexExtended = Renderer.fireCurlOff
+            thumbTuning.altFire = Renderer.altFireGestureEnabled
+            thumbTuning.contactOn = Renderer.altFireContactOn * Renderer.altFireSensitivity
+            thumbTuning.contactOff = Renderer.altFireContactOff * Renderer.altFireSensitivity
+            thumbTuning.settleSeconds = Renderer.altFireSettleSeconds
+            var thumbInput: ThumbGestures.Input? = nil
+            if gesturesLive, !weaponMenuOpen, !gunHandBusy, let hand = handSample {
                 Renderer.aimDiag.thumbExt = hand.thumbExtension
-                if hand.indexExtension < Renderer.fireCurlOn {
-                    thumbHold = false   // trigger pulled — never reload mid-fire
-                } else if hand.thumbExtension < Renderer.thumbCurlOn,
-                          hand.indexExtension > Renderer.fireCurlOff {
-                    thumbHold = true
-                } else if hand.thumbExtension > Renderer.thumbCurlOff {
-                    thumbHold = false
-                }
-                // else: inside a hysteresis band — keep the current state.
+                Renderer.aimDiag.altContact = hand.altContactM
+                Renderer.aimDiag.altAlong = hand.altContactAlong
+                thumbInput = ThumbGestures.Input(indexExt: hand.indexExtension,
+                                                 thumbExt: hand.thumbExtension,
+                                                 contact: hand.altContactM,
+                                                 along: hand.altContactAlong,
+                                                 thumbToIndexTip: hand.thumbToIndexTipM)
             } else {
-                thumbHold = false
+                Renderer.aimDiag.altContact = -1
             }
-            if thumbHold {
-                if reloadStart == nil { reloadStart = presentTime }
-                let prog = Float(min((presentTime - reloadStart!) / Renderer.reloadHoldSeconds, 1.0))
-                if prog >= 1, !reloadLatched {
-                    reloadLatched = true
-                    reloadHeld = true
-                    _ = "+reload".withCString { lambda_gl_worker_cmd($0) }
-                }
-                // Hide the ring once fired: the full ring vanishing is the
-                // "it took" cue; holding longer must not re-arm.
-                reloadRingProgress = reloadLatched ? 0 : prog
-            } else {
-                reloadStart = nil
-                reloadLatched = false
-                reloadRingProgress = 0
-                if reloadHeld {
-                    reloadHeld = false
-                    _ = "-reload".withCString { lambda_gl_worker_cmd($0) }
-                }
+            thumbGestures.update(thumbInput, now: presentTime, tuning: thumbTuning)
+            reloadRingProgress = thumbGestures.reloadRing
+            if thumbGestures.reload != reloadHeld {
+                reloadHeld = thumbGestures.reload
+                _ = (reloadHeld ? "+reload" : "-reload").withCString { lambda_gl_worker_cmd($0) }
             }
+            if thumbGestures.altFire != altFireHeld {
+                altFireHeld = thumbGestures.altFire
+                _ = (altFireHeld ? "+attack2" : "-attack2").withCString { lambda_gl_worker_cmd($0) }
+            }
+            Renderer.aimDiag.altState = thumbGestures.altState.rawValue
+            Renderer.aimDiag.reloadLocked = thumbGestures.reloadLocked
             Renderer.aimDiag.reloadProg = reloadRingProgress
 
             // Off-hand (non-dominant) locomotion joystick. Head axes in Apple

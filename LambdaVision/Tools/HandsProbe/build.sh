@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the hand-tracking gesture logic on the Mac against the app's own
 # sources: the weapon wheel's layout and gesture (WeaponWheel.swift), the
-# long-jump button timing (JumpSequencer.swift) and the HUD icons decoded
+# long-jump button timing (JumpSequencer.swift), the reload and alt-fire
+# thumb gestures (ThumbGestures.swift) and the HUD icons decoded
 # from the real game sprites (HUDIcon.swift).
 #
 #   ./build.sh             run every check
@@ -19,7 +20,8 @@ out="$repo/build/hands-probe"
 mkdir -p "$out"
 
 swiftc -O \
-    "$app/WeaponWheel.swift" "$app/JumpSequencer.swift" "$app/HUDIcon.swift" \
+    "$app/WeaponWheel.swift" "$app/JumpSequencer.swift" "$app/ThumbGestures.swift" \
+    "$app/HUDIcon.swift" \
     "$here/main.swift" -o "$out/probe"
 
 assets="$repo/HalfLifeAssets"
