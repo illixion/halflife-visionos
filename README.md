@@ -295,6 +295,7 @@ is played with hand tracking:
 | Jump / crouch | Raise or drop the pinched hand |
 | Long jump | Jump at a full run once you have the long jump module (Settings → *Long jump at a run*) |
 | Switch weapon | Pinch all fingertips together, move toward a weapon's icon, release; pick a slot again to cycle it |
+| Pick one weapon of a slot | On the wheel, keep moving past the rim over a slot holding several weapons: it opens into an outer arc of them; slide along it and release. Come back inside the rim to fold it (Settings → *Wheel: reach past the rim to pick a weapon*) |
 | Flashlight | Weapon wheel → LIGHT |
 | Quick save / load | Weapon wheel → SAVE, or LOAD (hold it armed until its outer arc fills) |
 | Use / buttons | Poke with the off-hand index finger; rest an open palm on chargers |
@@ -377,19 +378,32 @@ lists them under *Controls*.
 | Gamepad | Action |
 |---|---|
 | Left stick | Move |
+| Left stick click | Walk (hold) |
 | Right stick | Turn, smooth (*Stick turn speed*, 100°/s default) or snap |
+| Right stick click | Crouch toggle (B drops it) |
 | Right trigger | Fire |
 | Left trigger | Alt-fire |
 | A | Jump |
 | B | Crouch (hold, then A: long jump) |
 | X | Reload |
 | Y | Use |
-| Left shoulder | Walk |
+| Left shoulder (hold) | Weapon wheel: point the right stick at a slot, release to select |
 | Right shoulder | Last weapon |
 | D-pad ← → | Previous / next weapon |
 | D-pad ↑ | Flashlight |
+| D-pad ↓ | Spray |
 | View / Options | Tap: quick save · hold 1 s: quick load |
 | Menu | Menu |
+
+The gamepad's weapon wheel is the hand wheel's: one sector per weapon slot,
+then LIGHT, SAVE and LOAD, floating ahead of the view while the shoulder is
+held. The armed sector stays armed when the stick springs back, so a flick
+and release works; LOAD still needs holding armed until its arc fills.
+
+A mouse only reaches the game while the visionOS pointer rests on one of the
+app's windows (the launcher, Console or Performance). visionOS routes the
+mouse by window focus and offers a full immersive space no way to claim it;
+see ISSUES.md. Keep a window in view, or play with a keyboard or gamepad.
 
 *Mouse sensitivity* uses Half-Life's scale (3 is the stock default). *Look
 up/down* (off by default) adds mouse and right-stick pitch to your head's.

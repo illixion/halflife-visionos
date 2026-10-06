@@ -45,17 +45,20 @@ struct ControlsReferenceView: View {
     ]
     private let gamepad: [Row] = [
         ("Left stick", "Move"),
+        ("Left stick click", "Walk (hold)"),
         ("Right stick", "Turn (smooth or snap)"),
+        ("Right stick click", "Crouch toggle"),
         ("Right trigger", "Fire"),
         ("Left trigger", "Alt-fire"),
         ("A", "Jump"),
         ("B", "Crouch (hold, then A: long jump)"),
         ("X", "Reload"),
         ("Y", "Use"),
-        ("Left shoulder", "Walk"),
+        ("Left shoulder (hold)", "Weapon wheel: right stick picks, release selects"),
         ("Right shoulder", "Last weapon"),
         ("D-pad ← →", "Previous / next weapon"),
         ("D-pad ↑", "Flashlight"),
+        ("D-pad ↓", "Spray"),
         ("View / Options", "Tap: quick save · hold 1 s: quick load"),
         ("Menu", "Menu"),
     ]

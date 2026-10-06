@@ -435,6 +435,18 @@ typedef struct {
 } lambda_wheel_slot_t;
 int lambda_wheel_state(lambda_wheel_slot_t *out, int max, int *allowed);
 
+// Every weapon the player owns, slot by slot in slot order (the weapon
+// wheel opens a slot into these). `flags` bit 1 = in hand, bit 2 = no ammo.
+// Copies up to `max` and returns the count; -1 if the client kept rewriting
+// it (try again).
+typedef struct {
+    int slot;          // 0-based
+    int weapon_id;
+    int flags;
+    char name[64];
+} lambda_wheel_member_t;
+int lambda_wheel_members(lambda_wheel_member_t *out, int max);
+
 // The long jump module: 1 when the server's "slj" physinfo is set, 0 when
 // not, -1 before the client has published it.
 int lambda_has_longjump(void);

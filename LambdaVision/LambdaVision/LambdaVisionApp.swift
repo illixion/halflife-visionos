@@ -68,6 +68,11 @@ private enum HandBid {
     static var seen = Set<SpatialEventCollection.Event.ID>()
 }
 
+// Pointer (mouse click) events seen by the immersive layer, for a log line.
+private enum PointerProbe {
+    static var logged = 0
+}
+
 // Pinches that landed on a palm debug panel button (a tracking area). They
 // act once, on the first .active, and never fire or click the menu.
 private enum PanelPinch {
@@ -156,7 +161,15 @@ struct ImmersiveSpaceContent: CompositorContent {
                     // A mouse click can also arrive as a pointer event; with a
                     // mouse connected GCMouse owns clicks (MouseInput), so it
                     // must not fire or click the menu twice.
-                    if event.kind == .pointer, MouseInput.connected { continue }
+                    if event.kind == .pointer, MouseInput.connected {
+                        // Whether mouse clicks reach the immersive layer at
+                        // all (ISSUES.md, mouse focus): log the first few.
+                        if PointerProbe.logged < 8, event.phase == .active {
+                            PointerProbe.logged += 1
+                            AppLog.input.log("[LambdaVision] pointer event in the immersive space (ray \(event.selectionRay != nil ? "Y" : "N", privacy: .public))")
+                        }
+                        continue
+                    }
                     // A pinch on a palm debug panel button: the system routed
                     // it to that tracking area, so it is the button's — not
                     // the trigger's, not the menu's.
@@ -286,8 +299,13 @@ struct LambdaVisionApp: App {
 
         // In-app log viewer. This app renders through CompositorServices and
         // has no tab bar, so the console is its own window.
+        // Every window claims the gamepad (see GamepadInput): whichever one
+        // the gaze rests on decides whether the pad reaches the game or the
+        // system's focus navigation, which freezes polled values — a stick
+        // pushed at that moment stays pushed.
         Window("Console", id: "console") {
             RAVEConsoleScreen()
+                .handlesGameControllerEvents(matching: .gamepad)
         }
         .defaultLaunchBehavior(.suppressed)
 
@@ -295,6 +313,7 @@ struct LambdaVisionApp: App {
         // stays visible over the immersive space since it's never dismissed.
         Window("Performance", id: "performance") {
             PerformanceHUDScreen()
+                .handlesGameControllerEvents(matching: .gamepad)
         }
         .defaultLaunchBehavior(.suppressed)
 

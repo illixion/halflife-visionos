@@ -122,6 +122,7 @@ enum AppSettingsStore {
     private static let armSwingSensitivityKey = "lambdavision.settings.armSwingSensitivity"
     private static let longJumpKey            = "lambdavision.settings.handLongJump"
     private static let wheelUtilitiesKey      = "lambdavision.settings.wheelUtilities"
+    private static let wheelExpandKey         = "lambdavision.settings.wheelExpand"
     private static let altFireGestureKey      = "lambdavision.settings.altFireGesture"
     private static let altFireSensitivityKey  = "lambdavision.settings.altFireSensitivity"
     private static let weaponExternalKey      = "lambdavision.settings.weaponExternal"
@@ -200,6 +201,10 @@ enum AppSettingsStore {
     static var wheelUtilities: Bool {
         get { bool(wheelUtilitiesKey, true) }
         set { defaults.set(newValue, forKey: wheelUtilitiesKey) }
+    }
+    static var wheelExpand: Bool {
+        get { bool(wheelExpandKey, true) }
+        set { defaults.set(newValue, forKey: wheelExpandKey) }
     }
     static var altFireGesture: Bool {
         get { bool(altFireGestureKey, true) }

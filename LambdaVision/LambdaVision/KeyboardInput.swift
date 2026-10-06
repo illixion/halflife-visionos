@@ -39,6 +39,22 @@ final class KeyboardInput {
         !keysDown.isEmpty || now - lastKeyTime < idleSeconds
     }
 
+    /// Release every key the engine was told is down, and the mouse buttons:
+    /// the input mode left the keyboard and mouse (InputHandoff). The keys
+    /// stay in `keysDown` (they may still be physically held); the engine
+    /// ignores the real release that follows, for a key it already let go.
+    /// On the main queue, where GameController delivers key changes.
+    nonisolated static func releaseHeld() {
+        DispatchQueue.main.async {
+            for code in keysDown {
+                if let keynum = baseChar(for: code) ?? specialKeynum(for: code) {
+                    lambda_key_event(Int32(keynum), 0)
+                }
+            }
+            for keynum in Int32(241)...245 { lambda_key_event(keynum, 0) }   // K_MOUSE1…5
+        }
+    }
+
     func start() {
         if let kb = GCKeyboard.coalesced { attach(kb) }
         observer = NotificationCenter.default.addObserver(

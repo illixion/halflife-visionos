@@ -431,6 +431,24 @@ nonisolated final class HandMovement {
         Renderer.aimDiag.useHeld = false
     }
 
+    /// Let go of everything the hands drive: the clutch, the arm swing, the
+    /// throttle, +jump/+duck/+use, and the joystick axes — zeroed outright
+    /// rather than only when this side thinks it wrote them, since another
+    /// device may have written since. The input mode leaving hands calls it
+    /// (InputHandoff); `poll` with `active == false` then keeps it quiet.
+    func releaseAll() {
+        swinger.reset()
+        swing = RAVEArmSwingOutput()
+        offHandFist = false
+        swingJumpUntil = 0
+        gunBusyUntil = 0
+        fullReset()
+        lambda_joy_set_axis(0, 0)
+        lambda_joy_set_axis(1, 0)
+        axesActive = false
+        publishSwingDiag()
+    }
+
     private func jumpTuning() -> JumpSequencer.Tuning {
         var t = JumpSequencer.Tuning()
         t.autoCrouchJump = HandMovement.autoCrouchJump

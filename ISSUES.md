@@ -15,6 +15,35 @@ instead of deleting them.
   opt-in because the room-space passes (body, HEV holograms) can't follow a
   tilted world.
 
+- **A mouse only works while the visionOS pointer is over one of the app's
+  windows.** Seen on device (also in Longwave), even with a BLE mouse paired
+  straight to the headset, every window closed and Mac Virtual Display off:
+  with the pointer in the immersive space GCMouse delivers nothing, and
+  clicks land in the launcher window. Findings (visionOS 26/27 SDK headers
+  and docs, 2026-10-06), none tested on device:
+  - No API claims the mouse for a full immersive space. `GCEventInteraction`
+    / `.handlesGameControllerEvents` only take gamepad and stylus events
+    (`GCUIEventTypes`, GCEventInteraction.h), and the SwiftUI modifier is
+    View-only. A `CompositorLayer` scene has no view, no view controller and
+    no input modifiers (the CompositorContent modifiers are overlays,
+    immersion and limb visibility), and an ImmersiveSpace can't mix it with
+    views. Pointer lock (`UIPointerLockState`, `prefersPointerLocked`) needs
+    a full-screen view controller, which a visionOS window isn't.
+    `pointerVisibility` is unavailable on visionOS. visionOS 27 adds nothing
+    for mice. So no `RAVEMouseSource` change can fix it: its handlers are
+    fine, the system just doesn't route the events.
+  - `.pointer` spatial events (click-to-release sequences, no motion, no
+    wheel) might reach the layer's `onSpatialEvent`; the app now logs the
+    first few ("pointer event in the immersive space") to find out. Even if
+    they do, they can't drive mouse look.
+  - Left to try: an "input catcher" window kept in view while playing
+    (`.plain` style, no glass, `Color.clear` with a content shape so clicks
+    hit nothing). Windows are world-anchored, so it only covers part of the
+    view. Otherwise the rule stands: keep a window under the pointer, or
+    play with a keyboard or gamepad (README says so).
+  Gamepads aren't affected the same way: `.handlesGameControllerEvents` on
+  the window under the gaze is what keeps them from freezing, and every
+  window now has it (see the stuck-forward item in Resolved).
 - **Arm-swing walking needs tuning on device.** `RAVEArmSwinger` (RAVEInput)
   drives the same joy axes as the pinch joystick: both fists plus a swing
   pattern engage it, and the stroke-speed envelope maps 0.4–2.0 m/s onto
@@ -386,6 +415,56 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~Stuck walking forward after connecting a controller~~ (device check
+  pending; cause not proven). Seen once: hand-stick movement, then a mouse
+  bump switched to keyboard+mouse and the Pro Controller to gamepad, and
+  the player kept walking forward for a while. The code paths all zeroed
+  the hand axes on the switch, so the fix covers every candidate:
+  - **Most likely, a frozen stick.** Only the launcher window had
+    `.handlesGameControllerEvents`; with the gaze on the Performance or
+    Console window the system takes the pad for focus navigation and polled
+    values freeze, a pushed stick staying pushed. Every window has it now.
+  - **Release on every mode switch** (`InputHandoff`, `InputMode.swift`):
+    each device that isn't the new owner lets go of what it holds. Hands:
+    clutch, swing, throttle, +jump/+duck/+use and both axes
+    (`HandMovement.releaseAll`). Gamepad: every held +command, the crouch
+    toggle, the wheel and its axes (`GamepadInput.releaseAll`, buttons via
+    `HeldCommands`, which keeps a still-held button quiet until pressed
+    again). Keyboard and mouse: key-ups for held keys and the mouse buttons.
+    The axes are zeroed outright, and entering hands or gamepad queues a
+    bare `-forward/-back/-moveleft/-moveright/-left/-right`, so a key whose
+    release went to another window can't keep walking.
+  - The gamepad no longer writes its (centred) axes every frame outside
+    gamepad mode, where it raced the hand stick's writes; a button counts as
+    gamepad activity on the press only, so a held trigger can't pull the
+    mode back each frame.
+  `Tools/HandsProbe` checks the handoff plan and `HeldCommands`.
+- ~~Gamepad: missing binds, no weapon wheel~~ (device check pending). New
+  layout (ControlsReference, README): left-stick click walks (+speed, was the
+  left shoulder), right-stick click toggles crouch (B drops it), D-pad down
+  sprays. Holding the left shoulder opens the hand wheel's entries as a
+  radial ahead of the view (`GamepadWheel` in `WeaponWheel.swift`): the
+  right stick arms a sector and stays armed when it springs back, releasing
+  selects, LOAD keeps its confirm hold, and the stick doesn't turn while it
+  is open. It hangs off the HEV overlay's lazy follower, 0.45 m out
+  (`Renderer.padWheelOffset`). The hand and gamepad wheels now draw through
+  one `WeaponWheel.View` (`WeaponWheelPanel.panel(view:)` / `arcs(for:)`).
+  On device: placement and size, flick-and-release, LOAD hold, and the
+  shoulder no longer walking.
+- ~~Weapon wheel can't pick a specific weapon in a slot~~ (device check
+  pending; the owner's idea). Push the hand on past the rim (11.8 cm, just
+  outside the armed wedge) over a slot holding several weapons and it opens
+  into an outer arc of them (12.4–17.6 cm), centred on the slot, at least
+  0.06 turns per weapon, the weapon in hand underlined. Sliding along the
+  arc arms one, release selects exactly it, and coming back inside 9.5 cm
+  folds it, so release-to-pick on the inner ring is unchanged. A one-weapon
+  slot never opens. The client now publishes every owned weapon
+  (`g_vr_wheel_members` in `vr_hud.cpp`, read through
+  `lambda_wheel_members`, same seqlock). Settings: *Wheel: reach past the
+  rim to pick a weapon*. `Tools/HandsProbe` checks the arc layout, opening,
+  folding, clamping and the setting. On device: the reach (radii in
+  `WeaponWheelGesture.Tuning` / `WeaponWheelPanel.member*R`) and legibility.
 
 - ~~HEV HUD in flat modes: ammo panel stuck at the resting gun hand~~
   (device check pending). Outside hands mode the HEV readouts become a
