@@ -159,6 +159,15 @@ instead of deleting them.
   c1a2 flood (`Tools/DepthProbe`: gaze 1.3/255, mirror-image stereo
   1.3/255, nothing outside the mask, nothing underwater). Spots and cost in
   `docs/plans/modern-lighting.md` (3b).
+- **Glass/water round 2: built, device check pending.** Models in front of
+  glass or water (c2a3a ichthyosaur) were shaded as if behind it — the
+  stencil code survives later draws; the composite now skips pixels whose
+  engine depth is nearer than the plane. Water keeps its own colour (the
+  reflection modulates it) instead of washing grey. Probe made cheaper
+  (128² faces, no dynamic lights, kept render targets, refresh every 4 m /
+  30 s) after measuring 2.2 ms GPU per face. A screen-space planar
+  reflection for large flat water is proposed, not built; see
+  `docs/plans/modern-lighting.md` (3c).
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored

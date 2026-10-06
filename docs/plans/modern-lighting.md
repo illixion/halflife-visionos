@@ -346,6 +346,76 @@ both eyes at a depth behind the water; the sink box's top clearly reflective.
 Try strength 1×, 3× and 4×; duck the head toward the water and the
 reflection should stay above it, never flip.
 
+### 3c. Headset round 2: occluders, water colour, probe cost
+
+**Occluders (fixed).** In c2a3a's ichthyosaur tank the fish, over the water,
+was shaded as if under it. Only glass and water draws write the stencil code
+(`GL_REPLACE`) and nothing drawn later clears it, so a model, sprite or brush
+entity in front of a marked surface kept the code. The composite now
+intersects the eye ray with the pixel's plane and skips the effect where the
+engine depth is nearer than the plane (by 2 units + 2%): glass and
+translucent water write no depth, so what is behind reads farther; opaque
+water writes its own depth at the plane; the flat viewmodel decodes a few
+units away. This also covers sprites drawn over a pane and NPCs crossing one.
+`Tools/DepthProbe` puts a fake occluder 30 units from the eye over the middle
+of the view: 122 k marked pixels under it, 0 shaded, 0 changed elsewhere.
+
+**Water washed out (fixed).** Water on vs off (`build/screenshots/ab-water.png`
+in the main checkout): the flood turned grey and pale with only blurry dark
+smudges. Mixing the room's colour in, as glass does, replaced the water's
+blue. Water now keeps its colour: the reflection modulates it by how bright
+the reflected room is against the room's light (the engine's light at the
+eye), clamped 0.2–3×, and only bright things (lamps) add light on top.
+The mirror image reads as darker and lighter water.
+
+**Probe cost.** Headset, c1a2 flood, first build: `gProbe` 2.2 ms GPU p50 /
+4.0 ms p95 per 256² face, `probeCPU` 0.6 ms; frame 11.6 ms p50 (~86 fps)
+against 8.3; `gComposite` 4.1, `gEngine0` 1.4, `gEngine1` 3.0. Changes:
+
+- 128² faces (4× fewer pixels; the reflection is soft anyway).
+- No dynamic lights in the probe pass: dlit surfaces (the gun's flashlight
+  cone) used to rebuild and re-upload their lightmaps for every face.
+- One EGLImage / renderbuffer / FBO kept per probe slice instead of a new
+  render target per face (the app tells the worker when the probe textures
+  are new).
+- Refresh after 160 units (4 m) of head movement or 30 s, not 48 units / 4 s:
+  standing in a room, one capture of six frames; running through the flood,
+  one every ~0.6 s.
+
+Not measurable on the Mac (desktop GL, not ANGLE on Metal). Expected on the
+headset: `gProbe` well under 1 ms p50 per face (a quarter of the pixels, no
+lightmap uploads, no render-target churn) and `probeCPU` ~0.3 ms, on 6 frames
+per capture only; averaged, under 0.1 ms per frame. `gComposite` with the
+toggles on vs off in the flood will show what the water shading itself
+costs (per water pixel: one engine-depth read, two probe-walk depth reads, a
+colour sample and four sines); the 4.1 ms includes the FXAA composite at
+the drawable's resolution.
+
+**Proposal, not built: screen-space planar reflection for large flat water.**
+For horizontal water the plane is known exactly, so the sharp option is not a
+generic ray-marched SSR but a screen-space *planar* reflection (as Far Cry 5
+did): a compute pass per eye at half logical resolution mirrors each engine
+pixel's world position across the water plane, projects it into that eye and
+writes it into a reflection buffer (atomic min on depth to keep the nearest),
+then the composite reads that buffer at water pixels and falls back to the
+probe where it is empty.
+
+- Quality: a sharp mirror of everything on screen, models included, with
+  exactly the right per-eye parallax because each eye mirrors its own image.
+  Looking along a flooded floor, most of what the water reflects (walls,
+  doorways, NPCs ahead) is on screen. What is not — the ceiling right above,
+  things behind the eye — comes from the probe, blended over a wide fade by
+  how close the source was to the screen edge, so the hand-off cannot pop
+  the way the first glass prototype did. The ripples apply as an offset to
+  the lookup.
+- Cost estimate: one scatter and one resolve over about 1.5 Mpx per eye at
+  half resolution, roughly 0.3–0.6 ms GPU for both eyes; nothing on frames
+  with no water marked. A ray-marched SSR (16–32 depth steps per water pixel)
+  would cost 1–2 ms on a floor covering 30% of the view and still be blurrier
+  near edges.
+- Limits: horizontal planes only (one or a few per view); vertical glass
+  stays probe-lit; reflections of things the eye cannot see stay soft.
+
 ### Decisions on the open questions
 
 - **Target chips:** tiers 1–4 must hold 120 FPS on the first-generation
