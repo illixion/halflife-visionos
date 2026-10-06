@@ -192,6 +192,10 @@ typedef struct
     // Per eye: one bit per plane row, set for water (lambda_glass_eye_t.kind).
     // Row r is word r / 32 = glassKinds[eye][r / 128][(r / 32) % 4].
     simd_uint4 glassKinds[2][2];
+    // Per eye, sharp water (Shaders.metal ssprScatter): x = the plane row it
+    // mirrors in, y = that plane's height (xash z), z = 1 on / 0 off, w = the
+    // target's size divisor against the engine image (0 = 2, half size).
+    simd_float4 sspr[2];
 } DisplayParams;
 
 #ifdef __METAL_VERSION__

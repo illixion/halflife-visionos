@@ -153,6 +153,17 @@ final class GameSettings {
                  Renderer.waterReflections = waterReflections
                  cvar("r_vrwater", waterReflections ? 1 : 0) }
     }
+    /// Water reflections mirror the screen in horizontal water (SharpWater)
+    /// on top of the probe. Live.
+    var sharpWaterReflections: Bool = AppSettingsStore.sharpWaterReflections {
+        didSet { AppSettingsStore.sharpWaterReflections = sharpWaterReflections
+                 Renderer.sharpWaterReflections = sharpWaterReflections }
+    }
+    /// Water ripple strength, 0–3× (0 = a still mirror). Live.
+    var waterRipples: Double = AppSettingsStore.waterRipples {
+        didSet { AppSettingsStore.waterRipples = waterRipples
+                 Renderer.waterRipples = Float(waterRipples) }
+    }
     /// Glass and water reflectance scale, 0.5–4×. Live.
     var reflectionStrength: Double = AppSettingsStore.reflectionStrength {
         didSet { AppSettingsStore.reflectionStrength = reflectionStrength
@@ -380,6 +391,8 @@ final class GameSettings {
         Renderer.glassReflections = glassReflections
         Renderer.waterReflections = waterReflections
         Renderer.reflectionStrength = Float(reflectionStrength)
+        Renderer.sharpWaterReflections = sharpWaterReflections
+        Renderer.waterRipples = Float(waterRipples)
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)

@@ -296,29 +296,40 @@ static inline float3 glassViewRay(float2 uv, ushort eye, constant DisplayParams 
     return normalize(p.glassEye[eye][1].xyz + v.x * p.glassEye[eye][2].xyz + v.y * p.glassEye[eye][3].xyz);
 }
 
-// Water (r_vrwater rows): the plane's normal tilted by a few travelling
-// sine waves of the world point, so the reflection shimmers instead of
-// mirroring. World-space and a function of P and time only, so both eyes see
-// the same ripple at the same spot. Returns the tilted normal; the slope fades
-// with distance so far water does not alias into noise.
-static inline float3 waterRipple(float3 n, float3 P, float dist, constant DisplayParams &p)
+// Water (r_vrwater rows): the plane's normal tilted by fine travelling
+// sine waves of the world point, tuned to a calm lake (the headset showed the
+// first, 11–39-unit waves at slope 0.12 as "thick, like an oil spill"):
+// wavelengths of a few units, slow, six directions so no pattern shows, and a
+// small slope (p.water.w; Settings "Water ripples"). GoldSrc's water texture
+// already warps, so this adds only a little. The tilt is biased toward the
+// view direction along the surface, which breaks reflections up vertically
+// (streaks) rather than sideways, and it calms with distance and toward
+// grazing angles, as a lake does toward the horizon. A function of the world
+// point and time (the view bias differs between the eyes only by their
+// separation's angle), so both eyes see the same ripple at the same spot.
+static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float cosTheta,
+                                 constant DisplayParams &p)
 {
-    const float slope = p.water.w / (1.0 + dist / 600.0);
+    const float slope = p.water.w / (1.0 + dist / 120.0) * saturate(cosTheta * 4.0);
     if (slope <= 0.0)
         return n;
     const float3 t1 = normalize(cross(n, abs(n.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0)));
     const float3 t2 = cross(n, t1);
     const float2 q = float2(dot(P, t1), dot(P, t2)) / max(p.reflectExtra.w, 0.05);
     const float t = p.reflectExtra.z;
-    // direction, spatial frequency (rad / unit), speed (rad / s), amplitude
-    const float4 waves[4] = { float4(0.83, 0.56, 0.16, 1.7), float4(-0.42, 0.91, 0.23, 2.3),
-                              float4(0.97, -0.26, 0.37, 3.1), float4(-0.71, -0.70, 0.55, 4.3) };
-    const float amp[4] = { 0.45, 0.30, 0.17, 0.08 };
-    // each wave tilts the normal along its direction by amp · cos(phase)
+    // direction (unit), spatial frequency (rad / unit), speed (rad / s)
+    const float4 waves[6] = { float4( 0.89,  0.45, 0.95, 0.40), float4(-0.31,  0.95, 1.21, 0.55),
+                              float4( 0.98, -0.20, 1.53, 0.65), float4(-0.77, -0.64, 1.87, 0.80),
+                              float4( 0.20, -0.98, 2.23, 0.95), float4(-0.95,  0.31, 2.61, 1.10) };
+    const float amp[6] = { 0.26, 0.22, 0.18, 0.14, 0.11, 0.09 };
     float2 g = 0.0;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 6; i++)
         g += amp[i] * waves[i].xy * cos(dot(waves[i].xy, q) * waves[i].z + waves[i].w * t);
-    return normalize(n - slope * (g.x * t1 + g.y * t2));
+    const float3 tilt = g.x * t1 + g.y * t2;
+    // along the view (vertical on screen) in full, across it a quarter
+    const float3 along = normalize(d - dot(d, n) * n + 1e-5 * t1);
+    const float3 across = cross(n, along);
+    return normalize(n - slope * (dot(tilt, along) * along + 0.25 * dot(tilt, across) * across));
 }
 
 static inline float glassLuma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
@@ -326,6 +337,7 @@ static inline float glassLuma(float3 c) { return dot(c, float3(0.299, 0.587, 0.1
 static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
                                 texture2d_array<uint> engineStencil, depth2d_array<float> engineDepth,
                                 texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
+                                texture2d_array<half> sharpWater,
                                 sampler s, constant DisplayParams &p)
 {
     const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
@@ -362,7 +374,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     }
     if (nd > 0.0)
         n = -n;                              // the side facing the viewer
-    const float3 shape = water ? waterRipple(n, P, dist, p) : n;
+    const float3 shape = water ? waterRipple(n, P, d, dist, saturate(-dot(d, n)), p) : n;
     const float4 k = water ? p.water : p.glass;   // strength, F0, cap
     const float cosTheta = saturate(-dot(d, shape));
     const float F = k.y + (1.0 - k.y) * pow(1.0 - cosTheta, 5.0)
@@ -372,7 +384,33 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         r -= 2.0 * dot(r, n) * n;            // a ripple never sends it below the surface
     const float2 clip = p.probeMix.yz;
     float3 env = p.glassAmbient.rgb;
-    if (p.probe[1].w >= 0.0) {
+    // Sharp water (ssprScatter): this eye's own image mirrored in the water
+    // plane, read where this pixel is, nudged by the ripple's tilt (a tilt δ
+    // turns the reflected ray by 2δ: vertical on screen along the view).
+    // Where it has nothing, or only content from near the frame's edge, the
+    // probe fills in.
+    float sharpWeight = 0.0;
+    float3 sharp = 0.0;
+    if (water && p.sspr[eye].z > 0.5 && row == uint(p.sspr[eye].x)) {
+        const float4 t = p.eyeTangents[eye];
+        const float3 along = normalize(d - dot(d, n) * n + 1e-5);
+        const float3 across = cross(n, along);
+        const float3 tilt = shape - n;
+        const float2 offset = 2.0 * float2(dot(tilt, across) / (t.x + t.y), -dot(tilt, along) / (t.z + t.w));
+        const float2 suv = uv + offset;
+        const float texelY = 1.0 / float(sharpWater.get_height());
+        half4 c = sharpWater.sample(s, suv, eye);
+        // the half-resolution scatter leaves thin gaps; look a texel either side
+        if (c.a < 0.5h) {
+            const half4 up = sharpWater.sample(s, suv + float2(0, texelY), eye);
+            const half4 dn = sharpWater.sample(s, suv - float2(0, texelY), eye);
+            c = up.a > c.a ? up : c;
+            c = dn.a > c.a ? dn : c;
+        }
+        sharpWeight = saturate(float(c.a));
+        sharp = float3(c.rgb) / max(float(c.a), 1e-3);
+    }
+    if (sharpWeight < 0.999 && p.probe[1].w >= 0.0) {
         const float w = p.probeMix.x;
         float3 older = env;
         // the ripples hide what a third step of the walk would fix
@@ -382,6 +420,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float3 cur = probeLookup(probeColor, probeDepth, s, P, r, p.probe[1], clip, steps);
         env = mix(older, cur, w);
     }
+    env = mix(env, sharp, sharpWeight);
     const float amount = min(F * k.x, k.z);
     if (water) {
         // Water keeps its own colour: the reflection modulates it by how
@@ -396,6 +435,89 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     return mix(seen, env, amount);
 }
 
+// ---- Sharp water: screen-space planar reflection (Renderer.sharpWaterReflections)
+// For horizontal water (one plane per eye, DisplayParams.sspr: the highest
+// water row below the eye), each eye's own engine image mirrored in that
+// plane, drawn as points: one per half-resolution texel, from the engine
+// depth to its world point W, mirrored to W' = (W.x, W.y, 2h − W.z) and
+// projected back into the same eye. The depth test keeps the nearest mirrored
+// point, as the mirror would show it. Each eye mirrors its own image, so the
+// per-eye parallax is exactly a mirror's. Colour is premultiplied by a
+// confidence that falls off as the source nears the frame's edge, where the
+// next head turn would cut it off, so the composite blends to the probe over
+// a wide band instead of popping. Points below the plane (the water, what is
+// under it), the flat viewmodel and anything mirrored behind the eye are
+// dropped. Cost: one point per half-resolution texel per eye.
+struct SSPRPoint
+{
+    float4 position [[position]];
+    float  size [[point_size]];
+    half4  color;
+};
+
+struct SSPRFragment
+{
+    float4 position [[position]];
+    half4  color;
+};
+
+vertex SSPRPoint ssprScatter(uint vid [[vertex_id]],
+                             ushort eye [[amplification_id]],
+                             constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
+                             texture2d_array<half> colorMap [[ texture(0) ]],
+                             depth2d_array<float> engineDepth [[ texture(1) ]])
+{
+    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    SSPRPoint o;
+    o.size = 2.0;                    // covers the gaps the scatter leaves
+    o.color = 0.0h;
+    o.position = float4(2.0, 2.0, 2.0, 1.0);   // outside the view: dropped
+    if (p.sspr[eye].z < 0.5)
+        return o;
+    // one point per texel of the target: half the engine's size unless sspr.w says
+    const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 2;
+    const uint w = (colorMap.get_width() + div - 1) / div, h = (colorMap.get_height() + div - 1) / div;
+    const uint2 xy = uint2(vid % w, vid / w);
+    if (xy.y >= h)
+        return o;
+    const float2 uv = (float2(xy) + 0.5) / float2(w, h);
+    const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
+    const float ndc = engineDepth.read(min(uint2(uv * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+    const float zn = p.probeMix.y, zf = p.probeMix.z;
+    const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
+    if (z < 6.0)                     // the flat viewmodel
+        return o;
+    const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
+    const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
+    const float3 d = glassViewRay(uv, eye, p);
+    const float3 W = E + d * (z / dot(d, F));
+    const float height = p.sspr[eye].y;
+    if (W.z < height + 1.0)
+        return o;
+    const float3 q = float3(W.xy, 2.0 * height - W.z) - E;
+    const float qz = dot(q, F);
+    if (qz < 4.0)
+        return o;
+    const float4 t = p.eyeTangents[eye];
+    const float2 uv2 = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
+    if (any(uv2 < -0.01) || any(uv2 > 1.01))
+        return o;
+    const float2 edge = min(uv, 1.0 - uv);
+    const float confidence = smoothstep(0.0, 0.15, min(edge.x, edge.y));
+    if (confidence <= 0.0)
+        return o;
+    const half3 c = colorMap.sample(s, uv, eye).rgb;
+    o.color = half4(c * half(confidence), half(confidence));
+    // uv2.y = 0 is the bottom row in the engine's convention; Metal NDC +y is row 0
+    o.position = float4(uv2.x * 2.0 - 1.0, 1.0 - uv2.y * 2.0, saturate(length(q) / zf), 1.0);
+    return o;
+}
+
+fragment half4 ssprWrite(SSPRFragment in [[stage_in]])
+{
+    return in.color;
+}
+
 // Test hook for Tools/DepthProbe: what the probe shows along each pixel's
 // own view ray from the eye (no glass, no reflection), with or without the
 // parallax walk (probeMix.w = iterations). Where the probe and the eye see the
@@ -405,7 +527,8 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 fragment float4 glassProbeView(ColorInOut in [[stage_in]],
                                constant DisplayParams &params [[ buffer(BufferIndexUniforms) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
-                               depth2d_array<float> probeDepth [[ texture(4) ]])
+                               depth2d_array<float> probeDepth [[ texture(4) ]],
+                               texture2d_array<half> sharpWater [[ texture(5) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const float3 d = glassViewRay(in.texCoord, in.eye, params);
@@ -428,7 +551,8 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                depth2d_array<float> engineDepth [[ texture(1) ]],
                                texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
-                               depth2d_array<float> probeDepth [[ texture(4) ]])
+                               depth2d_array<float> probeDepth [[ texture(4) ]],
+                               texture2d_array<half> sharpWater [[ texture(5) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -445,7 +569,7 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
 
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
@@ -460,7 +584,8 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
                                    depth2d_array<float> engineDepth [[ texture(1) ]],
                                    texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
-                               depth2d_array<float> probeDepth [[ texture(4) ]])
+                               depth2d_array<float> probeDepth [[ texture(4) ]],
+                               texture2d_array<half> sharpWater [[ texture(5) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -473,7 +598,7 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
     half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
 
@@ -522,7 +647,8 @@ fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
                                                depth2d_array<float> engineDepth [[ texture(1) ]],
                                                texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
-                               depth2d_array<float> probeDepth [[ texture(4) ]])
+                               depth2d_array<float> probeDepth [[ texture(4) ]],
+                               texture2d_array<half> sharpWater [[ texture(5) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
@@ -530,7 +656,7 @@ fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
     const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
     out.depth = compositorDepth(engineDepth, uv, in.eye, params);
@@ -543,7 +669,8 @@ fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
                                                    depth2d_array<float> engineDepth [[ texture(1) ]],
                                                    texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
-                               depth2d_array<float> probeDepth [[ texture(4) ]])
+                               depth2d_array<float> probeDepth [[ texture(4) ]],
+                               texture2d_array<half> sharpWater [[ texture(5) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
@@ -552,7 +679,7 @@ fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
     const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
     float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
     out.depth = compositorDepth(engineDepth, uv, in.eye, params);

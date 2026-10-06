@@ -175,6 +175,8 @@ actor Renderer {
     // What the glass reflects (GlassProbe), made when glass is first on, and
     // each eye's view and glass planes from the engine, read after the eyes.
     var glassProbe: GlassProbe?
+    // Sharp water reflections (SharpWater), made on first use.
+    var sharpWater: SharpWater?
     var glassEyes: [lambda_glass_eye_t] = []
     // Holds the last frame of a level still in the room while the next loads.
     var loadSnapshot: LoadSnapshot!
@@ -326,7 +328,18 @@ actor Renderer {
     /// slope (0 = a flat mirror).
     static let reflectionHeadOn = SIMD2<Float>(0.06, 0.04)
     static let reflectionCap = SIMD2<Float>(0.7, 0.6)
-    nonisolated(unsafe) static var waterRippleSlope: Float = 0.08
+    /// Water's ripple slope at "Water ripples" 1×: a calm lake. The first
+    /// water build used 0.08 with 11–39-unit waves and read as "thick, like
+    /// an oil spill"; the waves are now a few units long and slow.
+    static let waterRippleSlope: Float = 0.008
+    /// Settings "Water ripples", 0–3× of waterRippleSlope. Live.
+    nonisolated(unsafe) static var waterRipples: Float = 1.0
+    /// Sharp water (SharpWater, screen-space planar reflection) under
+    /// waterReflections; off leaves the probe-only look. Live.
+    nonisolated(unsafe) static var sharpWaterReflections: Bool = true
+    /// The sharp-water target's size divisor against the engine image: 2 =
+    /// half size, one point per four engine pixels; 4 quarters the cost.
+    static let sharpWaterDivisor = 2
     /// Water's share of the strength: seen at grazing angles it reflects far
     /// more than a pane and washed its own colour out at the glass setting.
     static let waterStrengthScale: Float = 0.6
@@ -1253,7 +1266,7 @@ actor Renderer {
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
-        argTableDesc.maxTextureBindCount = 5    // colour@0, engine depth@1, engine stencil@2, glass probe colour@3, depth@4
+        argTableDesc.maxTextureBindCount = 6    // colour@0, engine depth@1, engine stencil@2, glass probe colour@3, depth@4, sharp water@5
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
         // GPU state, so sharing one table across two encoders that bind
@@ -2960,6 +2973,39 @@ actor Renderer {
             }
         }
 
+        // Sharp water: mirror both eyes' images in the water plane below them
+        // before the composite reads it (SharpWater; once per frame). The
+        // DisplayParams it reads are written below, before the commit.
+        var ssprPlanes: (SIMD4<Float>, SIMD4<Float>) = (.zero, .zero)
+        if Renderer.waterReflections && Renderer.sharpWaterReflections, glassProbe != nil, glassEyes.count == 2,
+           engineStencil != nil, lambda_gl_depth_target_ok() != 0, Renderer.hdrTestMode == 0,
+           displayMap == nil, !loadSnapshot.isHolding {
+            ssprPlanes = SharpWater.planes(glassEyes)
+            ssprPlanes.0.w = Float(Renderer.sharpWaterDivisor)
+            ssprPlanes.1.w = Float(Renderer.sharpWaterDivisor)
+            if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+                if sharpWater == nil, let library = device.makeDefaultLibrary() {
+                    sharpWater = SharpWater(device: device, library: library)
+                }
+                if let sharpWater {
+                    let fresh = sharpWater.ensureTargets(colorMap: colorMap, divisor: Renderer.sharpWaterDivisor)
+                    #if !targetEnvironment(simulator)
+                    if !fresh.isEmpty {
+                        commandQueueResidencySet.addAllocations(fresh)
+                        commandQueueResidencySet.commit()
+                    }
+                    #endif
+                    if encodeUpscale {
+                        sharpWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineDepth: engineDepth,
+                                          paramsAddress: displayParamsBuffer.gpuAddress
+                                              + UInt64(Self.displayParamsStride * uniformBufferIndex))
+                    }
+                } else {
+                    ssprPlanes = (.zero, .zero)
+                }
+            }
+        }
+
         guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             fatalError("Failed to create render encoder")
         }
@@ -2969,7 +3015,7 @@ actor Renderer {
         // Metal 4 does no automatic hazard tracking: order this pass's
         // displayMap reads after the MetalFX upscale encoded above on the
         // same queue.
-        if !spatialScalers.isEmpty {
+        if !spatialScalers.isEmpty || ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
             renderEncoder.barrier(afterQueueStages: .all, beforeStages: .fragment,
                                   visibilityOptions: .device)
         }
@@ -3048,7 +3094,7 @@ actor Renderer {
                 let strength = Renderer.reflectionStrength
                 params.glass = SIMD4(strength, 0.04, Renderer.reflectionCap.x, Renderer.glassTintAmount)
                 params.water = SIMD4(strength * Renderer.waterStrengthScale, 0.02, Renderer.reflectionCap.y,
-                                     Renderer.waterRippleSlope)
+                                     Renderer.waterRippleSlope * Renderer.waterRipples)
                 params.reflectExtra = SIMD4(Renderer.reflectionHeadOn.x, Renderer.reflectionHeadOn.y,
                                             Float(CACurrentMediaTime().truncatingRemainder(dividingBy: 3600)), 1)
                 // Until the first probe is in: the room's light at the eye
@@ -3065,6 +3111,10 @@ actor Renderer {
                 params.probe = probe.probe
                 params.probeMix = probe.mix
                 Self.setGlassEyes(&params, glassEyes)
+                params.sspr = ssprPlanes
+                if let color = sharpWater?.color, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+                    self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
+                }
             }
             memcpy(displayParamsBuffer.contents() + paramsOffset, &params, MemoryLayout<DisplayParams>.size)
             self.fragmentArgumentTable.setAddress(displayParamsBuffer.gpuAddress + UInt64(paramsOffset),

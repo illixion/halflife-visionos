@@ -41,6 +41,8 @@ enum AppSettingsStore {
     private static let glassReflectionsKey = "lambdavision.settings.glassReflections"
     private static let waterReflectionsKey = "lambdavision.settings.waterReflections"
     private static let reflectionStrengthKey = "lambdavision.settings.reflectionStrength"
+    private static let sharpWaterKey = "lambdavision.settings.sharpWaterReflections"
+    private static let waterRipplesKey = "lambdavision.settings.waterRipples"
 
     static var renderScale: Double {
         get { double(renderScaleKey, 0.75) }
@@ -89,6 +91,17 @@ enum AppSettingsStore {
     static var reflectionStrength: Double {
         get { double(reflectionStrengthKey, 3.0) }
         set { defaults.set(newValue, forKey: reflectionStrengthKey) }
+    }
+    /// The screen-space mirror on horizontal water (Renderer.sharpWaterReflections),
+    /// under Water reflections. On by default; off is the probe-only look.
+    static var sharpWaterReflections: Bool {
+        get { bool(sharpWaterKey, true) }
+        set { defaults.set(newValue, forKey: sharpWaterKey) }
+    }
+    /// Ripple slope multiplier (Renderer.waterRipples), 0–3×.
+    static var waterRipples: Double {
+        get { double(waterRipplesKey, 1.0) }
+        set { defaults.set(newValue, forKey: waterRipplesKey) }
     }
     static var gamma: Double {
         get { double(gammaKey, 3.0) }   // with Linear colour on; tuned on the headset 2026-10-06

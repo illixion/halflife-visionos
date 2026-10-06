@@ -408,9 +408,70 @@ let probes = try probePaths.map { ProbeTextures(try Probe(path: $0)) }
 let plainPipeline = try glassPipeline(false)
 let glassOnPipeline = try glassPipeline(true)
 let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
+// Sharp water (ssprScatter): the app's scatter pass, one eye (amplification 0).
+let sharpPipeline: MTLRenderPipelineState = try {
+    let d = MTLRenderPipelineDescriptor()
+    d.vertexFunction = library.makeFunction(name: "ssprScatter")
+    d.fragmentFunction = library.makeFunction(name: "ssprWrite")
+    d.colorAttachments[0].pixelFormat = .rgba16Float
+    d.depthAttachmentPixelFormat = .depth32Float
+    d.inputPrimitiveTopology = .point
+    return try device.makeRenderPipelineState(descriptor: d)
+}()
+let sharp = ProcessInfo.processInfo.environment["SHARP"] != "0"
+
+/// The highest horizontal water row below the eye (SharpWater.planes).
+func sharpPlane(_ dump: Dump) -> SIMD4<Float> {
+    guard let planes = dump.planes else { return .zero }
+    var best: (Int, Float)?
+    for (row, p) in planes.enumerated() where row < dump.kinds.count && dump.kinds[row] == 1 && p.z > 0.99 {
+        let height = p.w / p.z
+        if height < dump.origin.z - 1, height > (best?.1 ?? -.infinity) { best = (row, height) }
+    }
+    guard let best else { return .zero }
+    return SIMD4(Float(best.0), best.1, 1, 0)
+}
+
+/// The scatter into a half-resolution colour target (one slice).
+func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLTexture) -> MTLTexture {
+    let div = max(Int(params.sspr.0.w), 2) == 2 && params.sspr.0.w < 0.5 ? 2 : Int(params.sspr.0.w)
+    let w = (color.width + div - 1) / div, h = (color.height + div - 1) / div
+    func target(_ format: MTLPixelFormat) -> MTLTexture {
+        let d = MTLTextureDescriptor()
+        d.textureType = .type2DArray
+        d.pixelFormat = format
+        d.width = w; d.height = h
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = format == .depth32Float ? .private : .shared   // the colour is read back
+        return device.makeTexture(descriptor: d)!
+    }
+    let out = target(.rgba16Float), depth = target(.depth32Float)
+    let rpd = MTLRenderPassDescriptor()
+    rpd.colorAttachments[0].texture = out
+    rpd.colorAttachments[0].loadAction = .clear
+    rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+    rpd.colorAttachments[0].storeAction = .store
+    rpd.depthAttachment.texture = depth
+    rpd.depthAttachment.loadAction = .clear
+    rpd.depthAttachment.clearDepth = 1
+    let cb = queue.makeCommandBuffer()!
+    let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
+    enc.setRenderPipelineState(sharpPipeline)
+    let ds = MTLDepthStencilDescriptor()
+    ds.depthCompareFunction = .less
+    ds.isDepthWriteEnabled = true
+    enc.setDepthStencilState(device.makeDepthStencilState(descriptor: ds))
+    enc.setVertexBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setVertexTexture(color, index: 0)
+    enc.setVertexTexture(engineDepth, index: 1)
+    enc.drawPrimitives(type: .point, vertexStart: 0, vertexCount: w * h)
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    return out
+}
 
 struct GlassView {
     let name: String, dump: Dump, glass: [UInt8], env: [UInt8], envFlat: [UInt8]
+    var sharp: (w: Int, h: Int, rgba: [Float16], plane: SIMD4<Float>)?
 }
 var glassViews: [GlassView] = []
 
@@ -423,7 +484,7 @@ for path in args {
     let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
     var params = DisplayParams()
     params.glass = SIMD4(3, 0.04, 0.7, 0.35)           // the app's defaults (Renderer)
-    params.water = SIMD4(1.8, 0.02, 0.6, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.08)
+    params.water = SIMD4(1.8, 0.02, 0.6, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.008)
     params.reflectExtra = SIMD4(0.06, 0.04, 12.5, 1)  // a fixed moment of the ripples
     params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
     params.glassTint = SIMD4(0.80, 0.90, 0.88, 0.35)   // w: the room's light (luma)
@@ -464,8 +525,22 @@ for path in args {
 
     current.use(&params, iterations: 3)
     let engineDepthTex = depthTexture(w, h, dump.depth, array: true)
-    let textures: [Int: MTLTexture] = [TextureIndex.color.rawValue: color, 1: engineDepthTex, 2: stencilTex,
+    var textures: [Int: MTLTexture] = [TextureIndex.color.rawValue: color, 1: engineDepthTex, 2: stencilTex,
                                        3: current.color, 4: current.depth]
+    var sharpRead: (w: Int, h: Int, rgba: [Float16], plane: SIMD4<Float>)?
+    if sharp {
+        var plane = sharpPlane(dump)
+        plane.w = Float(ProcessInfo.processInfo.environment["SSPRDIV"] ?? "") ?? 0
+        params.sspr = (plane, plane)
+        if plane.z > 0 {
+            let t = renderSharp(params, color, engineDepthTex)
+            textures[5] = t
+            var px = [Float16](repeating: 0, count: t.width * t.height * 4)
+            t.getBytes(&px, bytesPerRow: t.width * 8, from: MTLRegionMake2D(0, 0, t.width, t.height), mipmapLevel: 0)
+            sharpRead = (t.width, t.height, px, plane)
+            print(String(format: "%@ sharp water: plane row %.0f at z %.1f", name, plane.x, plane.y))
+        }
+    }
     let plain = render(plainPipeline, w, h, params, textures)
     let glass = render(glassOnPipeline, w, h, params, textures)
     var envParams = params                             // the reflection alone
@@ -556,7 +631,7 @@ for path in args {
     }
     print("\(name) glass+water: \(marked) px marked, \(changedInside) changed, \(changedOutside) changed outside the mask, \(missed) without a probe reflection")
     if changedOutside > 0 || (marked > 0 && changedInside == 0) || missed > 0 { failures += 1 }
-    glassViews.append(GlassView(name: name, dump: dump, glass: glass, env: env, envFlat: envFlat))
+    glassViews.append(GlassView(name: name, dump: dump, glass: glass, env: env, envFlat: envFlat, sharp: sharpRead))
     if let pngDir {
         // plain | glass on top, the reflection alone | the mask below
         var sheet = [UInt8](repeating: 0, count: w * 2 * h * 2 * 4)
@@ -585,7 +660,7 @@ for path in args {
 // world point and the eye position alone, so it must agree — the old
 // frame-sampled reflection changed with where the eye looked. Origins an eye
 // apart: it may differ by true parallax only, which is small.
-func compare(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float)? {
+func compare(_ a: GlassView, _ b: GlassView, _ image: KeyPath<GlassView, [UInt8]> = \.env) -> (n: Int, mean: Float)? {
     guard let pa = a.dump.planes, let pb = b.dump.planes, let sa = a.dump.stencil, let sb = b.dump.stencil else { return nil }
     let w = a.dump.width, h = a.dump.height
     let (fa, ra, ua) = a.dump.axes, (fb, rb, ub) = b.dump.axes
@@ -613,7 +688,8 @@ func compare(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float)? {
             let codeB = Int(sb[rbow * w + cb])
             guard codeB >= 16, codeB - 16 < pb.count, simd_distance(pb[codeB - 16], plane) < 0.01 else { continue }
             let i = (row * w + col) * 4, j = ((h - 1 - rbow) * w + cb) * 4
-            sum += (0..<3).reduce(0) { $0 + abs(Int(a.env[i + $1]) - Int(b.env[j + $1])) }
+            let ia = a[keyPath: image], ib = b[keyPath: image]
+            sum += (0..<3).reduce(0) { $0 + abs(Int(ia[i + $1]) - Int(ib[j + $1])) }
             n += 1
         }
     }
@@ -691,7 +767,88 @@ func compareVirtual(_ a: GlassView, _ b: GlassView, _ probe: Probe) -> (n: Int, 
     return n > 0 ? (n, Float(sum) / Float(n * 3)) : nil
 }
 
+// Sharp water, directly: every static point W above the water in view A,
+// mirrored in the plane, must show the same colour in A's and B's mirror
+// textures wherever both took it from well inside their frames (confidence
+// over 0.95). Same origin: gaze independence of the mirror itself. Origins an
+// eye apart: each eye mirrors its own image, and the two must agree on W.
+// Returns the points compared, the mean difference, and the share of water
+// pixels the mirror covers fully in A.
+func compareSharp(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float, baseline: Float)? {
+    guard let sa = a.sharp, let sb = b.sharp else { return nil }
+    let w = a.dump.width, h = a.dump.height
+    let p = a.dump.projection
+    let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                  (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+    let p22 = p.columns.2.z, p32 = p.columns.3.z
+    let near = p32 / (p22 - 1), far = p32 / (p22 + 1)
+    let (fa, ra, ua) = a.dump.axes
+    let height = sa.plane.y
+    func project(_ v: SIMD3<Float>, _ dump: Dump) -> SIMD2<Float>? {
+        let (f, r, u) = dump.axes
+        let q = v - dump.origin, z = simd_dot(q, f)
+        guard z > 4 else { return nil }
+        return SIMD2((simd_dot(q, r) / z + t.x) / (t.x + t.y), (simd_dot(q, u) / z + t.w) / (t.z + t.w))
+    }
+    func read(_ s: (w: Int, h: Int, rgba: [Float16], plane: SIMD4<Float>), _ uv: SIMD2<Float>) -> SIMD4<Float>? {
+        // row 0 holds uv.y 0, the engine's bottom row (ssprScatter writes NDC +y there)
+        let x = Int(uv.x * Float(s.w)), y = Int(uv.y * Float(s.h))
+        guard x >= 0, x < s.w, y >= 0, y < s.h else { return nil }
+        let i = (y * s.w + x) * 4
+        return SIMD4(Float(s.rgba[i]), Float(s.rgba[i + 1]), Float(s.rgba[i + 2]), Float(s.rgba[i + 3]))
+    }
+    var sum: Float = 0, n = 0, base: Float = 0
+    for row in stride(from: 0, to: h, by: 4) {                 // bottom-up rows
+        for col in stride(from: 0, to: w, by: 4) {
+            let ndc = a.dump.depth[row * w + col] * 2 - 1
+            let z = 2 * near * far / ((far + near) - ndc * (far - near))
+            guard z > 6, a.dump.depth[row * w + col] < 1 else { continue }
+            let u = (Float(col) + 0.5) / Float(w), v = (Float(row) + 0.5) / Float(h)
+            let d = simd_normalize(fa + (-t.x + (t.x + t.y) * u) * ra + (-t.w + (t.z + t.w) * v) * ua)
+            let W = a.dump.origin + d * (z / simd_dot(d, fa))
+            guard W.z > height + 1 else { continue }
+            let mirrored = SIMD3(W.x, W.y, 2 * height - W.z)
+            guard let uvA = project(mirrored, a.dump), let uvB = project(mirrored, b.dump),
+                  let ca = read(sa, uvA), let cb = read(sb, uvB), ca.w > 0.95, cb.w > 0.95 else { continue }
+            let da = SIMD3(ca.x, ca.y, ca.z) / ca.w, db = SIMD3(cb.x, cb.y, cb.z) / cb.w
+            // only where A's mirror shows W itself (W is not hidden in the
+            // mirror, e.g. a bench top seen from below): A's mirror colour
+            // matches A's engine colour at W
+            let i0 = (row * w + col) * 4
+            let engineA = SIMD3(Float(a.dump.rgba[i0]), Float(a.dump.rgba[i0 + 1]), Float(a.dump.rgba[i0 + 2])) / 255
+            guard simd_reduce_max(abs(da - engineA)) < 0.05 else { continue }
+            sum += simd_reduce_add(abs(da - db)) / 3 * 255
+            n += 1
+            // the same point unmirrored, straight from both engine images: how
+            // much two views of one surface differ by sampling alone
+            if let ub = project(W, b.dump) {
+                let xb = min(max(Int(ub.x * Float(w)), 0), w - 1), yb = min(max(Int(ub.y * Float(h)), 0), h - 1)
+                let i = (row * w + col) * 4, j = (yb * w + xb) * 4
+                base += Float((0..<3).reduce(0) { $0 + abs(Int(a.dump.rgba[i + $1]) - Int(b.dump.rgba[j + $1])) }) / 3
+            }
+        }
+    }
+    return n > 0 ? (n, sum / Float(n), base / Float(n)) : nil
+}
+
 for (i, a) in glassViews.enumerated() {
+    for b in glassViews[(i + 1)...] {
+        let apart = simd_distance(a.dump.origin, b.dump.origin)
+        if apart < 4, let m = compareSharp(a, b) {
+            print(String(format: "%@ vs %@ sharp mirror (%@): %d mirrored points both hold, mean difference %.1f/255 (the same points unmirrored in the engine images: %.1f/255)",
+                         a.name, b.name, apart < 0.01 ? "same origin" : "an eye apart", m.n, m.mean, m.baseline))
+            if apart >= 0.01, m.mean > m.baseline * 1.5 + 2 { failures += 1 }
+        }
+        // gaze, on what reaches the eye: the composite at the same glass and
+        // water points (the mirror holds only what is on screen, so it shifts
+        // a little with gaze where an occluder enters or leaves the frame)
+        if apart < 0.01, a.sharp != nil, let c = compare(a, b, \.glass) {
+            print(String(format: "%@ vs %@ gaze, final image: %d glass/water points, mean difference %.1f/255", a.name, b.name, c.n, c.mean))
+            if c.mean > 3 { failures += 1 }
+        }
+    }
+}
+for (i, a) in glassViews.enumerated() where a.sharp == nil {
     for b in glassViews[(i + 1)...] {
         let apart = simd_distance(a.dump.origin, b.dump.origin)
         guard apart < 4, let r = compare(a, b) else { continue }

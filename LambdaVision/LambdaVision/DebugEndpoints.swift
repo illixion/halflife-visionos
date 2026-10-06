@@ -540,6 +540,8 @@ enum DebugEndpoints {
         .flag("reprojectionDepth", \.reprojectionDepth),
         .flag("glassReflections", \.glassReflections),
         .flag("waterReflections", \.waterReflections),
+        .flag("sharpWaterReflections", \.sharpWaterReflections),
+        .number("waterRipples", \.waterRipples, 0...3),
         .number("reflectionStrength", \.reflectionStrength, 0.5...4),
         .choice("hdrTest", \.hdrTest, note: "not stored"),
         .flag("gpuPassTiming", \.gpuPassTiming, note: "not stored; fills the gpu columns of GET /perf"),
