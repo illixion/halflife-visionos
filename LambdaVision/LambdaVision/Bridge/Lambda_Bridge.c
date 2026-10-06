@@ -3807,17 +3807,18 @@ static gt_getuiv_fn   gt_getuiv;
 static gt_getui64v_fn gt_getui64v;
 static _Atomic int    g_gt_enabled = 0;
 static int            g_gt_state = 0;        // 0 untried, 1 ready, -1 unavailable
-static GLuint         g_gt_q[2][GT_RING];
-static int            g_gt_issued[2][GT_RING];
-static int            g_gt_head[2];
-static int            g_gt_active = -1;      // eye whose query is open
-static _Atomic float  g_gt_ms[2];
-static _Atomic int    g_gt_fresh = 0;        // bit per eye: a result not yet taken
+// slots 0 and 1 are the eyes, 2 the glass probe face (lambda_gl_probe_ms)
+static GLuint         g_gt_q[3][GT_RING];
+static int            g_gt_issued[3][GT_RING];
+static int            g_gt_head[3];
+static int            g_gt_active = -1;      // slot whose query is open
+static _Atomic float  g_gt_ms[3];
+static _Atomic int    g_gt_fresh = 0;        // bit per slot: a result not yet taken
 
 void lambda_gl_set_gpu_timing(int enabled) { atomic_store(&g_gt_enabled, enabled ? 1 : 0); }
 
 int lambda_gl_gpu_eye_ms(float out_ms[2]) {
-    int fresh = atomic_exchange(&g_gt_fresh, 0);
+    int fresh = atomic_fetch_and(&g_gt_fresh, ~3) & 3;
     out_ms[0] = atomic_load(&g_gt_ms[0]);
     out_ms[1] = atomic_load(&g_gt_ms[1]);
     return fresh;
@@ -3835,7 +3836,7 @@ static int gt_ready(void) {
             gt_getuiv   = (gt_getuiv_fn)eglGetProcAddress("glGetQueryObjectuivEXT");
             gt_getui64v = (gt_getui64v_fn)eglGetProcAddress("glGetQueryObjectui64vEXT");
             if (gt_gen && gt_begin_q && gt_end_q && gt_getuiv && gt_getui64v) {
-                gt_gen(2 * GT_RING, &g_gt_q[0][0]);
+                gt_gen(3 * GT_RING, &g_gt_q[0][0]);
                 g_gt_state = 1;
             }
         }
@@ -3882,6 +3883,104 @@ static void gt_end(void) {
     gt_end_q(GL_TIME_ELAPSED_EXT);
     g_gt_issued[eye][g_gt_head[eye]] = 1;
     g_gt_head[eye] = (g_gt_head[eye] + 1) % GT_RING;
+}
+
+// ---- Glass pass (r_vrglass) ------------------------------------------------
+// The engine's glass plane table and eye view (gl_rsurf.c R_VRGlass,
+// gl_rmain.c vr_glass_view) are refilled by every eye's render; each eye's
+// copy is kept here for the app's composite. The environment probe the glass
+// reflects is the app's (GlassProbe.swift): it stages one face at a time,
+// drawn right after the second eye so the eye's fence covers it.
+extern int   vr_glass_count;
+extern float vr_glass_planes[LAMBDA_GLASS_MAX_PLANES][4];
+extern float vr_glass_view[12];
+extern void  R_VRProbeFace(const float *origin, int face, int size, float zNear, float zFar);
+static lambda_glass_eye_t g_glass_eye[2];
+static void  *g_probe_color = NULL, *g_probe_depth = NULL;
+static int    g_probe_size = 0, g_probe_face = 0;
+static float  g_probe_origin[3];
+static _Atomic float g_probe_cpu_ms = 0.0f;
+static _Atomic int   g_probe_cpu_fresh = 0;
+
+static void lambda_glass_capture_eye(int eye) {
+    lambda_glass_eye_t *e = &g_glass_eye[eye];
+    memcpy(e->origin, vr_glass_view, sizeof(float) * 3);
+    memcpy(e->forward, vr_glass_view + 3, sizeof(float) * 3);
+    memcpy(e->right, vr_glass_view + 6, sizeof(float) * 3);
+    memcpy(e->up, vr_glass_view + 9, sizeof(float) * 3);
+    int n = vr_glass_count;
+    if (n < 0) n = 0;
+    if (n > LAMBDA_GLASS_MAX_PLANES) n = LAMBDA_GLASS_MAX_PLANES;
+    e->count = n;
+    memcpy(e->planes, vr_glass_planes, sizeof(float) * 4 * (size_t)n);
+}
+
+void lambda_glass_get_eye(int eye, lambda_glass_eye_t *out) {
+    if (!out) return;
+    if (eye < 0 || eye > 1) { memset(out, 0, sizeof(*out)); return; }
+    *out = g_glass_eye[eye];
+}
+
+int lambda_gl_probe_ms(float out_ms[2]) {
+    int fresh = (atomic_fetch_and(&g_gt_fresh, ~4) & 4) ? 1 : 0;
+    if (atomic_exchange(&g_probe_cpu_fresh, 0)) fresh |= 2;
+    out_ms[0] = atomic_load(&g_gt_ms[2]);
+    out_ms[1] = atomic_load(&g_probe_cpu_ms);
+    return fresh;
+}
+
+// One staged probe face into its own FBO (the app's two slice views, through
+// EGLImages like the eye targets), then the eye's FBO is bound back for
+// lambda_gl_end_frame.
+static void worker_render_probe_face(void) {
+    void *color = g_probe_color, *depth = g_probe_depth;
+    g_probe_color = g_probe_depth = NULL;
+    if (!color || !depth || g_probe_size <= 0) return;
+
+    typedef void (*egl_rb_fn)(GLenum, void *);
+    static egl_rb_fn egl_rb = NULL;
+    if (!egl_rb) egl_rb = (egl_rb_fn)eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
+    if (!egl_rb) return;
+
+    double t0 = ft_now_ms();
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    EGLImage ci = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE,
+                                 (EGLClientBuffer)color, img_attribs);
+    EGLImage di = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE,
+                                 (EGLClientBuffer)depth, img_attribs);
+    GLuint rb[2] = { 0, 0 }, fbo = 0;
+    if (ci != EGL_NO_IMAGE && di != EGL_NO_IMAGE) {
+        glGenRenderbuffers(2, rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[0]);
+        egl_rb(GL_RENDERBUFFER, ci);
+        glBindRenderbuffer(GL_RENDERBUFFER, rb[1]);
+        egl_rb(GL_RENDERBUFFER, di);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb[0]);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb[1]);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+            // the 2D layer may have left a scissor on
+            GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+            glDisable(GL_SCISSOR_TEST);
+            glViewport(0, 0, g_probe_size, g_probe_size);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClearDepthf(1.0f);
+            glClearStencil(0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            gt_begin(2);
+            R_VRProbeFace(g_probe_origin, g_probe_face, g_probe_size, g_w_znear, g_w_zfar);
+            gt_end();
+            if (scissor) glEnable(GL_SCISSOR_TEST);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    }
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (rb[0]) glDeleteRenderbuffers(2, rb);
+    if (ci != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, ci);
+    if (di != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, di);
+    atomic_store(&g_probe_cpu_ms, (float)(ft_now_ms() - t0));
+    atomic_store(&g_probe_cpu_fresh, 1);
 }
 
 // ---- Engine console commands ----------------------------------------------
@@ -3973,6 +4072,7 @@ static int worker_engine_frame(void) {
         double t0 = ft_now_ms();
         lambda_engine_frame();
         double t1 = ft_now_ms();
+        lambda_glass_capture_eye(0);
         // The client (HUD_CreateEntities) just published the active
         // weapon's studio header when vr_weapon_external is on; bake a
         // fresh bind-pose mesh if the model changed. Cheap no-op
@@ -4097,12 +4197,14 @@ static void *gl_worker_main(void *arg) {
                 double t0 = ft_now_ms();
                 lambda_engine_render_view_only();
                 double t1 = ft_now_ms();
+                lambda_glass_capture_eye(1);
                 if (g_w_have_view_angles)
                     lambda_engine_clear_view_angles();
                 if (g_w_have_tangents)
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 gt_end();
+                worker_render_probe_face();
                 er = lambda_gl_end_frame();
                 g_ft_cur[2] = t1 - t0;
                 g_ft_cur[3] = ft_now_ms() - t1;
@@ -4290,6 +4392,17 @@ int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
 void lambda_gl_worker_set_depth_texture(void *mtl_depth_view) {
     pthread_mutex_lock(&g_w_api_mtx);
     g_w_depth = mtl_depth_view;
+    pthread_mutex_unlock(&g_w_api_mtx);
+}
+
+void lambda_gl_worker_set_probe_face(void *mtl_color_view, void *mtl_depth_view,
+                                     int size, int face, const float *origin3) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    g_probe_color = mtl_color_view;
+    g_probe_depth = mtl_depth_view;
+    g_probe_size = size;
+    g_probe_face = face;
+    if (origin3) memcpy(g_probe_origin, origin3, sizeof(g_probe_origin));
     pthread_mutex_unlock(&g_w_api_mtx);
 }
 
