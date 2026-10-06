@@ -16,6 +16,7 @@ let package = Package(
     ],
     products: [
         .library(name: "GameLibrary", targets: ["GameLibrary"]),
+        .library(name: "GameLibraryServer", targets: ["GameLibraryServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19"),
@@ -24,8 +25,24 @@ let package = Package(
         .target(
             name: "GameLibrary",
             dependencies: [.product(name: "ZIPFoundation", package: "ZIPFoundation")]),
+        // "Manage over Wi-Fi": the PIN-paired HTTP server and the page it
+        // serves, over the library and importer above.
+        .target(
+            name: "GameLibraryServer",
+            dependencies: ["GameLibrary"],
+            resources: [.copy("Web")]),
+        // Runs the server on the Mac against a scratch GameData, for curl
+        // and a browser: `swift run library-server <GameData dir>`.
+        .executableTarget(
+            name: "library-server",
+            dependencies: ["GameLibraryServer"],
+            path: "Sources/LibraryServerTool"),
         .testTarget(
             name: "GameLibraryTests",
             dependencies: ["GameLibrary", .product(name: "ZIPFoundation", package: "ZIPFoundation")]),
+        .testTarget(
+            name: "GameLibraryServerTests",
+            dependencies: ["GameLibraryServer", "GameLibrary",
+                           .product(name: "ZIPFoundation", package: "ZIPFoundation")]),
     ]
 )

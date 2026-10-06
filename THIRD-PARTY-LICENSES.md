@@ -60,3 +60,17 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## libarchive.js (bundled in the Wi-Fi management page)
+
+<https://github.com/nika-begiashvili/libarchivejs> — version 2.0.2, MIT.
+Its `dist/` files (`libarchive.js`, `worker-bundle.js`, `libarchive.wasm`)
+are vendored unmodified in
+`LambdaVision/Packages/GameLibrary/Sources/GameLibraryServer/Web/vendor/libarchive/`
+and ship inside the app, served to the visitor's browser to unpack 7z and
+RAR archives. The WebAssembly build contains libarchive 3.7.2 (BSD
+2-Clause), zlib (zlib License), bzip2 1.0.6 (BSD-style), liblzma from XZ
+Utils (public domain / 0BSD) and OpenSSL's crypto (Apache 2.0); the module
+bundles Comlink (Apache 2.0). Every one of these notices is reproduced in
+full in `vendor/libarchive/LICENSES.txt` next to the files, which is also
+served with the page.
