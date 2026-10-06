@@ -161,8 +161,23 @@ called **`steam_legacy`** ("Pre-25th Anniversary Build") for app **70**
 
 Either script downloads SteamCMD to `~/bin/steamcmd` first if it isn't
 there already, then runs it non-interactively except for the password /
-Steam Guard prompts (never passed as an argument, never stored). Equivalent
-manual invocation, if you'd rather run SteamCMD yourself:
+Steam Guard prompts (never passed as an argument, never stored).
+
+Opposing Force (app **50**) and Blue Shift (app **130**) are optional extra
+app IDs, and `--zip` (`-Zip`) packs each game, HD overlay included, into
+`build/asset-zips/<gamedir>.zip` for importing on the headset:
+
+```bash
+./scripts/fetch-assets.sh --zip YOUR_STEAM_USERNAME 50 130
+.\scripts\fetch-assets.ps1 -SteamUsername YOUR_STEAM_USERNAME -ExtraApps 50,130 -Zip
+```
+
+Neither expansion has a `steam_legacy` branch: their public build (2020) is
+already pre-anniversary. But both pull Half-Life's depots from app 70's
+*current* build, which would overwrite a legacy `valve/` installed in the
+same folder. So the scripts install them into `build/steam-mods/` and copy
+only `gearbox*` / `bshift*` into `HalfLifeAssets/`. Do the same if you run
+SteamCMD yourself. Equivalent manual invocation for Half-Life:
 
 ```bash
 ~/bin/steamcmd/steamcmd.sh \
