@@ -208,42 +208,59 @@ no separate opt-in step for the HD pack. It lands at
 `HalfLifeAssets/valve_hd/` alongside `HalfLifeAssets/valve/`; both are
 gamedirs `fetch-assets.sh`/`.ps1` fetch and validate in the same run.
 
-**HD pack case-sensitivity gotcha:** the depot ships
-`valve_hd/models/Hgrunt03.mdl` with a capital H, but the engine requests
-`hgrunt03.mdl` (lowercase) — invisible on Windows/steamcmd's usual
-case-insensitive volumes, but a missing-model crash on a case-sensitive
-filesystem (visionOS APFS, Linux ext4). `fetch-assets.sh` renames it to
-lowercase automatically after download; if a similar
-`models/<Capitalized>.mdl` missing-file error shows up for some other HD
-model, it's the same class of bug — rename it lowercase.
+**HD pack case-sensitivity note:** the depot ships
+`valve_hd/models/Hgrunt03.mdl` with a capital H while the engine requests
+`hgrunt03.mdl`. The engine's filesystem and the app's own model loaders
+both look files up case-insensitively, so this no longer matters on the
+headset; `fetch-assets.sh` still renames it, which is harmless.
 
-The folder we care about is `HalfLifeAssets/valve/`. Assets reach the
-device out of band: after installing the app once, run
-`./scripts/push-assets.sh` to copy every gamedir (valve/, valve_hd/,
-mods…) into the app's `Documents/GameData` via `devicectl`. The copy is
-incremental (unchanged files are skipped; `--delete` mirrors removals), it
-survives plain reinstalls (rebuilding over the existing app), and code-only
-rebuilds no longer re-send ~450 MB per install. It does NOT survive
-deleting the app from the headset first — that wipes the data container,
-so `Documents/GameData` is empty again and the app shows an on-screen
-warning to re-run `push-assets.sh`. The engine prefers `Documents/GameData`
-as `-rodir` when `valve/liblist.gam` is present there.
+### Getting games onto the headset
 
-Without a cable: open **Manage over Wi-Fi** (the Wi-Fi button in the main
-window), then either open the address it shows in any browser on the same
-network and drop the `HalfLifeAssets` folder onto the page, or run
-`./scripts/push-assets.sh --wifi <host:port>` and type the PIN it shows.
-Both send only the files that differ and resume an interrupted transfer;
-the server stops when the window closes. To try the page on the Mac,
-`swift run library-server <some GameData dir>` in
-`LambdaVision/Packages/GameLibrary`.
+The app does all preparation on-device: it finds the game folders in
+whatever you send, attaches HD overlays to their base game, writes
+`vfs.cfg` with `fs_mount_hd "1"` so HD models are active from the first map,
+and classifies each game (see below). Three ways to send them:
 
-`push-assets.sh` also mounts `valve_hd/` for you: if it's present and
-`valve/vfs.cfg` doesn't already exist, it pushes a `vfs.cfg` containing
-`fs_mount_hd "1"` — `FS_LoadGameInfo` execs that before mounting gamedirs,
-so HD models are active from the first map load with no manual engine
-config. In-game, `K` sends `impulse 101` (give-all) so you can pull every
-weapon and inspect its HD viewmodel immediately.
+1. **Wi-Fi (easiest).** Open **Manage over Wi-Fi** from the main window.
+   It shows an address (`http://<name>.local:8642`, with the IP as a
+   fallback) and a 6-digit PIN. Open the address in a browser on the same
+   network, type the PIN, and drop your `HalfLifeAssets` folder (or a
+   mod's folder, `.zip`, `.7z` or `.rar`) onto the page. Only files that
+   differ are sent, an interrupted transfer resumes, and the page also
+   lists, activates and deletes installed games. The server runs only
+   while that window is open.
+2. **AirDrop / Files.** `fetch-assets.sh --zip` writes one zip per game to
+   `build/asset-zips/`; AirDrop them and choose *Open in LambdaVision*, or
+   use **Import** in the app. `Documents/GameData` is also visible in the
+   Files app.
+3. **Developers with a cable:** `./scripts/push-assets.sh` copies every
+   gamedir into `Documents/GameData` via `devicectl` (incremental;
+   `--delete` mirrors removals). `./scripts/push-assets.sh --wifi
+   <host:port>` does the same over the Wi-Fi API. To try the page on the
+   Mac, `swift run library-server <some GameData dir>` in
+   `LambdaVision/Packages/GameLibrary`.
+
+Imported games live in the app's data container: they survive reinstalls
+but not deleting the app. In-game, `K` sends `impulse 101` (give-all) so
+you can inspect every weapon's viewmodel immediately.
+
+### Expansions and mods
+
+The main window lists every installed game; pick one and the engine starts
+it with `-game <dir>` at its liblist start map. Switching games needs an app
+relaunch (the engine's own *Change game* asks you to reopen the app). Game
+code is compiled into the app — visionOS can't load a mod's DLL — so games
+fall into four tiers:
+
+| Tier | What | Support |
+|---|---|---|
+| Built-in | Half-Life, Opposing Force, Blue Shift | compiled in (`VisionPort/games.list`) |
+| Compiled by you | any hlsdk-portable-based mod source | `./VisionPort/build_game.sh <git-url-or-path> [branch]`, then rebuild the app; the VR layer (`VisionPort/hlsdk-vr`) is applied automatically |
+| Content-only mods | map packs and mods that use Half-Life's own code | just import them |
+| Custom-DLL mods | Windows DLL, no source | *Experimental*: maps load on Half-Life's code, the mod's own entities are missing |
+
+Mods written against the original Windows SDK need porting first; see
+FWGS's mod porting guide.
 
 For a self-contained app (assets baked into the bundle — e.g. handing a
 build to someone), build with `BUNDLE_HL_ASSETS=1` set (re-enables the
