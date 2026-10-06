@@ -697,6 +697,45 @@ is conservative there.
 **Cost:** unchanged in shape (a few more ALU per water pixel for the band
 limit; the resolve's fallback adds nothing): mirror ≈ 1.4–1.8 ms as in 3h.
 
+### 3j. Sharp water, round 7: moiré in the mirrored sink box
+
+**Device (0e87563):** hatching still visible, and a user A/B pinned it on
+the sharp mirror, not the ripple (soft water with ripples off: none; sharp
+with ripples off: back). It is confined to the mirror image of the c1a2
+sink's translucent water box: fine, wavy horizontal lines that shift with
+the head (`images/2.png`, `3.png` in the session folder).
+
+**Fixes, both from the coordinator's hypotheses:**
+
+- **Glass and water are no longer mirrored.** `ssprProject` drops any source
+  pixel the engine marked (stencil ≥ 16). Those pixels hold the pane's
+  colour over whatever is behind it — glass writes no depth, so the mirror
+  put the pane's colour at the background's mirrored position — and the
+  box's texture, mirrored at the grid's rate, is where the moiré lived.
+  The mirror leaves them empty and the probe fills in (a reflection of
+  water in water is the probe's job). The resolve's fallback can no longer
+  land on such a pixel, since every candidate's source is unmarked.
+- **A prefiltered source.** A new dispatch (`ssprPrefilter`) writes the engine
+  image at half size, each texel the mean of a 2 × 2 block; the resolve's
+  sub-rays, two engine pixels apart, sample that instead of the full image,
+  so fine source texture no longer aliases at the sub-ray spacing.
+
+**DepthProbe:** a new measure of fine horizontal lines restricted to where
+the mirror shows glass or water (each marked pixel's point on its own
+plane, mirrored and projected, dilated), on a composite rendered at twice
+the engine's resolution like the headset's drawable, sharp against soft
+with the ripple off. It runs on the c1a2 bench views (the box mirrored in
+the flood: 25–60 k pixels). Honest result: the Mac does not reproduce the
+device's moiré — 0e87563 and this build both read sharp ≈ soft (0.58 vs
+0.56, 0.66–0.67 vs 0.65) — so the check guards the case but did not catch
+the old build. The other checks pass and improve slightly (mirror between
+eyes 5.0/255 against a 3.5 baseline, was 6.0 / 4.9).
+
+**Cost:** the prefilter is one tap and one write per half-resolution texel
+for both eyes (~0.1–0.2 ms, counted in gMirrorFill); the projection adds a
+stencil read per source texel; the resolve samples a smaller texture.
+Mirror total ≈ 1.5–2.0 ms expected.
+
 ### Presets (planned)
 
 Graphics will collapse to two presets: **Modern** freely combines the new

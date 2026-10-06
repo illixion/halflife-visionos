@@ -200,6 +200,11 @@ instead of deleting them.
   per-wave band limit and fold cap, clamped nudge. DepthProbe adds a moving-
   ripple stability case and a hatching measure that fails d7868d3. See
   `docs/plans/modern-lighting.md` (3i).
+- **Sharp water, round 7: moiré in the mirrored sink box, device check
+  pending.** The mirror no longer reflects glass/water-marked pixels (the
+  probe does) and samples a 2 × 2-prefiltered half-size source. DepthProbe
+  measures the mirrored-glass region at 2× resolution, but the Mac does not
+  reproduce the device moiré. See `docs/plans/modern-lighting.md` (3j).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
