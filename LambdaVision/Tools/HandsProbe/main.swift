@@ -1,6 +1,7 @@
 // Drives the app's hand-gesture logic on the Mac: WeaponWheel.swift,
-// JumpSequencer.swift, ThumbGestures.swift and HUDIcon.swift are compiled verbatim (build.sh), so
-// what passes here is what the app runs. Exits non-zero on the first failure.
+// JumpSequencer.swift, ThumbGestures.swift, HUDIcon.swift and InputMode.swift
+// are compiled verbatim (build.sh), so what passes here is what the app runs.
+// Exits non-zero on the first failure.
 
 import Foundation
 import simd
@@ -130,6 +131,156 @@ do {
     _ = step(0.03, origin + up * 0.06, now: 5.1, list: [])
     check(g.entries.count == entries.count, "entries captured at open")
     print("wheel gesture: ok")
+}
+
+// MARK: Opening a slot into its weapons
+
+do {
+    func member(_ name: String, empty: Bool = false, inHand: Bool = false) -> WeaponWheel.Member {
+        WeaponWheel.Member(weaponID: 0, name: name, empty: empty, inHand: inHand)
+    }
+    var pistols = slot(1, "weapon_357", owned: 2, pick: 1)
+    pistols.members = [member("weapon_9mmhandgun", inHand: true), member("weapon_357")]
+    var heavy = slot(2, "weapon_shotgun", owned: 3)
+    heavy.members = [member("weapon_shotgun"), member("weapon_9mmAR"), member("weapon_crossbow", empty: true)]
+    var lone = slot(0, "weapon_crowbar")
+    lone.members = [member("weapon_crowbar")]
+    let slots = [lone, pistols, heavy, slot(3, "weapon_rpg")]   // the RPG slot publishes no members
+    let e = WeaponWheel.entries(slots: slots, selectionAllowed: true, hasSuit: true, utilities: true)
+    check(e.count == 7, "4 slots + 3 utilities")
+    check(e[0].members.isEmpty, "a one-weapon slot has nothing to open")
+    check(e[1].members.map(\.action) == [.weapon("weapon_9mmhandgun"), .weapon("weapon_357")], "pistol members in slot order")
+    check(e[1].members[0].inHand && !e[1].members[1].inHand, "the weapon in hand is marked")
+    check(e[2].members[2].dim, "an empty member is dim")
+    check(e[3].members.isEmpty, "no published members: nothing to open")
+
+    // Arc layout: centred on the slot, each weapon at least minMemberTurns wide.
+    for (entry, items) in [(1, 2), (2, 3), (6, 5)] {
+        let arc = WeaponWheel.memberArc(entry: entry, count: 7, items: items)
+        let mid = arc.start + arc.item * Float(items) / 2
+        check(abs(mid - WeaponWheel.sectorCenterTurns(entry, count: 7)) < 1e-5, "arc centred on slot \(entry)")
+        check(arc.item >= WeaponWheel.minMemberTurns - 1e-6, "arc items wide enough")
+        for k in 0..<items {
+            let t = (arc.start + arc.item * (Float(k) + 0.5)) * 2 * .pi
+            check(WeaponWheel.member(dx: sinf(t) * 0.15, dy: cosf(t) * 0.15, entry: entry, count: 7, items: items) == k,
+                  "slot \(entry): centre of weapon \(k)")
+        }
+        // Overshooting the ends clamps.
+        let before = (arc.start - 0.05) * 2 * .pi, after = (arc.start + arc.item * Float(items) + 0.05) * 2 * .pi
+        check(WeaponWheel.member(dx: sinf(before), dy: cosf(before), entry: entry, count: 7, items: items) == 0, "clamp start")
+        check(WeaponWheel.member(dx: sinf(after), dy: cosf(after), entry: entry, count: 7, items: items) == items - 1, "clamp end")
+    }
+
+    var g = WeaponWheelGesture()
+    var t = WeaponWheelGesture.Tuning()
+    let right = SIMD3<Float>(1, 0, 0), up = SIMD3<Float>(0, 1, 0)
+    let origin = SIMD3<Float>(0, 1.2, -0.4)
+    func dir(_ turns: Float) -> SIMD3<Float> { SIMD3(sinf(turns * 2 * .pi), cosf(turns * 2 * .pi), 0) }
+    func step(_ spread: Float, _ hand: SIMD3<Float>, now: Double) -> WeaponWheel.Entry? {
+        g.update(live: true, spread: spread, middleCurl: 0.08, triggerHeld: false, grip: hand,
+                 right: right, up: up, now: now, tuning: t, makeEntries: { e })
+    }
+    let heavyMid = WeaponWheel.sectorCenterTurns(2, count: 7)
+    // Inner ring: release-to-pick unchanged.
+    _ = step(0.03, origin, now: 0); _ = step(0.03, origin + dir(heavyMid) * 0.07, now: 0.1)
+    check(g.selected == 2 && !g.expanded, "inside the rim: slot armed, not opened")
+    check(step(0.10, origin + dir(heavyMid) * 0.07, now: 0.2)?.action == .weapon("weapon_shotgun"),
+          "inner-ring release picks the slot's pick")
+    // Past the rim: opens; the angle picks along the arc; release takes that weapon.
+    _ = step(0.03, origin, now: 1); _ = step(0.03, origin + dir(heavyMid) * 0.07, now: 1.1)
+    _ = step(0.03, origin + dir(heavyMid) * 0.14, now: 1.2)
+    check(g.expanded && g.memberSelected == 1, "past the rim opens the slot, middle weapon armed")
+    let arc = WeaponWheel.memberArc(entry: 2, count: 7, items: 3)
+    _ = step(0.03, origin + dir(arc.start + arc.item * 2.5) * 0.14, now: 1.3)
+    check(g.expanded && g.selected == 2 && g.memberSelected == 2, "sliding along the arc arms the last weapon")
+    let v = g.view(right: right, up: up, now: 1.3)
+    check(v?.expansion?.entry == 2 && v?.expansion?.selected == 2, "view carries the expansion")
+    check(step(0.10, origin + dir(arc.start + arc.item * 2.5) * 0.14, now: 1.4)?.action == .weapon("weapon_crossbow"),
+          "release picks exactly the armed weapon")
+    // Opened, then back inside the rim: folds, and the inner ring works again.
+    _ = step(0.03, origin, now: 2); _ = step(0.03, origin + dir(heavyMid) * 0.07, now: 2.1)
+    _ = step(0.03, origin + dir(heavyMid) * 0.14, now: 2.2); check(g.expanded, "opened")
+    _ = step(0.03, origin + dir(heavyMid) * 0.10, now: 2.3); check(g.expanded, "hysteresis: still open at 10 cm")
+    _ = step(0.03, origin + dir(heavyMid) * 0.07, now: 2.4); check(!g.expanded && g.selected == 2, "folds inside the rim")
+    check(step(0.10, origin + dir(heavyMid) * 0.07, now: 2.5)?.action == .weapon("weapon_shotgun"), "folded: slot pick")
+    // A one-weapon slot never opens.
+    let loneMid = WeaponWheel.sectorCenterTurns(0, count: 7)
+    _ = step(0.03, origin, now: 3); _ = step(0.03, origin + dir(loneMid) * 0.15, now: 3.1)
+    check(g.selected == 0 && !g.expanded, "one weapon: nothing opens")
+    check(step(0.10, origin + dir(loneMid) * 0.15, now: 3.2)?.action == .weapon("weapon_crowbar"), "one weapon: picks it")
+    // Setting off: never opens.
+    t.expand = false
+    _ = step(0.03, origin, now: 4); _ = step(0.03, origin + dir(heavyMid) * 0.15, now: 4.1)
+    check(!g.expanded, "expand off: never opens")
+    check(step(0.10, origin + dir(heavyMid) * 0.15, now: 4.2)?.action == .weapon("weapon_shotgun"), "expand off: slot pick")
+    print("wheel expansion: ok")
+}
+
+// MARK: Gamepad wheel
+
+do {
+    var w = GamepadWheel()
+    let entries = WeaponWheel.entries(slots: hl, selectionAllowed: true, hasSuit: true, utilities: true)
+    var asked = 0
+    func poll(_ held: Bool, _ x: Float, _ y: Float, now: Double, list: [WeaponWheel.Entry]? = nil) -> WeaponWheel.Entry? {
+        w.update(held: held, stick: SIMD2(x, y), now: now, makeEntries: { asked += 1; return list ?? entries })
+    }
+    check(poll(true, 0, 0, now: 0, list: []) == nil && !w.isOpen, "no entries: stays shut")
+    _ = poll(false, 0, 0, now: 0.1)
+    _ = poll(true, 0, 0, now: 1); check(w.isOpen && asked == 2, "press opens, asks once per press")
+    _ = poll(true, 0, 0, now: 1.05); check(asked == 2, "held: not asked again")
+    _ = poll(true, 0.1, 0.2, now: 1.1); check(w.selected == -1, "inside the deadzone: nothing armed")
+    _ = poll(true, 0, 1, now: 1.2); check(w.selected == 0, "stick up arms 12 o'clock")
+    _ = poll(true, 0, 0, now: 1.3); check(w.selected == 0, "stick springs back: stays armed")
+    check(poll(false, 0, 0, now: 1.4)?.action == .weapon("weapon_crowbar") && !w.isOpen, "release picks")
+    _ = poll(true, 0, 0, now: 2)
+    check(poll(false, 0, 0, now: 2.1) == nil, "release with nothing armed cancels")
+    // Quick load (sector 7 of 8) needs its hold.
+    let t7 = WeaponWheel.sectorCenterTurns(7, count: 8) * 2 * .pi
+    _ = poll(true, 0, 0, now: 3); _ = poll(true, sinf(t7), cosf(t7), now: 3.1)
+    check(w.selected == 7 && (w.confirmProgress(now: 3.1) ?? -1) == 0, "quick load armed, hold starts")
+    check(poll(false, 0, 0, now: 3.2) == nil, "quick load released early does nothing")
+    _ = poll(true, 0, 0, now: 4); _ = poll(true, sinf(t7), cosf(t7), now: 4.1)
+    check(poll(false, 0, 0, now: 4.1 + WeaponWheel.quickLoadConfirmSeconds + 0.01)?.action == .quickLoad,
+          "quick load held long enough commits")
+    // Cancel while held: stays shut until pressed again.
+    _ = poll(true, 0, 1, now: 5); w.cancel()
+    _ = poll(true, 0, 1, now: 5.1); check(!w.isOpen, "cancelled: held button doesn't reopen")
+    check(poll(false, 0, 0, now: 5.2) == nil, "cancelled: release picks nothing")
+    _ = poll(true, 0, 0, now: 5.3); check(w.isOpen, "a fresh press reopens")
+    print("gamepad wheel: ok")
+}
+
+// MARK: Input mode handoff
+
+do {
+    check(InputHandoff.between(nil, .gamepad) == nil, "first frame: nothing to release")
+    check(InputHandoff.between(.hands, .hands) == nil, "no change: nothing")
+    let toPad = InputHandoff.between(.hands, .gamepad)!
+    check(toPad.releaseHands && toPad.releaseKeyboardMouse && !toPad.releaseGamepad, "hands → pad: hands and keys let go")
+    check(toPad.zeroAxes && toPad.unstickKeyboardMoves, "hands → pad: axes zeroed, keyboard moves unstuck")
+    let toKeys = InputHandoff.between(.gamepad, .keyboardMouse)!
+    check(toKeys.releaseGamepad && toKeys.releaseHands && !toKeys.releaseKeyboardMouse, "pad → keys: pad and hands let go")
+    check(toKeys.zeroAxes && !toKeys.unstickKeyboardMoves, "pad → keys: the key that switched isn't unstuck")
+    let toHands = InputHandoff.between(.keyboardMouse, .hands)!
+    check(toHands.releaseKeyboardMouse && toHands.releaseGamepad && !toHands.releaseHands, "keys → hands: keys and pad let go")
+    check(toHands.unstickKeyboardMoves, "keys → hands: a lost key release can't keep walking")
+    for c in InputHandoff.unstickCommands {
+        check(c.hasPrefix("-") && !["-jump", "-duck", "-attack", "-attack2", "-use", "-speed", "-reload"].contains(c),
+              "unstick never touches a button hands or the pad hold: \(c)")
+    }
+
+    var h = HeldCommands()
+    check(h.update("attack", pressed: true) == "+attack", "press sends +")
+    check(h.update("attack", pressed: true) == nil, "held: nothing")
+    check(h.update("duck", pressed: true) == "+duck", "second button")
+    check(h.releaseAll() == ["-attack", "-duck"], "handoff releases everything held, sorted")
+    check(h.held.isEmpty, "nothing held after the handoff")
+    check(h.update("attack", pressed: true) == nil, "still physically held: stays quiet")
+    check(h.update("attack", pressed: false) == nil, "its release: quiet too")
+    check(h.update("attack", pressed: true) == "+attack", "a fresh press works again")
+    check(h.releaseAll() == ["-attack"] && h.releaseAll().isEmpty, "release is idempotent")
+    print("input handoff: ok")
 }
 
 // MARK: Long jump timing

@@ -387,6 +387,56 @@ instead of deleting them.
 
 ## Resolved
 
+- ~~Stuck walking forward after connecting a controller~~ (device check
+  pending; cause not proven). Seen once: hand-stick movement, then a mouse
+  bump switched to keyboard+mouse and the Pro Controller to gamepad, and
+  the player kept walking forward for a while. The code paths all zeroed
+  the hand axes on the switch, so the fix covers every candidate:
+  - **Most likely, a frozen stick.** Only the launcher window had
+    `.handlesGameControllerEvents`; with the gaze on the Performance or
+    Console window the system takes the pad for focus navigation and polled
+    values freeze, a pushed stick staying pushed. Every window has it now.
+  - **Release on every mode switch** (`InputHandoff`, `InputMode.swift`):
+    each device that isn't the new owner lets go of what it holds. Hands:
+    clutch, swing, throttle, +jump/+duck/+use and both axes
+    (`HandMovement.releaseAll`). Gamepad: every held +command, the crouch
+    toggle, the wheel and its axes (`GamepadInput.releaseAll`, buttons via
+    `HeldCommands`, which keeps a still-held button quiet until pressed
+    again). Keyboard and mouse: key-ups for held keys and the mouse buttons.
+    The axes are zeroed outright, and entering hands or gamepad queues a
+    bare `-forward/-back/-moveleft/-moveright/-left/-right`, so a key whose
+    release went to another window can't keep walking.
+  - The gamepad no longer writes its (centred) axes every frame outside
+    gamepad mode, where it raced the hand stick's writes; a button counts as
+    gamepad activity on the press only, so a held trigger can't pull the
+    mode back each frame.
+  `Tools/HandsProbe` checks the handoff plan and `HeldCommands`.
+- ~~Gamepad: missing binds, no weapon wheel~~ (device check pending). New
+  layout (ControlsReference, README): left-stick click walks (+speed, was the
+  left shoulder), right-stick click toggles crouch (B drops it), D-pad down
+  sprays. Holding the left shoulder opens the hand wheel's entries as a
+  radial ahead of the view (`GamepadWheel` in `WeaponWheel.swift`): the
+  right stick arms a sector and stays armed when it springs back, releasing
+  selects, LOAD keeps its confirm hold, and the stick doesn't turn while it
+  is open. It hangs off the HEV overlay's lazy follower, 0.45 m out
+  (`Renderer.padWheelOffset`). The hand and gamepad wheels now draw through
+  one `WeaponWheel.View` (`WeaponWheelPanel.panel(view:)` / `arcs(for:)`).
+  On device: placement and size, flick-and-release, LOAD hold, and the
+  shoulder no longer walking.
+- ~~Weapon wheel can't pick a specific weapon in a slot~~ (device check
+  pending; the owner's idea). Push the hand on past the rim (11.8 cm, just
+  outside the armed wedge) over a slot holding several weapons and it opens
+  into an outer arc of them (12.4–17.6 cm), centred on the slot, at least
+  0.06 turns per weapon, the weapon in hand underlined. Sliding along the
+  arc arms one, release selects exactly it, and coming back inside 9.5 cm
+  folds it, so release-to-pick on the inner ring is unchanged. A one-weapon
+  slot never opens. The client now publishes every owned weapon
+  (`g_vr_wheel_members` in `vr_hud.cpp`, read through
+  `lambda_wheel_members`, same seqlock). Settings: *Wheel: reach past the
+  rim to pick a weapon*. `Tools/HandsProbe` checks the arc layout, opening,
+  folding, clamping and the setting. On device: the reach (radii in
+  `WeaponWheelGesture.Tuning` / `WeaponWheelPanel.member*R`) and legibility.
+
 - ~~HEV HUD in flat modes: ammo panel stuck at the resting gun hand~~
   (device check pending). Outside hands mode the HEV readouts become a
   Half-Life 2 style overlay (`HEVHUD.swift`): vitals 21° left and ammo 21°

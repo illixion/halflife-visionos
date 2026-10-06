@@ -112,6 +112,14 @@ nonisolated final class HEVHUD: @unchecked Sendable {
 
     init() { _ = Self.fontRequested }
 
+    /// The overlay's lazily followed view orientation as of the last scene,
+    /// for other view-pinned UI (the gamepad's weapon wheel); nil when no
+    /// scene ran in the last `LazyViewFollower` reset gap.
+    func overlayOrientation(at time: Double) -> simd_quatf? {
+        guard let last = lastTime, time - last <= Double(follower.tuning.resetGap) else { return nil }
+        return follower.orientation
+    }
+
     /// The renderer once the atlas exists; nil until then (or if Metal
     /// refused the pipeline, logged once).
     /// `trackingFormat` is the drawable's tracking-areas format (`.invalid`

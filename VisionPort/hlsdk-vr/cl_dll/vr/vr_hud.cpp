@@ -86,11 +86,18 @@ void VR_PublishHudState( void )
 //   pick's position among the slot's owned weapons, owned count, flags
 //   (1 = the weapon in hand is in this slot, 2 = nothing usable: no ammo)
 //   g_vr_wheel_names: the pick's classname per entry.
+//   g_vr_wheel_members: every owned weapon, slot by slot in slot order, so
+//   the wheel can open a slot into its weapons: [0] count, then per weapon
+//   slot, weapon id, flags (1 = in hand, 2 = no ammo); the classnames in
+//   g_vr_wheel_member_names. Same seqlock.
 #define VR_WHEEL_MAX 16
 #define VR_WHEEL_FIELDS 5
 #define VR_WHEEL_NAME 64
+#define VR_WHEEL_MEMBERS 32
 VR_SHARED int g_vr_wheel[4 + VR_WHEEL_MAX * VR_WHEEL_FIELDS] = { 2 };
 VR_SHARED char g_vr_wheel_names[VR_WHEEL_MAX][VR_WHEEL_NAME] = { "-" };
+VR_SHARED int g_vr_wheel_members[1 + VR_WHEEL_MEMBERS * 3] = { 0 };
+VR_SHARED char g_vr_wheel_member_names[VR_WHEEL_MEMBERS][VR_WHEEL_NAME] = { "-" };
 // The server's "slj" physinfo key (the long jump module), as the client's own
 // movement prediction reads it: 1 = owned, 0 = not, -1 = not published yet.
 VR_SHARED int g_vr_longjump = -1;
@@ -102,8 +109,13 @@ void VR_PublishWheelState( void )
 
 	int buf[4 + VR_WHEEL_MAX * VR_WHEEL_FIELDS];
 	char names[VR_WHEEL_MAX][VR_WHEEL_NAME];
+	int mbuf[1 + VR_WHEEL_MEMBERS * 3];
+	char mnames[VR_WHEEL_MEMBERS][VR_WHEEL_NAME];
 	memset( buf, 0, sizeof( buf ));
 	memset( names, 0, sizeof( names ));
+	memset( mbuf, 0, sizeof( mbuf ));
+	memset( mnames, 0, sizeof( mnames ));
+	int members = 0;
 	const WEAPON *cur = gHUD.m_Ammo.m_pWeapon;
 	int count = 0;
 	for( int slot = 0; slot < MAX_WEAPON_SLOTS && count < VR_WHEEL_MAX; slot++ )
@@ -115,6 +127,14 @@ void VR_PublishWheelState( void )
 				owned[n++] = gWR.rgSlots[slot][pos];
 		if( !n )
 			continue;
+		for( int i = 0; i < n && members < VR_WHEEL_MEMBERS; i++, members++ )
+		{
+			int *m = &mbuf[1 + members * 3];
+			m[0] = slot;
+			m[1] = owned[i]->iId;
+			m[2] = ( owned[i] == cur ? 1 : 0 ) | ( gWR.HasAmmo( owned[i] ) ? 0 : 2 );
+			strncpy( mnames[members], owned[i]->szName, VR_WHEEL_NAME - 1 );
+		}
 		const bool holding = cur && cur->iSlot == slot;
 		WEAPON *pick = NULL;
 		if( holding )
@@ -149,13 +169,19 @@ void VR_PublishWheelState( void )
 	buf[2] = ( suit && !gHUD.m_fPlayerDead
 		&& !( gHUD.m_iHideHUDDisplay & ( HIDEHUD_WEAPONS | HIDEHUD_ALL ))) ? 1 : 0;
 
+	mbuf[0] = members;
+
 	if( !memcmp( buf + 1, g_vr_wheel + 1, sizeof( buf ) - sizeof( int ))
-		&& !memcmp( names, g_vr_wheel_names, sizeof( names )))
+		&& !memcmp( names, g_vr_wheel_names, sizeof( names ))
+		&& !memcmp( mbuf, g_vr_wheel_members, sizeof( mbuf ))
+		&& !memcmp( mnames, g_vr_wheel_member_names, sizeof( mnames )))
 		return;
 	const int seq = g_vr_wheel[0];
 	__atomic_store_n( &g_vr_wheel[0], seq + 1, __ATOMIC_RELEASE );
 	__atomic_thread_fence( __ATOMIC_SEQ_CST );
 	memcpy( g_vr_wheel + 1, buf + 1, sizeof( buf ) - sizeof( int ));
 	memcpy( g_vr_wheel_names, names, sizeof( names ));
+	memcpy( g_vr_wheel_members, mbuf, sizeof( mbuf ));
+	memcpy( g_vr_wheel_member_names, mnames, sizeof( mnames ));
 	__atomic_store_n( &g_vr_wheel[0], seq + 2, __ATOMIC_RELEASE );
 }

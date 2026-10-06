@@ -235,6 +235,12 @@ final class GameSettings {
         didSet { AppSettingsStore.wheelUtilities = wheelUtilities
                  Renderer.weaponWheelUtilities = wheelUtilities }
     }
+    /// Pushing the hand past the weapon wheel's rim opens a slot into its
+    /// weapons (WeaponWheelGesture).
+    var wheelExpand: Bool = AppSettingsStore.wheelExpand {
+        didSet { AppSettingsStore.wheelExpand = wheelExpand
+                 Renderer.weaponWheelExpand = wheelExpand }
+    }
     /// Thumb tip to the side of the middle finger holds +attack2
     /// (ThumbGestures). Only does anything while gesture input is on.
     var altFireGesture: Bool = AppSettingsStore.altFireGesture {
@@ -364,6 +370,7 @@ final class GameSettings {
         HandMovement.armSwingSensitivity = Float(armSwingSensitivity)
         HandMovement.longJumpEnabled = handLongJump
         Renderer.weaponWheelUtilities = wheelUtilities
+        Renderer.weaponWheelExpand = wheelExpand
         Renderer.altFireGestureEnabled = altFireGesture
         Renderer.altFireSensitivity = Float(altFireSensitivity)
         Renderer.avatarBodyEnabled = avatarBody

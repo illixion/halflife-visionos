@@ -149,6 +149,7 @@ struct SettingsView: View {
                     Toggle("Long jump at a run", isOn: $settings.handLongJump)
                         .disabled(!settings.gestureInputEnabled)
                     Toggle("Wheel: flashlight, quick save/load", isOn: $settings.wheelUtilities)
+                    Toggle("Wheel: reach past the rim to pick a weapon", isOn: $settings.wheelExpand)
                         .disabled(!settings.gestureInputEnabled)
                     Toggle("Alt-fire: thumb to middle finger", isOn: $settings.altFireGesture)
                         .disabled(!settings.gestureInputEnabled)

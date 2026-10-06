@@ -2722,6 +2722,34 @@ int lambda_wheel_state(lambda_wheel_slot_t *out, int max, int *allowed) {
     return -1;
 }
 
+#define LAMBDA_WHEEL_MEMBERS 32
+extern int  g_vr_wheel_members[1 + LAMBDA_WHEEL_MEMBERS * 3];
+extern char g_vr_wheel_member_names[LAMBDA_WHEEL_MEMBERS][64];
+
+// Same seqlock as lambda_wheel_state (g_vr_wheel[0] guards both).
+int lambda_wheel_members(lambda_wheel_member_t *out, int max) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int seq = __atomic_load_n(&g_vr_wheel[0], __ATOMIC_ACQUIRE);
+        if (seq & 1) continue;
+        int count = g_vr_wheel_members[0];
+        if (count < 0) count = 0;
+        if (count > LAMBDA_WHEEL_MEMBERS) count = LAMBDA_WHEEL_MEMBERS;
+        if (count > max) count = max;
+        for (int i = 0; i < count; i++) {
+            const int *e = &g_vr_wheel_members[1 + i * 3];
+            out[i].slot = e[0];
+            out[i].weapon_id = e[1];
+            out[i].flags = e[2];
+            memcpy(out[i].name, g_vr_wheel_member_names[i], sizeof(out[i].name));
+            out[i].name[sizeof(out[i].name) - 1] = 0;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_vr_wheel[0], __ATOMIC_RELAXED) != seq) continue;
+        return count;
+    }
+    return -1;
+}
+
 int lambda_has_longjump(void) {
     return g_vr_longjump;
 }

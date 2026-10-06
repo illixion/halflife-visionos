@@ -86,6 +86,69 @@ nonisolated struct InputModeSelector {
     }
 }
 
+/// What a change of input mode lets go of. Every device that isn't the new
+/// owner releases whatever it holds — the joystick axes it last wrote and
+/// every +command it pressed — so nothing one device was doing carries into
+/// the other's control. Found on device: moving with the hand stick, then
+/// picking up a controller, left the player walking forward for a while.
+nonisolated struct InputHandoff: Equatable {
+    var releaseHands = false
+    var releaseGamepad = false
+    var releaseKeyboardMouse = false
+    /// Zero the joystick axes outright, whoever wrote them last.
+    var zeroAxes = false
+    /// Queue a bare `-forward`/`-back`/`-moveleft`/`-moveright`/`-left`/
+    /// `-right` (hlsdk's "unstick": it clears every key holding them).
+    /// Only those: hands and the gamepad move through the axes, never these
+    /// buttons, so the new owner loses nothing, while a keyboard key whose
+    /// release went missing (it went to another window) can't keep walking.
+    /// Not when the keyboard itself takes over: the key that switched the
+    /// mode may be one of them.
+    var unstickKeyboardMoves = false
+
+    /// The handoff from `old` to `new`, or nil when nothing changed (or on
+    /// the very first frame, when nothing was held yet).
+    static func between(_ old: InputMode?, _ new: InputMode) -> InputHandoff? {
+        guard let old, old != new else { return nil }
+        return InputHandoff(releaseHands: new != .hands,
+                            releaseGamepad: new != .gamepad,
+                            releaseKeyboardMouse: new != .keyboardMouse,
+                            zeroAxes: true,
+                            unstickKeyboardMoves: new != .keyboardMouse)
+    }
+
+    static let unstickCommands = ["-forward", "-back", "-moveleft", "-moveright", "-left", "-right"]
+}
+
+/// The +commands one device holds, so a handoff can let go of all of them.
+/// Feed it each button's level every poll; it answers with the command to
+/// send on a change. After `releaseAll()`, a button still physically down
+/// stays quiet until it is let go — the new owner has the controls, and a
+/// held trigger shouldn't press again the moment it switches back.
+nonisolated struct HeldCommands {
+    private(set) var held: Set<String> = []
+    private var latched: Set<String> = []
+
+    /// `"+cmd"` on press, `"-cmd"` on release, nil otherwise.
+    mutating func update(_ cmd: String, pressed: Bool) -> String? {
+        if latched.contains(cmd) {
+            if !pressed { latched.remove(cmd) }
+            return nil
+        }
+        if pressed, !held.contains(cmd) { held.insert(cmd); return "+" + cmd }
+        if !pressed, held.contains(cmd) { held.remove(cmd); return "-" + cmd }
+        return nil
+    }
+
+    /// `"-cmd"` for everything held, in a stable order.
+    mutating func releaseAll() -> [String] {
+        let out = held.sorted().map { "-" + $0 }
+        latched.formUnion(held)
+        held.removeAll()
+        return out
+    }
+}
+
 nonisolated enum InputModeState {
     nonisolated(unsafe) static var setting: InputModeSetting = .auto
     nonisolated(unsafe) private static var selector = InputModeSelector()
