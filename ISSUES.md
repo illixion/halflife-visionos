@@ -95,22 +95,32 @@ instead of deleting them.
   room (c1a0 cafeteria) and a firefight, with the thermal state, into
   `docs/plans/modern-lighting.md`; check `gpuQueue` ≈ the sum of our
   passes (if it is much larger, commit feedback counts the wait on ANGLE).
-- **Modern lighting tier 1 (glass): prototype, device check pending.**
-  Settings → Graphics "Glass reflections (prototype)" (default off, live;
-  `Renderer.glassReflections` + the engine's `r_vrglass`). The engine marks
-  glass in the stencil of the depth texture the app owns: translucent-texture
-  brush entities (GoldSrc windows) and non-additive brush surfaces named
-  `*glass*`, each with a code holding its eye-space normal (ref/gl
-  `gl_rsurf.c` `R_VRGlass*`, in `xash3d-visionos.patch`; glass writes no
-  depth, so the normal cannot come from the depth buffer). The composite adds
-  Schlick Fresnel with the frame itself as a distant environment (reflected
-  ray projected back into the eye's frustum, room light where it leaves the
-  frame) — `Shaders.metal` `glassShade`, one stencil read per pixel, no pass.
-  Mods get it by the same rules or not at all. Verified on the Mac build
-  (c1a0 windows: mask exactly on the panes, normal codes match the wall;
-  `Tools/DepthProbe --png` renders plain vs glass from a version-2
-  `r_vrdump`). Needs a libxash rebuild to reach the device. Left: see
-  `docs/plans/modern-lighting.md` (tier 1 status).
+- **Modern lighting tier 1 (glass): environment-probe reflections, device
+  check pending.** Settings → Graphics "Glass reflections (prototype)"
+  (default off, live; `Renderer.glassReflections` + the engine's
+  `r_vrglass`). **What failed on device (first prototype):** the reflection
+  was the eye's own frame — the reflected ray, as a direction, projected back
+  into that eye's image, with a flat colour where it left the frame. In the
+  c1a2 office lab (the flooded bench under the periodic-table poster) it
+  showed mirrored on-screen content, flickered between that and nothing as
+  the gaze moved, and de-synced between the eyes looking sideways (each eye's
+  frame holds different content and a different edge). **Now:** the engine
+  marks each glass pixel with a row of a per-eye world-space plane table
+  (exact plane, not a quantised normal), and the reflection samples an
+  environment probe the engine renders from the head — six 256² faces, world
+  and brush entities only, one face per frame after the second eye, only
+  while glass is in sight and the probe is stale (48 units moved or 4 s) —
+  with a parallax-corrected lookup through the probe's depth, a 0.3 s fade
+  between probes, and a faint tint on what is seen through the pane
+  (`GlassProbe.swift`, `Shaders.metal` `glassShade`, ref/gl `R_VRGlass*` /
+  `R_VRProbeFace`, bridge `lambda_glass_*`). Verified on the Mac build with
+  `Tools/DepthProbe` (c1a2 bench): probe faces reproduce the engine view to
+  4.9/255; a probe 58 units off: 27/255 plain vs 7/255 parallax-corrected;
+  same glass point from two gazes 0.6/255 apart, from two eyes 2.5 units
+  apart 4.1/255; every glass pixel gets a probe reflection. Device: libxash
+  rebuild needed; read `gProbe` / `probeCPU` in the `[FT] gpu(ms)` line, and
+  see `docs/plans/modern-lighting.md` for the spots to check. Studio models
+  (scientists, items) do not appear in reflections.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
   Metal pass over the engine image instead of the engine (`vr_weapon_external`
   cvar; `WeaponPass.swift` + `Bridge/Lambda_WeaponModel.c`), hand-anchored
