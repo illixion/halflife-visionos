@@ -1,0 +1,22 @@
+# Placeholder so this workflow can be dispatched from a branch.
+#
+# GitHub only lets you run a workflow_dispatch workflow whose file exists on
+# the default branch. When dispatched with a ref (Actions → "Prebuilt ANGLE" → Run
+# workflow → branch, or `gh workflow run prebuilt-angle.yml --ref <branch>`), GitHub
+# runs that branch's copy of this file, so the real workflow lives on the
+# feature branch. Replaced by the real one when that branch merges.
+name: Prebuilt ANGLE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::The real Prebuilt ANGLE workflow isn't on main yet. Dispatch it on its feature branch: gh workflow run prebuilt-angle.yml --ref <branch>"
+          exit 1
