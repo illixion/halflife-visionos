@@ -251,7 +251,7 @@ public final class GameImporter: Sendable {
 
     /// A zip entry path made safe: `\` read as `/`, and nil for junk.
     /// Throws for anything that would land outside the destination.
-    static func safeRelativePath(_ raw: String) throws -> String? {
+    public static func safeRelativePath(_ raw: String) throws -> String? {
         let path = raw.replacingOccurrences(of: "\\", with: "/")
         if path.hasPrefix("/") || path.hasPrefix("~") { throw ImportError.unsafePath(raw) }
         if path.count >= 2, path[path.index(after: path.startIndex)] == ":" { throw ImportError.unsafePath(raw) }   // C:
@@ -435,7 +435,7 @@ public final class GameImporter: Sendable {
 
     // MARK: - Helpers
 
-    static func rejectSymlinks(in dir: URL) throws {
+    public static func rejectSymlinks(in dir: URL) throws {
         let fm = FileManager.default
         guard let e = fm.enumerator(atPath: dir.path) else { return }
         while let rel = e.nextObject() as? String {
@@ -453,7 +453,7 @@ public final class GameImporter: Sendable {
         return n
     }
 
-    static func treeSize(_ dir: URL) -> Int64 {
+    public static func treeSize(_ dir: URL) -> Int64 {
         var n: Int64 = 0
         let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey])
         while let url = e?.nextObject() as? URL {
@@ -462,7 +462,7 @@ public final class GameImporter: Sendable {
         return n
     }
 
-    static func availableCapacity(at url: URL) -> Int64? {
+    public static func availableCapacity(at url: URL) -> Int64? {
         let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         guard let v = values?.volumeAvailableCapacityForImportantUsage, v > 0 else { return nil }
         return v
