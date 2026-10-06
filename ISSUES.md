@@ -15,6 +15,35 @@ instead of deleting them.
   opt-in because the room-space passes (body, HEV holograms) can't follow a
   tilted world.
 
+- **A mouse only works while the visionOS pointer is over one of the app's
+  windows.** Seen on device (also in Longwave), even with a BLE mouse paired
+  straight to the headset, every window closed and Mac Virtual Display off:
+  with the pointer in the immersive space GCMouse delivers nothing, and
+  clicks land in the launcher window. Findings (visionOS 26/27 SDK headers
+  and docs, 2026-10-06), none tested on device:
+  - No API claims the mouse for a full immersive space. `GCEventInteraction`
+    / `.handlesGameControllerEvents` only take gamepad and stylus events
+    (`GCUIEventTypes`, GCEventInteraction.h), and the SwiftUI modifier is
+    View-only. A `CompositorLayer` scene has no view, no view controller and
+    no input modifiers (the CompositorContent modifiers are overlays,
+    immersion and limb visibility), and an ImmersiveSpace can't mix it with
+    views. Pointer lock (`UIPointerLockState`, `prefersPointerLocked`) needs
+    a full-screen view controller, which a visionOS window isn't.
+    `pointerVisibility` is unavailable on visionOS. visionOS 27 adds nothing
+    for mice. So no `RAVEMouseSource` change can fix it: its handlers are
+    fine, the system just doesn't route the events.
+  - `.pointer` spatial events (click-to-release sequences, no motion, no
+    wheel) might reach the layer's `onSpatialEvent`; the app now logs the
+    first few ("pointer event in the immersive space") to find out. Even if
+    they do, they can't drive mouse look.
+  - Left to try: an "input catcher" window kept in view while playing
+    (`.plain` style, no glass, `Color.clear` with a content shape so clicks
+    hit nothing). Windows are world-anchored, so it only covers part of the
+    view. Otherwise the rule stands: keep a window under the pointer, or
+    play with a keyboard or gamepad (README says so).
+  Gamepads aren't affected the same way: `.handlesGameControllerEvents` on
+  the window under the gaze is what keeps them from freezing, and every
+  window now has it (see the stuck-forward item in Resolved).
 - **Arm-swing walking needs tuning on device.** `RAVEArmSwinger` (RAVEInput)
   drives the same joy axes as the pinch joystick: both fists plus a swing
   pattern engage it, and the stroke-speed envelope maps 0.4–2.0 m/s onto

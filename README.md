@@ -400,6 +400,11 @@ then LIGHT, SAVE and LOAD, floating ahead of the view while the shoulder is
 held. The armed sector stays armed when the stick springs back, so a flick
 and release works; LOAD still needs holding armed until its arc fills.
 
+A mouse only reaches the game while the visionOS pointer rests on one of the
+app's windows (the launcher, Console or Performance). visionOS routes the
+mouse by window focus and offers a full immersive space no way to claim it;
+see ISSUES.md. Keep a window in view, or play with a keyboard or gamepad.
+
 *Mouse sensitivity* uses Half-Life's scale (3 is the stock default). *Look
 up/down* (off by default) adds mouse and right-stick pitch to your head's.
 It tilts the game's horizon away from the room's, which some find
