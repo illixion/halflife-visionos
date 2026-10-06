@@ -340,6 +340,8 @@ static inline float3 waterRipple(float3 n, float3 P, float3 d, float dist, float
         const float screenFreq = dist / lambda * length(float2(dot(k, alongB) / cosV, dot(k, acrossB)));
         const float periodPx = 1.0 / max(screenFreq * pixTan, 1e-6);
         const float band = saturate(periodPx / 2.5 - 1.0);
+        if (band <= 0.0)
+            continue;                        // no cos for a wave too fine to show
         const float a = min(slope * amp[i], 0.08 * periodPx * pixTan) * band;
         g += a * k * cos(dot(k, q) * waves[i].z + waves[i].w * t);
     }
@@ -435,7 +437,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         sharpWeight = saturate(float(c.a));
         sharp = float3(c.rgb) / max(float(c.a), 1e-3);
     }
-    if (sharpWeight < 0.999 && p.probe[1].w >= 0.0) {
+    if (sharpWeight < 0.98 && p.probe[1].w >= 0.0) {
         const float w = p.probeMix.x;
         float3 older = env;
         // the ripples hide what a third step of the walk would fix
@@ -449,7 +451,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     // probe fills in); 2: its confidence
     if (water && p.waterDebug.x > 0.5)
         return p.waterDebug.x < 1.5 ? (sharpWeight > 0.0 ? sharp : float3(1, 0, 1)) : float3(sharpWeight);
-    env = mix(env, sharp, sharpWeight);
+    env = sharpWeight >= 0.98 ? sharp : mix(env, sharp, sharpWeight);
     const float amount = min(F * k.x, k.z);
     if (water) {
         // Water blends toward its reflection by Fresnel, the reflection
@@ -566,23 +568,6 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
 #define SSPR_CANDIDATES 5   // this texel's key, then the one below and above, then right and left
 #endif
 
-// The engine image at half resolution, each texel the mean of a 2 × 2
-// block (one bilinear tap at the block's centre). The resolve's sub-rays sit
-// two engine pixels apart, so it samples this instead of the full image:
-// point-sampling the full image at that spacing aliased fine source detail
-// into moiré.
-kernel void ssprPrefilter(uint3 gid [[thread_position_in_grid]],
-                          texture2d_array<half> colorMap [[ texture(0) ]],
-                          texture2d_array<half, access::write> prefiltered [[ texture(4) ]])
-{
-    constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
-    const uint2 size = uint2(prefiltered.get_width(), prefiltered.get_height());
-    if (gid.x >= size.x || gid.y >= size.y)
-        return;
-    const float2 uv = (float2(gid.xy) + 0.5) / float2(size);
-    prefiltered.write(colorMap.sample(s, uv, gid.z), gid.xy, gid.z);
-}
-
 // The key buffer's reset to "empty", four keys per thread (a compute pass
 // rather than a buffer fill, so the GPU timer can bracket it).
 kernel void ssprClear(uint gid [[thread_position_in_grid]],
@@ -604,8 +589,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
                         depth2d_array<float> engineDepth [[ texture(1) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]],
-                        texture2d_array<half> prefiltered [[ texture(4) ]])
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]])
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
@@ -700,7 +684,17 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             if (bestSrc.x < 0.0) continue;
             const float2 edge = min(bestSrc, 1.0 - bestSrc);
             const float c = smoothstep(0.0, 0.15, min(edge.x, edge.y));
-            sum += prefiltered.sample(s, bestSrc, eye).rgb * half(c);
+            // A 2 × 2-pixel box around the sample (four bilinear taps half a
+            // pixel out): the sub-rays sit two engine pixels apart, and a
+            // point sample there aliased fine source texture into moiré.
+            // This replaces a half-size prefiltered copy of the engine image,
+            // whose extra pass measured 1.75 ms on the headset.
+            const float2 h = 0.5 / float2(colorMap.get_width(), colorMap.get_height());
+            const half3 box = colorMap.sample(s, bestSrc + float2(-h.x, -h.y), eye).rgb
+                            + colorMap.sample(s, bestSrc + float2( h.x, -h.y), eye).rgb
+                            + colorMap.sample(s, bestSrc + float2(-h.x,  h.y), eye).rgb
+                            + colorMap.sample(s, bestSrc + float2( h.x,  h.y), eye).rgb;
+            sum += box * 0.25h * half(c);
             conf += c;
         }
     }
