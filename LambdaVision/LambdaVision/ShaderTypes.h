@@ -153,11 +153,19 @@ typedef struct
     simd_float4 depthLimits;
     // Glass (the composite's kGlass variants, Shaders.metal glassShade): where
     // the engine marked glass in its stencil (r_vrglass), a Fresnel
-    // reflection of the environment probe (GlassProbe.swift). x = strength,
-    // y = F0 (normal-incidence reflectance), z = the most of the pixel the
+    // reflection of the environment probe (GlassProbe.swift). x = strength
+    // (Settings "Reflection strength"; scales the reflectance), y = F0
+    // (normal-incidence reflectance), z = the most of the pixel the
     // reflection may replace, w = how far what is seen through the pane takes
     // on glassTint (0 = clear).
     simd_float4 glass;
+    // Water rows of the same table (r_vrwater): x = strength, y = F0, z = cap,
+    // w = ripple slope (0 = a flat mirror).
+    simd_float4 water;
+    // x = glass, y = water reflectance added head-on (before strength) so a
+    // surface seen from the front still reads, z = seconds (wrapped, for the
+    // ripples), w = ripple wavelength scale (1 = the default ~40-unit waves).
+    simd_float4 reflectExtra;
     // rgb = what the reflection shows while no probe is ready, in the engine's
     // (gamma-encoded) colour space.
     simd_float4 glassAmbient;
@@ -179,6 +187,9 @@ typedef struct
     // Per eye: the glass planes the stencil codes name (code − 16), xash
     // world: normal xyz, distance (lambda_glass_eye_t.planes).
     simd_float4 glassPlanes[2][224];
+    // Per eye: one bit per plane row, set for water (lambda_glass_eye_t.kind).
+    // Row r is word r / 32 = glassKinds[eye][r / 128][(r / 32) % 4].
+    simd_uint4 glassKinds[2][2];
 } DisplayParams;
 
 #ifdef __METAL_VERSION__

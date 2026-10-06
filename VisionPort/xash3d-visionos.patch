@@ -3517,10 +3517,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..f65ad22 100644
+index e6e7712..b7826ec 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,18 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,20 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3529,21 +3529,23 @@ index e6e7712..f65ad22 100644
 +extern convar_t	r_vrprobedump;
 +#endif
 +extern convar_t	r_vrglass;
++extern convar_t	r_vrwater;
 +
 +// visionOS glass pass (gl_rsurf.c R_VRGlass, gl_rmain.c R_VRProbeFace)
 +#define VR_GLASS_MAX_PLANES	224	// codes 16-239
 +extern int	vr_glass_count;
 +extern float	vr_glass_planes[VR_GLASS_MAX_PLANES][4];
++extern byte	vr_glass_kind[VR_GLASS_MAX_PLANES];
 +extern qboolean	r_vrprobe_pass;
 +void R_VRProbeFace( const float *origin, int face, int size, float zNear, float zFar );
  extern convar_t	r_nocull;
  extern convar_t	r_lockpvs;
  extern convar_t	r_lockfrustum;
 diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
-index 05a130f..e46209b 100644
+index 05a130f..600b22e 100644
 --- a/ref/gl/gl_opengl.c
 +++ b/ref/gl/gl_opengl.c
-@@ -26,6 +26,11 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
+@@ -26,6 +26,12 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
  CVAR_DEFINE_AUTO( r_lighting_ambient, "0.3", FCVAR_GLCONFIG, "map ambient lighting scale" );
  CVAR_DEFINE_AUTO( r_detailtextures, "1", FCVAR_GLCONFIG, "enable detail textures support" );
  CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
@@ -3552,10 +3554,11 @@ index 05a130f..e46209b 100644
 +CVAR_DEFINE_AUTO( r_vrprobedump, "0", 0, "dump the glass environment probe (six faces) from the next 3D view's origin to vrprobe.bin (visionOS glass tuning)" );
 +#endif
 +CVAR_DEFINE_AUTO( r_vrglass, "0", 0, "mark glass brush surfaces in the stencil buffer with their plane's row in the glass plane table (visionOS glass pass)" );
++CVAR_DEFINE_AUTO( r_vrwater, "0", 0, "mark water (warp) surfaces in the stencil buffer like r_vrglass, as water rows of the plane table (visionOS water pass)" );
  CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
  CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
  CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
-@@ -1151,6 +1156,11 @@ static void GL_InitCommands( void )
+@@ -1151,6 +1157,12 @@ static void GL_InitCommands( void )
  {
  	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
  	gEngfuncs.Cvar_RegisterVariable( &r_novis );
@@ -3564,11 +3567,12 @@ index 05a130f..e46209b 100644
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrprobedump );
 +#endif
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrglass );
++	gEngfuncs.Cvar_RegisterVariable( &r_vrwater );
  	gEngfuncs.Cvar_RegisterVariable( &r_nocull );
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..88a6efc 100644
+index 0568486..a0161a7 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3674,7 +3678,7 @@ index 0568486..88a6efc 100644
  	{
  		R_AllowFog( false );
  		gEngfuncs.CL_DrawEFX( tr.frametime, true );
-@@ -1087,6 +1129,125 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -1087,6 +1129,127 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3710,7 +3714,7 @@ index 0568486..88a6efc 100644
 +	pglReadPixels( vp[0], vp[1], w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba );
 +	pglReadPixels( vp[0], vp[1], w, h, GL_DEPTH_COMPONENT, GL_FLOAT, depth );
 +	// version 2 appends the stencil (r_vrglass codes), one byte per pixel;
-+	// version 3 then the glass plane table
++	// version 3 then the glass plane table, version 4 its kinds
 +	stencil = malloc( (size_t)w * h );
 +	pglReadPixels( vp[0], vp[1], w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, stencil );
 +	Matrix4x4_ToArrayFloatGL( RI.projectionMatrix, proj );
@@ -3720,7 +3724,7 @@ index 0568486..88a6efc 100644
 +	f = fopen( name, "wb" );
 +	if( f )
 +	{
-+		int header[4] = { 0x44525656 /* VVRD */, 3, w, h };
++		int header[4] = { 0x44525656 /* VVRD */, 4, w, h };
 +		fwrite( header, sizeof( header ), 1, f );
 +		fwrite( proj, sizeof( proj ), 1, f );
 +		fwrite( view, sizeof( view ), 1, f );
@@ -3732,6 +3736,8 @@ index 0568486..88a6efc 100644
 +		// version 3 appends the glass plane table the stencil codes index
 +		fwrite( &vr_glass_count, sizeof( int ), 1, f );
 +		fwrite( vr_glass_planes, sizeof( float ) * 4, vr_glass_count, f );
++		// version 4 then each row's kind (0 glass, 1 water)
++		fwrite( vr_glass_kind, 1, vr_glass_count, f );
 +		fclose( f );
 +		gEngfuncs.Con_Printf( "wrote %s (%dx%d)\n", name, w, h );
 +	}
@@ -3800,7 +3806,7 @@ index 0568486..88a6efc 100644
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1095,6 +1256,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1095,6 +1258,10 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	// setup the initial render params
  	R_SetupRefParams( rvp );
  
@@ -3811,7 +3817,7 @@ index 0568486..88a6efc 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1118,6 +1283,19 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1118,6 +1285,19 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  
  	tr.realframecount++; // right called after viewmodel events
  	R_RenderScene();
@@ -3831,7 +3837,7 @@ index 0568486..88a6efc 100644
  
  	return;
  }
-@@ -1167,6 +1345,74 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1347,74 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -3907,7 +3913,7 @@ index 0568486..88a6efc 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..32210d8 100644
+index df6f012..749cbda 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4043,7 +4049,47 @@ index df6f012..32210d8 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
-@@ -1830,6 +1939,98 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1529,6 +1638,9 @@ static void R_RenderLightmapForSurface( msurface_t *fa )
+ R_RenderBrushPoly
+ ================
+ */
++static qboolean R_VRWaterBegin( const msurface_t *fa );
++static void R_VRGlassEnd( void );
++
+ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+ {
+ 	texture_t	*t;
+@@ -1542,6 +1654,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+ 
+ 	if( FBitSet( fa->flags, SURF_DRAWTURB ))
+ 	{
++		qboolean water = R_VRWaterBegin( fa );
++
+ 		// warp texture
+ 		EmitWaterPolys( fa, cull_type == CULL_BACKSIDE, R_UploadRipples( t ));
+ 
+@@ -1549,6 +1663,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+ 		if( Mod_HaveLightmappedWater( ))
+ 			R_RenderLightmapForSurface( fa );
+ 
++		if( water )
++			R_VRGlassEnd();
+ 		return;
+ 	}
+ 	else GL_Bind( XASH_TEXTURE0, t->gl_texturenum );
+@@ -1730,7 +1846,11 @@ void R_DrawWaterSurfaces( void )
+ 
+ 		for( ; s; s = s->texturechain )
+ 		{
++			qboolean water = R_VRWaterBegin( s );
++
+ 			EmitWaterPolys( s, false, R_UploadRipples( t ));
++			if( water )
++				R_VRGlassEnd();
+ 
+ 			if( Mod_HaveLightmappedWater( ))
+ 				R_RenderLightmapForSurface( s );
+@@ -1830,6 +1950,123 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -4065,10 +4111,16 @@ index df6f012..32210d8 100644
 +copies it after each eye and reads the stencil aspect of the depth texture it
 +gave the engine (Shaders.metal glassShade). A view with more glass planes than
 +the table holds leaves the rest unmarked.
++
++Water (r_vrwater) shares the table and codes: every warp (SURF_DRAWTURB)
++surface, world or brush entity (func_water and friends), marked as it is
++drawn, with vr_glass_kind 1 for its row and its plane turned to face up out
++of the water, so the app can tell the viewer is below it.
 +=================
 +*/
 +__attribute__((visibility("default"))) int   vr_glass_count = 0;
 +__attribute__((visibility("default"))) float vr_glass_planes[VR_GLASS_MAX_PLANES][4];
++__attribute__((visibility("default"))) byte  vr_glass_kind[VR_GLASS_MAX_PLANES]; // 0 glass, 1 water
 +
 +static qboolean R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
 +{
@@ -4079,7 +4131,7 @@ index df6f012..32210d8 100644
 +	return fa->texinfo && fa->texinfo->texture && Q_stristr( fa->texinfo->texture->name, "glass" ) != NULL;
 +}
 +
-+static int R_VRGlassCode( const msurface_t *fa )
++static int R_VRGlassCode( const msurface_t *fa, int kind )
 +{
 +	vec3_t n, p, nw, pw;
 +	float d;
@@ -4104,11 +4156,18 @@ index df6f012..32210d8 100644
 +	}
 +	else VectorCopy( n, nw );
 +
++	// water faces up, out of the water
++	if( kind == 1 && nw[2] < 0.0f )
++	{
++		VectorNegate( nw, nw );
++		d = -d;
++	}
++
 +	for( i = 0; i < vr_glass_count; i++ )
 +	{
 +		const float *q = vr_glass_planes[i];
 +
-+		if( DotProduct( q, nw ) > 0.9999f && fabs( q[3] - d ) < 0.5f )
++		if( vr_glass_kind[i] == kind && DotProduct( q, nw ) > 0.9999f && fabs( q[3] - d ) < 0.5f )
 +			return 16 + i;
 +	}
 +
@@ -4117,12 +4176,13 @@ index df6f012..32210d8 100644
 +
 +	VectorCopy( nw, vr_glass_planes[vr_glass_count] );
 +	vr_glass_planes[vr_glass_count][3] = d;
++	vr_glass_kind[vr_glass_count] = kind;
 +	return 16 + vr_glass_count++;
 +}
 +
-+static qboolean R_VRGlassBegin( const msurface_t *fa )
++static qboolean R_VRGlassBegin( const msurface_t *fa, int kind )
 +{
-+	int code = R_VRGlassCode( fa );
++	int code = R_VRGlassCode( fa, kind );
 +
 +	if( !code )
 +		return false;
@@ -4131,6 +4191,17 @@ index df6f012..32210d8 100644
 +	pglStencilFunc( GL_ALWAYS, code, 0xFF );
 +	pglStencilOp( GL_KEEP, GL_KEEP, GL_REPLACE );
 +	return true;
++}
++
++// r_vrwater: a warp surface about to be drawn (world or brush entity; the
++// current entity's matrix is loaded). Not in the probe, not additive.
++static qboolean R_VRWaterBegin( const msurface_t *fa )
++{
++	if( !r_vrwater.value || r_vrprobe_pass || !FBitSet( fa->flags, SURF_DRAWTURB ))
++		return false;
++	if( RI.currententity && RI.currententity->curstate.rendermode == kRenderTransAdd )
++		return false;
++	return R_VRGlassBegin( fa, 1 );
 +}
 +
 +static void R_VRGlassEnd( void )
@@ -4142,20 +4213,20 @@ index df6f012..32210d8 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1959,6 +2160,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2196,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
 +	// glass surfaces are drawn one by one, each with its own stencil code
 +	// (not in the glass's own environment probe, which leaves glass out)
 +	qboolean vr_glass = r_vrglass.value != 0.0f && !r_vrprobe_pass;
-+	if( vr_glass && allow_vbo )
++	if(( vr_glass || r_vrwater.value ) && allow_vbo )
 +		allow_vbo = false;
 +
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2179,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2215,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
@@ -4166,7 +4237,7 @@ index df6f012..32210d8 100644
 +
 +		if( r_vrprobe_pass && R_VRGlassSurface( e, surf ))
 +			continue;
-+		glass = vr_glass && R_VRGlassSurface( e, surf ) && R_VRGlassBegin( surf );
++		glass = vr_glass && R_VRGlassSurface( e, surf ) && R_VRGlassBegin( surf, 0 );
 +		if( !allow_vbo || !R_AddSurfToVBO( surf, true ))
 +			R_RenderBrushPoly( surf, gpGlobals->draw_surfaces[i].cull );
 +		if( glass )

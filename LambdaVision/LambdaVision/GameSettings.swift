@@ -147,6 +147,17 @@ final class GameSettings {
                  Renderer.glassReflections = glassReflections
                  cvar("r_vrglass", glassReflections ? 1 : 0) }
     }
+    /// The same probe reflection on water, rippled (r_vrwater). Live.
+    var waterReflections: Bool = AppSettingsStore.waterReflections {
+        didSet { AppSettingsStore.waterReflections = waterReflections
+                 Renderer.waterReflections = waterReflections
+                 cvar("r_vrwater", waterReflections ? 1 : 0) }
+    }
+    /// Glass and water reflectance scale, 0.5–4×. Live.
+    var reflectionStrength: Double = AppSettingsStore.reflectionStrength {
+        didSet { AppSettingsStore.reflectionStrength = reflectionStrength
+                 Renderer.reflectionStrength = Float(reflectionStrength) }
+    }
     /// HDR headroom test pattern over the whole view. Not stored: a
     /// diagnostic, and a black screen on the next launch would look broken.
     var hdrTest: HDRTestPattern = .off {
@@ -367,6 +378,8 @@ final class GameSettings {
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
         Renderer.reprojectionDepth = reprojectionDepth
         Renderer.glassReflections = glassReflections
+        Renderer.waterReflections = waterReflections
+        Renderer.reflectionStrength = Float(reflectionStrength)
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
         Renderer.fireAlongGaze     = (fireAimMode == .gaze)
@@ -428,6 +441,7 @@ final class GameSettings {
         cvar("vr_weapon_external", weaponExternal ? 1 : 0)
         cvar("crosshair", stockCrosshair)
         cvar("r_vrglass", glassReflections ? 1 : 0)
+        cvar("r_vrwater", waterReflections ? 1 : 0)
     }
 
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,

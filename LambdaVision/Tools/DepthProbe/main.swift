@@ -48,6 +48,7 @@ struct Dump {
     var stencil: [UInt8]?   // version 2 dumps (r_vrglass codes), bottom-up rows
     var origin = SIMD3<Float>(), angles = SIMD3<Float>()
     var planes: [SIMD4<Float>]? // version 3: the glass plane table the codes index
+    var kinds: [UInt8] = []     // version 4: each row's kind (0 glass, 1 water)
 
     init(path: String) throws {
         let d = try Data(contentsOf: URL(fileURLWithPath: path))
@@ -76,6 +77,8 @@ struct Dump {
             let n = Int(ints(tableAt, 1)[0])
             let f = floats(tableAt + 4, n * 4)
             planes = (0..<n).map { SIMD4(f[$0 * 4], f[$0 * 4 + 1], f[$0 * 4 + 2], f[$0 * 4 + 3]) }
+            let kindsAt = tableAt + 4 + n * 16
+            if header[1] >= 4, d.count >= kindsAt + n { kinds = [UInt8](d.subdata(in: kindsAt..<kindsAt + n)) }
         }
     }
 
@@ -351,6 +354,13 @@ func setGlassView(_ params: inout DisplayParams, _ dump: Dump) {
             for i in 0..<4 { v[eye * 4 + i] = view[i] }
             for (i, p) in planes.prefix(224).enumerated() { pl[eye * 224 + i] = p }
         }
+        let kindsAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassKinds)!
+        let words = (raw.baseAddress! + kindsAt).bindMemory(to: UInt32.self, capacity: 16)
+        for i in 0..<16 { words[i] = 0 }
+        for (row, k) in dump.kinds.prefix(224).enumerated() where k == 1 {
+            words[row >> 5] |= 1 << UInt32(row & 31)
+            words[8 + (row >> 5)] |= 1 << UInt32(row & 31)
+        }
     }
     let p = dump.projection   // tangents from the GL projection (DrawableProjection's formula)
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
@@ -400,7 +410,7 @@ let glassOnPipeline = try glassPipeline(true)
 let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
 
 struct GlassView {
-    let name: String, dump: Dump, glass: [UInt8], env: [UInt8]
+    let name: String, dump: Dump, glass: [UInt8], env: [UInt8], envFlat: [UInt8]
 }
 var glassViews: [GlassView] = []
 
@@ -412,7 +422,9 @@ for path in args {
     let color = dump.rgba.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
     let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
     var params = DisplayParams()
-    params.glass = SIMD4(1, 0.04, 0.85, 0.35)
+    params.glass = SIMD4(3, 0.04, 0.7, 0.35)           // the app's defaults (Renderer)
+    params.water = SIMD4(1.8, 0.02, 0.6, Float(ProcessInfo.processInfo.environment["RIPPLE"] ?? "") ?? 0.08)
+    params.reflectExtra = SIMD4(0.06, 0.04, 12.5, 1)  // a fixed moment of the ripples
     params.glassAmbient = SIMD4(1, 0, 1, 0)          // magenta: shows any pixel the probe missed
     params.glassTint = SIMD4(0.80, 0.90, 0.88, 0)
     setGlassView(&params, dump)
@@ -456,7 +468,11 @@ for path in args {
     let glass = render(glassOnPipeline, w, h, params, textures)
     var envParams = params                             // the reflection alone
     envParams.glass = SIMD4(100, 0.04, 1, 0)
+    envParams.water.x = 100; envParams.water.z = 1
     let env = render(glassOnPipeline, w, h, envParams, textures)
+    var flatParams = envParams                         // and with still water
+    flatParams.water.w = 0
+    let envFlat = render(glassOnPipeline, w, h, flatParams, textures)
     var marked = 0, changedOutside = 0, changedInside = 0, missed = 0
     for row in 0..<h {
         for col in 0..<w {
@@ -471,9 +487,35 @@ for path in args {
             } else if changed { changedOutside += 1 }
         }
     }
-    print("\(name) glass: \(marked) px marked, \(changedInside) changed, \(changedOutside) changed outside the mask, \(missed) without a probe reflection")
+    // From below: the eye moved under every water plane must leave water alone.
+    let waterRows = Set(dump.kinds.enumerated().filter { $0.element == 1 }.map { $0.offset })
+    if !waterRows.isEmpty, let planes = dump.planes {
+        var under = params
+        let lowest = waterRows.map { planes[$0].w / max(planes[$0].z, 0.01) }.min()!
+        let (f, r, u) = dump.axes
+        withUnsafeMutableBytes(of: &under) { raw in
+            let v = (raw.baseAddress! + MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassEye)!)
+                .bindMemory(to: SIMD4<Float>.self, capacity: 8)
+            let o = SIMD3(dump.origin.x, dump.origin.y, lowest - 40)
+            for eye in 0..<2 { v[eye * 4] = SIMD4(o, 0); v[eye * 4 + 1] = SIMD4(f, 0); v[eye * 4 + 2] = SIMD4(r, 0); v[eye * 4 + 3] = SIMD4(u, 0) }
+        }
+        let below = render(glassOnPipeline, w, h, under, textures)
+        var waterPx = 0, changed = 0
+        for row in 0..<h {
+            for col in 0..<w {
+                let code = Int(stencil[(h - 1 - row) * w + col])
+                guard code >= 16, waterRows.contains(code - 16) else { continue }
+                waterPx += 1
+                let i = (row * w + col) * 4
+                if (0..<3).contains(where: { abs(Int(plain[i + $0]) - Int(below[i + $0])) > 1 }) { changed += 1 }
+            }
+        }
+        print("\(name) water: \(waterPx) px, \(changed) changed with the eye below the surface")
+        if changed > 0 { failures += 1 }
+    }
+    print("\(name) glass+water: \(marked) px marked, \(changedInside) changed, \(changedOutside) changed outside the mask, \(missed) without a probe reflection")
     if changedOutside > 0 || (marked > 0 && changedInside == 0) || missed > 0 { failures += 1 }
-    glassViews.append(GlassView(name: name, dump: dump, glass: glass, env: env))
+    glassViews.append(GlassView(name: name, dump: dump, glass: glass, env: env, envFlat: envFlat))
     if let pngDir {
         // plain | glass on top, the reflection alone | the mask below
         var sheet = [UInt8](repeating: 0, count: w * 2 * h * 2 * 4)
@@ -536,13 +578,90 @@ func compare(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float)? {
     }
     return n > 0 ? (n, Float(sum) / Float(n * 3)) : nil
 }
+
+// Stereo, properly: each eye must see a reflected point where its mirror image
+// lies. For still surfaces, walk each sampled glass/water pixel's reflected ray
+// through the probe on the CPU (the same face layout and depth decode the
+// probe-view check validated) to the point H it shows, mirror H in the plane,
+// and look where that image falls in the other eye: that pixel must show the
+// same colour. The same-point comparison above cannot tell parallax from
+// disagreement; this can.
+func probeDistance(_ probe: Probe, _ dir: SIMD3<Float>) -> Float {
+    let a = abs(dir)
+    var face = 0, ab = SIMD2<Float>()
+    if a.x >= a.y && a.x >= a.z {
+        if dir.x > 0 { face = 0; ab = SIMD2(-dir.y, dir.z) / a.x } else { face = 2; ab = SIMD2(dir.y, dir.z) / a.x }
+    } else if a.y >= a.z {
+        if dir.y > 0 { face = 1; ab = SIMD2(dir.x, dir.z) / a.y } else { face = 3; ab = SIMD2(-dir.x, dir.z) / a.y }
+    } else {
+        if dir.z > 0 { face = 4; ab = SIMD2(-dir.y, -dir.x) / a.z } else { face = 5; ab = SIMD2(-dir.y, dir.x) / a.z }
+    }
+    let s = probe.size
+    let uv = ab * 0.5 + 0.5
+    let x = min(Int(uv.x * Float(s)), s - 1), y = min(Int(uv.y * Float(s)), s - 1)
+    let ndc = probe.depth[face * s * s + y * s + x] * 2 - 1
+    let n = probe.clip.x, f = probe.clip.y
+    return 2 * n * f / ((f + n) - ndc * (f - n)) * (1 + simd_dot(ab, ab)).squareRoot()
+}
+
+func compareVirtual(_ a: GlassView, _ b: GlassView, _ probe: Probe) -> (n: Int, mean: Float)? {
+    guard let pa = a.dump.planes, let pb = b.dump.planes, let sa = a.dump.stencil, let sb = b.dump.stencil else { return nil }
+    let w = a.dump.width, h = a.dump.height
+    let (fa, ra, ua) = a.dump.axes, (fb, rb, ub) = b.dump.axes
+    let p = a.dump.projection
+    let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+                  (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+    var sum = 0, n = 0
+    for row in stride(from: 1, to: h - 1, by: 5) {
+        for col in stride(from: 1, to: w - 1, by: 5) {
+            let code = Int(sa[(h - 1 - row) * w + col])
+            guard code >= 16, code - 16 < pa.count else { continue }
+            let plane = pa[code - 16]
+            var nrm = SIMD3(plane.x, plane.y, plane.z)
+            let u = (Float(col) + 0.5) / Float(w), v = 1 - (Float(row) + 0.5) / Float(h)
+            let d = simd_normalize(fa + (-t.x + (t.x + t.y) * u) * ra + (-t.w + (t.z + t.w) * v) * ua)
+            let nd = simd_dot(nrm, d)
+            guard abs(nd) > 1e-3 else { continue }
+            let P = a.dump.origin + d * ((plane.w - simd_dot(nrm, a.dump.origin)) / nd)
+            if nd > 0 { nrm = -nrm }
+            let r = d - 2 * simd_dot(d, nrm) * nrm
+            let PC = P - probe.origin, bq = simd_dot(r, PC), c0 = simd_dot(PC, PC)
+            var dir = r, tHit: Float = 1
+            for _ in 0..<3 {
+                let D = probeDistance(probe, simd_normalize(dir))
+                tHit = max(-bq + max(bq * bq - (c0 - D * D), 0).squareRoot(), 1)
+                dir = PC + r * tHit
+            }
+            let H = P + r * tHit
+            let V = H - 2 * (simd_dot(H, SIMD3(plane.x, plane.y, plane.z)) - plane.w) * SIMD3(plane.x, plane.y, plane.z)
+            let q = V - b.dump.origin
+            let z = simd_dot(q, fb)
+            guard z > 1 else { continue }
+            let ubx = (simd_dot(q, rb) / z + t.x) / (t.x + t.y), vb = (simd_dot(q, ub) / z + t.w) / (t.z + t.w)
+            let cb = Int(ubx * Float(w)), rbow = Int(vb * Float(h))
+            guard cb > 1, cb < w - 2, rbow > 1, rbow < h - 2 else { continue }
+            let codeB = Int(sb[rbow * w + cb])
+            guard codeB >= 16, codeB - 16 < pb.count, simd_distance(pb[codeB - 16], plane) < 0.01 else { continue }
+            let i = (row * w + col) * 4, j = ((h - 1 - rbow) * w + cb) * 4
+            sum += (0..<3).reduce(0) { $0 + abs(Int(a.envFlat[i + $1]) - Int(b.envFlat[j + $1])) }
+            n += 1
+        }
+    }
+    return n > 0 ? (n, Float(sum) / Float(n * 3)) : nil
+}
+
 for (i, a) in glassViews.enumerated() {
     for b in glassViews[(i + 1)...] {
         let apart = simd_distance(a.dump.origin, b.dump.origin)
         guard apart < 4, let r = compare(a, b) else { continue }
-        let kind = apart < 0.01 ? "gaze (same origin)" : String(format: "stereo (%.1f units apart)", apart)
-        print(String(format: "%@ vs %@ %@: %d glass points, mean reflection difference %.1f/255", a.name, b.name, kind, r.n, r.mean))
-        if r.mean > (apart < 0.01 ? 3 : 8) { failures += 1 }
+        if apart < 0.01 {
+            print(String(format: "%@ vs %@ gaze (same origin): %d glass/water points, mean reflection difference %.1f/255", a.name, b.name, r.n, r.mean))
+            if r.mean > 3 { failures += 1 }
+        } else if let probe = probes.first?.probe, let v = compareVirtual(a, b, probe) {
+            print(String(format: "%@ vs %@ stereo (%.1f units apart): same surface point %.1f/255 (true parallax); where each eye sees the mirror image of the same point %.1f/255 over %d points",
+                         a.name, b.name, apart, r.mean, v.mean, v.n))
+            if v.mean > 6 { failures += 1 }
+        }
     }
 }
 

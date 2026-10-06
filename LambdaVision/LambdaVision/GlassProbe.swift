@@ -2,8 +2,10 @@
 //  GlassProbe.swift
 //  LambdaVision
 //
-//  Modern lighting tier 1: the environment the glass reflects
-//  (Renderer.glassReflections; Shaders.metal glassShade).
+//  Modern lighting tier 1: the environment the glass and water reflect
+//  (Renderer.glassReflections / waterReflections; Shaders.metal glassShade).
+//  Water rows of the engine's plane table (r_vrwater) count as "glass in
+//  sight" here too, so a flooded room keeps the probe fresh.
 //
 //  The first prototype reflected the eye's own frame: the reflected ray was
 //  projected back into that eye's image and sampled there, with a flat colour
