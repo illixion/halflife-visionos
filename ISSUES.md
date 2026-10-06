@@ -80,6 +80,43 @@ instead of deleting them.
   (reuses the wheel's hysteresis and release-to-pick), or an off-hand
   toggle gesture. The README Controls section also documents neither the
   flashlight nor the keyboard and gamepad bindings.
+- **Long jump unreachable with hand tracking.** The module fires in
+  `PM_Jump` (`pm_shared.c`) only when `+duck` is already held and its timer
+  is open (`flDuckTime > 0`) as `+jump` goes down, moving faster than 50 u/s
+  (and the server's `slj` physinfo is set). Keyboard (Ctrl, then Space) and
+  gamepad (B, then A) can do it. Hand tracking can't: jump and duck share
+  the wrist's vertical axis, so the duck is released before the jump
+  threshold is reached, and the auto crouch-jump and the swing flick both
+  press jump first and duck ~0.06 s later (`HandMovement.autoDuckDelay`),
+  the reverse order. Plan: when the jump gesture arrives at running speed
+  (swing speed or stick deflection past a threshold), press `+duck` first and
+  `+jump` a beat later with the duck still held, so a running jump becomes a
+  long jump. Open points: this replaces the auto crouch-jump at speed, so
+  pick the threshold with ledge jumps in mind; and without the module a
+  duck-then-jump is just a crouched jump, so ideally only do it once the
+  player has picked the module up (the client may need a signal for that).
+  Not checked whether the campaign requires the module.
+- **No alt-fire on keyboard or hands.** `+attack2` (MP5 grenades, crossbow
+  and Python zoom, shotgun double barrel, gauss charge) is wired only to the
+  gamepad's left trigger. The keyboard binds it to `mouse2`
+  (`Lambda_Bridge.c`), but nothing reads a mouse, so `mouse1`/`mouse2` are
+  dead binds: a keyboard-only player can't fire or alt-fire at all (keyboard
+  movement plus hand-tracked fire works). Needs a keyboard key for both, and
+  a hand gesture for alt-fire still to be designed; it must not clash with
+  finger-gun fire, reload (thumb curl), the weapon wheel (all-fingertip
+  pinch) or the movement pinch.
+- **Weapon wheel is fixed at five sectors and has no icons.** It covers
+  slot1–slot5 only (`Renderer.swift`, 12 o'clock = slot1, clockwise). It
+  should become dynamic: sector count and contents from the slots the
+  player's weapons actually occupy (mods use more than five), so it can also
+  carry non-weapon entries such as the flashlight. It should also show
+  per-slot icons (from the `640hud*.spr` sprites listed in `weapon_*.txt`,
+  see "HEV HUD next steps" under rendering).
+- **No quick save / quick load in any input method.** Nothing sends
+  `save`/`load` or quicksave/quickload from hands, gamepad or keyboard (no
+  bind in the first-run set; F5/F9 reach the engine as raw key events, but
+  nothing is bound to them). Needs at least a hand-reachable route (a menu
+  or wheel entry, or a gesture) plus gamepad and keyboard binds.
 
 ## Open — rendering
 
