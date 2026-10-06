@@ -2591,6 +2591,45 @@ int lambda_train_state(void) {
     return g_vr_train_state;
 }
 
+// Weapon wheel + long jump module, client side (cl_dll/vr/vr_hud.cpp). The
+// client rewrites the wheel only when it changes, under a seqlock in [0].
+#define LAMBDA_WHEEL_MAX 16
+#define LAMBDA_WHEEL_FIELDS 5
+extern int  g_vr_wheel[4 + LAMBDA_WHEEL_MAX * LAMBDA_WHEEL_FIELDS];
+extern char g_vr_wheel_names[LAMBDA_WHEEL_MAX][64];
+extern int  g_vr_longjump;
+
+int lambda_wheel_state(lambda_wheel_slot_t *out, int max, int *allowed) {
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int seq = __atomic_load_n(&g_vr_wheel[0], __ATOMIC_ACQUIRE);
+        if (seq & 1) continue;
+        int count = g_vr_wheel[1];
+        if (count < 0) count = 0;
+        if (count > LAMBDA_WHEEL_MAX) count = LAMBDA_WHEEL_MAX;
+        if (count > max) count = max;
+        int ok = g_vr_wheel[2];
+        for (int i = 0; i < count; i++) {
+            const int *e = &g_vr_wheel[4 + i * LAMBDA_WHEEL_FIELDS];
+            out[i].slot = e[0];
+            out[i].weapon_id = e[1];
+            out[i].pick_index = e[2];
+            out[i].owned_count = e[3];
+            out[i].flags = e[4];
+            memcpy(out[i].name, g_vr_wheel_names[i], sizeof(out[i].name));
+            out[i].name[sizeof(out[i].name) - 1] = 0;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_vr_wheel[0], __ATOMIC_RELAXED) != seq) continue;
+        if (allowed) *allowed = ok;
+        return count;
+    }
+    return -1;
+}
+
+int lambda_has_longjump(void) {
+    return g_vr_longjump;
+}
+
 static void lambda_aim_offset_apply(void) {
     float pitch = (float)atomic_load(&g_pending_aim_pitch_cd) / 100.0f;
     float yaw   = (float)atomic_load(&g_pending_aim_yaw_cd) / 100.0f;
