@@ -1319,6 +1319,12 @@ actor Renderer {
             let p0 = rateMap.physicalSize(layer: 0)
             AppLog.render.log("[LambdaVision] rateMaps=\(drawable.rasterizationRateMaps.count) logical=\(w)x\(h) physical(layer0)=\(p0.width)x\(p0.height)")
         }
+        // Read back from computeProjection (View.tangents is deprecated):
+        // the frustum every eye of the engine renders through.
+        for i in drawable.views.indices {
+            let t = drawable.frustumTangents(viewIndex: i)
+            AppLog.render.log("[LambdaVision] view\(i) tangents L\(t.x, format: .fixed(precision: 3)) R\(t.y, format: .fixed(precision: 3)) T\(t.z, format: .fixed(precision: 3)) B\(t.w, format: .fixed(precision: 3))")
+        }
         let logicalW = w
         let logicalH = h
         // Scale the engine render below the logical size: the GL world pass
@@ -2197,7 +2203,7 @@ actor Renderer {
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             lambda_gl_worker_set_depth_texture(Unmanaged.passUnretained(engineDepthLayerViews[eye]).toOpaque())
-            var tang = primary.views[eye].tangents  // (left, right, top, bottom)
+            var tang = primary.frustumTangents(viewIndex: eye)  // (left, right, top, bottom)
 
             // 2D overlay (HUD/console/menu) placement: a box of fixed
             // ANGULAR size centered on the forward axis, computed per eye
@@ -2267,7 +2273,9 @@ actor Renderer {
         if !engineHeld, !loadSnapshot.isHolding, !snapshotRearmBlocked,
            lambda_engine_loading() != 0, let anchor = frameDeviceAnchor {
             loadSnapshot.hasDepth = lambda_gl_depth_target_ok() != 0
-            loadSnapshot.arm(views: primary.views, anchor: anchor.originFromAnchorTransform,
+            loadSnapshot.arm(views: primary.views,
+                             tangents: primary.views.indices.map { primary.frustumTangents(viewIndex: $0) },
+                             anchor: anchor.originFromAnchorTransform,
                              zNear: zNear, zFar: zFar, now: ftEyesStart)
             captureSnapshotThisFrame = true
         }

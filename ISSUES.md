@@ -304,7 +304,6 @@ instead of deleting them.
   e.g. culling against the original view frustum in viewmodel space.
 - **2D overlay minification.** The HUD box is downsampled ~2.15×; could
   render the 2D layer at a matching smaller virtual resolution instead.
-- **`tangents` API deprecation** warning in Renderer.swift.
 - **Level-transition hitches** (~43 ms signon parse + 110-180 ms map
   spawn) are inherent HL; a fade/hold would mask them.
 
@@ -428,6 +427,14 @@ instead of deleting them.
   already swaps between two meshes, so a third source slots in there.
 
 ## Resolved
+
+- ~~`tangents` API deprecation~~ — `View.tangents` (deprecated since
+  visionOS 2) is gone from Renderer and LoadSnapshot: the frustum tangents
+  are read back from `drawable.computeProjection` instead
+  (`Drawable.frustumTangents`, `DrawableProjection.swift`), whose x/y rows
+  carry exactly the frustum. Each view's tangents are logged once at the
+  first drawable (`[LambdaVision] viewN tangents …`); on device, check they
+  match the old values (and the image fuses as before) (device check pending).
 
 - ~~Guns sit rolled/offset in the hand; the crossbow fires left~~ — the gun's
   orientation came from Valve's hand bone, which sits differently on every
