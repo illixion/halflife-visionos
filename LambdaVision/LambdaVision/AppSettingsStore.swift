@@ -331,7 +331,7 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: freeAimPitchKey) }
     }
     static var freeAimShape: FreeAimShape {
-        get { defaults.string(forKey: freeAimShapeKey).flatMap(FreeAimShape.init(rawValue:)) ?? .ellipse }
+        get { defaults.string(forKey: freeAimShapeKey).flatMap(FreeAimShape.init(rawValue:)) ?? .rectangle }
         set { defaults.set(newValue.rawValue, forKey: freeAimShapeKey) }
     }
     static var freeAimAnchor: FreeAimAnchor {
