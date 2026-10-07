@@ -12,13 +12,13 @@
 //  Confirmed on the headset 2026-10-07 with a visible tint: GCMouse flowed,
 //  the mouse drove the game.
 //
-//  It has to draw something. With Color.clear (and a contentShape) the
-//  pointer went straight through: the system pointer hit-tests drawn pixels,
-//  not SwiftUI shapes. UIKit documents the same rule for its own hit-testing
-//  (UIView.hitTest ignores views with an alpha below 0.01), so the default is
-//  a white fill at 0.01 (`inputCatcherAlpha`, stored). If GCMouse stays
-//  silent with a mouse in use, the effective alpha steps up on its own
-//  (`alphaLadder`, capped), and stops stepping once an event comes through.
+//  It has to present content. Headset sweep 2026-10-07 at alpha 0:
+//  Color.clear with a contentShape, a clear UIView (no hover at all) and an
+//  MTKView that never presents all let the pointer straight through. An
+//  MTKView that presents ONE drawable cleared to all zeros catches, and draws
+//  nothing visible (`metalClear`, the default). A SwiftUI white fill also
+//  catches from alpha 0.003 (`swiftuiFill`, with `inputCatcherAlpha` and an
+//  automatic step-up when GCMouse stays silent).
 //
 //  The decision rule, the events-per-second counter and the "isn't catching"
 //  watch are RAVEInput's (`RAVEMouseCatcherRule`, `RAVEEventRate`,
@@ -100,7 +100,7 @@ final class InputCatcher {
     var material = false
     /// How the window is filled (InputCatcherTechniques.swift). The alpha
     /// and its step-up apply to `.swiftuiFill` only.
-    var technique: InputCatcherTechnique = .swiftuiFill
+    var technique: InputCatcherTechnique = .metalClear
     /// Step the alpha up on its own when GCMouse stays silent. Off: draw
     /// exactly `alpha`, for A/B tests at a fixed value.
     var autoStep = true {

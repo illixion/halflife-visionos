@@ -323,7 +323,7 @@ enum AppSettingsStore {
     static var inputCatcherTechnique: InputCatcherTechnique {
         get {
             guard let raw = defaults.string(forKey: inputCatcherTechniqueKey),
-                  let v = InputCatcherTechnique(rawValue: raw) else { return .swiftuiFill }
+                  let v = InputCatcherTechnique(rawValue: raw) else { return .metalClear }
             return v
         }
         set { defaults.set(newValue.rawValue, forKey: inputCatcherTechniqueKey) }
