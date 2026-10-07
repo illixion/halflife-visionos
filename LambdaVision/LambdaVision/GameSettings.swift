@@ -62,6 +62,35 @@ enum FlatHUDPlacement: String, CaseIterable, Identifiable {
     var label: String { self == .followView ? "Follow view (lazy)" : "Attached to hands" }
 }
 
+/// Free aim's zone shape (FreeAimZone.Shape, as a setting).
+nonisolated enum FreeAimShape: String, CaseIterable, Identifiable, Sendable {
+    case ellipse, rectangle
+    var id: String { rawValue }
+    var label: String { self == .ellipse ? "Ellipse" : "Rectangle" }
+    var zone: FreeAimZone.Shape { self == .ellipse ? .ellipse : .rectangle }
+}
+
+/// What free aim's zone is centred on (FreeAimZone.Anchor, as a setting).
+nonisolated enum FreeAimAnchor: String, CaseIterable, Identifiable, Sendable {
+    case body, head
+    var id: String { rawValue }
+    var label: String { self == .body ? "Body" : "Head (lazy)" }
+    var zone: FreeAimZone.Anchor { self == .body ? .body : .head }
+}
+
+/// The point the free-aimed viewmodel turns about.
+nonisolated enum FreeAimPivot: String, CaseIterable, Identifiable, Sendable {
+    case shoulder, hand, eye
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .shoulder: "Shoulder"
+        case .hand: "Hand"
+        case .eye: "Eye"
+        }
+    }
+}
+
 /// Which model of the weapon is held: the first-person viewmodel, animated
 /// but modelled only for the side the old camera saw, or the third-person
 /// world model, whole but rigid (reloads then show as the ring alone).
@@ -225,8 +254,10 @@ final class GameSettings {
     /// a mark stuck on the view that nothing lands on (the aim reticle does
     /// that job, and stands down in gaze mode).
     /// Outside hands mode shots follow the view, so it is the aim mark
-    /// there too (the render thread re-pushes it when the mode changes).
-    private var stockCrosshair: Int { fireAimMode == .gaze || InputModeState.current != .hands ? 1 : 0 }
+    /// there too (the render thread re-pushes it when the mode changes) —
+    /// unless free aim swings the gun off the centre, when the holographic
+    /// reticle marks the shot instead (Renderer.stockCrosshairWanted).
+    private var stockCrosshair: Int { Renderer.stockCrosshairWanted(mode: InputModeState.current) ? 1 : 0 }
     /// Flashlight mounted on the weapon hand (default) or the stock headlamp.
     var flashlightOnGun: Bool = AppSettingsStore.flashlightOnGun {
         didSet { AppSettingsStore.flashlightOnGun = flashlightOnGun
@@ -292,6 +323,7 @@ final class GameSettings {
     /// instead of the engine. On = the `vr_weapon_external` path.
     var weaponExternal: Bool = AppSettingsStore.weaponExternal {
         didSet { AppSettingsStore.weaponExternal = weaponExternal
+                 Renderer.weaponExternal = weaponExternal
                  cvar("vr_weapon_external", weaponExternal ? 1 : 0) }
     }
     /// Draw the first-person body (the player model posed from head and hand
@@ -377,6 +409,47 @@ final class GameSettings {
     var lookPitch: Bool = AppSettingsStore.lookPitch {
         didSet { AppSettingsStore.lookPitch = lookPitch
                  Renderer.lookPitchEnabled = lookPitch }
+    }
+    /// Free aim (FreeAim.swift): with a keyboard+mouse or gamepad the mouse
+    /// and right stick swing the gun inside a zone ahead of the body; only the
+    /// excess turns the body. Off = they turn the view directly, as before.
+    var freeAim: Bool = AppSettingsStore.freeAim {
+        didSet { AppSettingsStore.freeAim = freeAim; applyFreeAim() }
+    }
+    /// The zone's half-width and half-height, degrees.
+    var freeAimYaw: Double = AppSettingsStore.freeAimYaw {
+        didSet { AppSettingsStore.freeAimYaw = freeAimYaw; applyFreeAim() }
+    }
+    var freeAimPitch: Double = AppSettingsStore.freeAimPitch {
+        didSet { AppSettingsStore.freeAimPitch = freeAimPitch; applyFreeAim() }
+    }
+    var freeAimShape: FreeAimShape = AppSettingsStore.freeAimShape {
+        didSet { AppSettingsStore.freeAimShape = freeAimShape; applyFreeAim() }
+    }
+    /// Centred on the body (head turns don't drag the gun) or on the head
+    /// with a lazy follow.
+    var freeAimAnchor: FreeAimAnchor = AppSettingsStore.freeAimAnchor {
+        didSet { AppSettingsStore.freeAimAnchor = freeAimAnchor; applyFreeAim() }
+    }
+    /// Head anchor: the follow's time constant, seconds.
+    var freeAimFollow: Double = AppSettingsStore.freeAimFollow {
+        didSet { AppSettingsStore.freeAimFollow = freeAimFollow; applyFreeAim() }
+    }
+    /// Ease the aim back to the zone's centre while the mouse and stick rest.
+    var freeAimRecenter: Bool = AppSettingsStore.freeAimRecenter {
+        didSet { AppSettingsStore.freeAimRecenter = freeAimRecenter; applyFreeAim() }
+    }
+    /// The recentre's time constant, seconds.
+    var freeAimRecenterTime: Double = AppSettingsStore.freeAimRecenterTime {
+        didSet { AppSettingsStore.freeAimRecenterTime = freeAimRecenterTime; applyFreeAim() }
+    }
+    /// Where the viewmodel turns about as it follows the aim.
+    var freeAimPivot: FreeAimPivot = AppSettingsStore.freeAimPivot {
+        didSet { AppSettingsStore.freeAimPivot = freeAimPivot; applyFreeAim() }
+    }
+    /// +use picks what the gun points at rather than the view's centre.
+    var freeAimUse: Bool = AppSettingsStore.freeAimUse {
+        didSet { AppSettingsStore.freeAimUse = freeAimUse; applyFreeAim() }
     }
     /// Hide the viewmodel parts Valve parks out of the flat view's shot
     /// (spare magazines, shells) while they are out of it (WeaponPass).
@@ -469,6 +542,8 @@ final class GameSettings {
         GamepadInput.smoothTurn = stickSmoothTurn
         GamepadInput.turnSpeed = Float(stickTurnSpeed)
         Renderer.lookPitchEnabled = lookPitch
+        Renderer.weaponExternal = weaponExternal
+        applyFreeAim()
         InputCatcher.shared.enabled = inputCatcher
         InputCatcher.shared.recenterOnExit = inputCatcherRecenter
         InputCatcher.shared.alpha = inputCatcherAlpha
@@ -490,6 +565,23 @@ final class GameSettings {
             aimReticle = all[(all.firstIndex(of: aimReticle).map { $0 + 1 } ?? 0) % all.count]
         case .body: avatarBody.toggle()
         }
+    }
+
+    /// Free aim's knobs, for the render thread (plain statics read once a
+    /// frame; a torn read lasts one frame).
+    private func applyFreeAim() {
+        var c = FreeAimZone.Config()
+        c.yawLimit = Float(freeAimYaw)
+        c.pitchLimit = Float(freeAimPitch)
+        c.shape = freeAimShape.zone
+        c.anchor = freeAimAnchor.zone
+        c.followTime = Float(freeAimFollow)
+        c.recenter = freeAimRecenter
+        c.recenterTime = Float(freeAimRecenterTime)
+        Renderer.freeAimConfig = c
+        Renderer.freeAimPivot = freeAimPivot
+        Renderer.freeAimUse = freeAimUse
+        Renderer.freeAimEnabled = freeAim
     }
 
     /// A plain flag in the client and a render static, so it is safe before

@@ -287,6 +287,72 @@ actor Renderer {
     nonisolated(unsafe) static var lookPitchEnabled = false
     /// That pitch, degrees (xash: + = down). Render thread only.
     private var viewPitchOffset: Float = 0
+
+    // Free aim (FreeAim.swift, Settings > Keyboard, mouse & gamepad): the
+    // mouse and right stick swing the flat viewmodel and its aim inside a
+    // zone ahead of the body; what pushes past the edge turns the body
+    // (requestTurn). Shots, the use cone and the gun flashlight go along the
+    // aim through the same aim offset hands mode uses (VR_ItemPostFrame),
+    // so the usercmd keeps the head's view and WASD stays head-relative.
+    nonisolated(unsafe) static var freeAimEnabled = true
+    nonisolated(unsafe) static var freeAimConfig = FreeAimZone.Config()
+    nonisolated(unsafe) static var freeAimPivot: FreeAimPivot = .shoulder
+    nonisolated(unsafe) static var freeAimUse = true
+    /// "Hand-tracked weapon model": the Metal pass draws the weapon. Free aim
+    /// needs it (the engine's own viewmodel can't be swung).
+    nonisolated(unsafe) static var weaponExternal = true
+    /// Render thread only.
+    private var freeAimZone = FreeAimZone()
+    private var freeAimActive = false
+    private var freeAimSnapArmed = true
+    private var freeAimLastOverflowAt: TimeInterval = 0
+    private var freeAimTurnedTotal: Float = 0
+    private var freeAimFrameDt: Float = 0
+    /// This frame's swung gun, GoldSrc room axes and units (FreeAimZone.gunTransform).
+    private var freeAimGun: float4x4?
+    /// This frame's aim ray for the reticle, Apple world (metres, unit dir).
+    private var freeAimRay: (muzzle: SIMD3<Float>, direction: SIMD3<Float>)?
+    /// The stock crosshair state last pushed (pushed again whenever it changes).
+    private var lastStockCrosshair: Bool?
+
+    /// Whether the engine's crosshair (the view's centre) is the aim mark:
+    /// hands mode only with gaze fire; outside it, unless free aim moves the
+    /// gun off the centre (the holographic reticle marks it then).
+    nonisolated static func stockCrosshairWanted(mode: InputMode) -> Bool {
+        mode == .hands ? fireAlongGaze : !(freeAimEnabled && weaponExternal)
+    }
+
+    /// Free aim's state for GET /state (DebugEndpoints).
+    struct FreeAimStatus: Encodable, Sendable {
+        var setting = false
+        var active = false
+        var offsetYawDeg: Float = 0       // + right of the zone centre
+        var offsetPitchDeg: Float = 0     // + up
+        var yawLimitDeg: Float = 0        // at the current pitch (the ellipse narrows)
+        var pitchLimitDeg: Float = 0
+        var shape = "ellipse"
+        var anchor = "body"
+        var pivot = "shoulder"
+        var centerFromBodyDeg: Float = 0  // zone centre − body forward (head anchor), + left
+        var pinnedYaw = false
+        var pinnedPitch = false
+        var overflowTurning = false       // the aim's excess turned the body in the last 0.15 s
+        var lastOverflowAgoMs: Double?
+        var overflowTurnedDegTotal: Float = 0
+        var recentering = false
+        var engineOffsetPitchDeg: Float = 0   // what lambda_set_aim_offset got
+        var engineOffsetYawDeg: Float = 0
+        var muzzle = false                // shots leave the swung gun's muzzle
+    }
+    nonisolated(unsafe) private static var freeAimStatusValue = FreeAimStatus()
+    private static let freeAimStatusLock = NSLock()
+    nonisolated static var freeAimStatus: FreeAimStatus {
+        freeAimStatusLock.lock(); defer { freeAimStatusLock.unlock() }
+        return freeAimStatusValue
+    }
+    nonisolated private static func publishFreeAim(_ s: FreeAimStatus) {
+        freeAimStatusLock.lock(); freeAimStatusValue = s; freeAimStatusLock.unlock()
+    }
     /// Last frame's input mode, to act on a change (crosshair, resets).
     private var lastInputMode: InputMode?
     private var lastInputPollTime: TimeInterval?
@@ -618,10 +684,41 @@ actor Renderer {
         let menuUp = lambda_menu_active() != 0
         let typing = menuUp || lambda_console_active() != 0
 
+        // Free aim: the mouse and stick move the aim offset; its overflow
+        // turns the body (and, with look-pitch on, tilts the view).
+        let freeAim = flat && Renderer.freeAimEnabled && Renderer.weaponExternal
+        if freeAim != freeAimActive { freeAimZone.reset(); freeAimSnapArmed = true }
+        freeAimActive = freeAim
+        freeAimFrameDt = dt
+        freeAimZone.config = Renderer.freeAimConfig
+        var aimInput = false
+        if freeAim {
+            // A settings change can leave the offset outside a smaller zone.
+            applyFreeAimOverflow(freeAimZone.clampToZone(), pitchOK: pitchOK, now: now)
+        }
+
         GamepadInput.shared.poll(dt: dt, typing: typing,
                                  snapTurn: { if !typing { Renderer.requestSnapTurn($0) } },
                                  turn: { if !typing { Renderer.requestTurn(degrees: $0) } },
-                                 look: { if !typing, pitchOK { self.addViewPitch($0) } })
+                                 look: { if !typing, pitchOK { self.addViewPitch($0) } },
+                                 aim: !freeAim ? nil : { yaw, pitch, stickX in
+                                     guard !typing else { return }
+                                     if yaw != 0 || pitch != 0 { aimInput = true }
+                                     let o = self.freeAimZone.move(yaw: yaw, pitch: pitch)
+                                     if GamepadInput.smoothTurn {
+                                         self.applyFreeAimOverflow(o, pitchOK: pitchOK, now: now)
+                                     } else {
+                                         // Snap turning: pushing on at the edge snaps
+                                         // the body once per push.
+                                         if abs(stickX) < GamepadInput.snapThreshold { self.freeAimSnapArmed = true }
+                                         if o.yaw != 0, self.freeAimSnapArmed, abs(stickX) >= GamepadInput.snapThreshold {
+                                             self.freeAimSnapArmed = false
+                                             Renderer.requestSnapTurn(o.yaw > 0 ? 1 : -1)
+                                             self.noteFreeAimTurn(Renderer.snapTurnDegrees * (o.yaw > 0 ? 1 : -1), now: now)
+                                         }
+                                         self.applyFreeAimOverflow(.init(yaw: 0, pitch: o.pitch), pitchOK: pitchOK, now: now)
+                                     }
+                                 })
 
         let m = MouseInput.shared.takeMotion()
         if menuUp {
@@ -640,10 +737,18 @@ actor Renderer {
             }
         } else if !typing {
             let k = MouseInput.sensitivity * MouseInput.degreesPerCount
-            if m.dx != 0 { Renderer.requestTurn(degrees: m.dx * k) }
-            if m.dy != 0, pitchOK { addViewPitch(-m.dy * k) }
+            if freeAim {
+                if m.dx != 0 || m.dy != 0 {
+                    aimInput = true
+                    applyFreeAimOverflow(freeAimZone.move(yaw: m.dx * k, pitch: m.dy * k), pitchOK: pitchOK, now: now)
+                }
+            } else {
+                if m.dx != 0 { Renderer.requestTurn(degrees: m.dx * k) }
+                if m.dy != 0, pitchOK { addViewPitch(-m.dy * k) }
+            }
         }
         mouseMenuWasUp = menuUp
+        if freeAim { freeAimZone.step(dt: dt, hadInput: aimInput) }
 
         // Hands own the view's pitch: drop any mouse/stick pitch when they
         // take over or the setting goes off.
@@ -667,16 +772,56 @@ actor Renderer {
                 }
             }
             lastInputMode = mode
-            // The stock crosshair marks the middle of the view, which is
-            // where shots go outside hands mode (and with gaze fire).
-            // (Queued; the engine takes it on its next frame.)
-            let on = mode != .hands || Renderer.fireAlongGaze
-            _ = "crosshair \(on ? 1 : 0)".withCString { lambda_gl_worker_cmd($0) }
+        }
+        // The stock crosshair marks the middle of the view, which is where
+        // shots go outside hands mode (and with gaze fire) — but not with free
+        // aim, whose reticle marks the swung gun's shot. Pushed whenever that
+        // changes: a mode change or the free-aim setting. (Queued; the engine
+        // takes it on its next frame.)
+        let crosshair = Renderer.stockCrosshairWanted(mode: mode)
+        if crosshair != lastStockCrosshair {
+            lastStockCrosshair = crosshair
+            _ = "crosshair \(crosshair ? 1 : 0)".withCString { lambda_gl_worker_cmd($0) }
         }
     }
 
     private func addViewPitch(_ deg: Float) {
         viewPitchOffset = min(max(viewPitchOffset + deg, -89), 89)
+    }
+
+    /// What a free-aim move pushed past the zone: yaw turns the body (the
+    /// smooth-turn path), pitch tilts the view when look-pitch is on and is
+    /// dropped otherwise (the zone's edge is the limit).
+    private func applyFreeAimOverflow(_ o: FreeAimZone.Overflow, pitchOK: Bool, now: TimeInterval) {
+        if o.yaw != 0 {
+            Renderer.requestTurn(degrees: o.yaw)
+            noteFreeAimTurn(o.yaw, now: now)
+        }
+        if o.pitch != 0, pitchOK { addViewPitch(-o.pitch) }
+    }
+
+    /// Where the free-aimed viewmodel turns about, in its own (view) space:
+    /// inches, x forward, y left, z up, the eye at the origin. The shoulder
+    /// and hand are a right-handed holder's, as every stock viewmodel is.
+    private func freeAimPivotPoint() -> SIMD3<Float> {
+        switch Renderer.freeAimPivot {
+        case .eye: return .zero
+        case .shoulder: return Self.freeAimShoulder
+        case .hand:
+            // The viewmodel's own grip hand at idle, when it has one.
+            if let pass = weaponPass, let grip = pass.grip, !pass.idlePalette.isEmpty {
+                let p = grip.frame(in: pass.idlePalette).columns.3
+                return SIMD3(p.x, p.y, p.z)
+            }
+            return Self.freeAimHand
+        }
+    }
+    static let freeAimShoulder = SIMD3<Float>(-3, -7, -9)
+    static let freeAimHand = SIMD3<Float>(10, -6, -8)
+
+    private func noteFreeAimTurn(_ deg: Float, now: TimeInterval) {
+        freeAimLastOverflowAt = now
+        freeAimTurnedTotal += abs(deg)
     }
 
     // Gaze aim: the pinch handler stages the spatial event's selectionRay
@@ -956,6 +1101,14 @@ actor Renderer {
     /// with the distance the client's trace found (xash units → metres).
     /// Nil when fire follows gaze, since the barrel then is not the aim.
     private func reticleAim(headTransform: simd_float4x4) -> HEVHUD.Aim? {
+        // Free aim: along the swung gun's aim from its muzzle, which is what
+        // the client's aim trace (V_PublishAimHit) measures too.
+        if let ray = freeAimRay {
+            guard Renderer.aimReticle != .off else { return nil }
+            var d: Float = 0
+            return HEVHUD.Aim(muzzle: ray.muzzle, direction: ray.direction,
+                              distance: lambda_aim_hit(&d) != 0 ? d / 39.37 : nil)
+        }
         guard Renderer.aimReticle != .off, !Renderer.fireAlongGaze,
               InputModeState.current == .hands,   // else the stock crosshair marks the view
               let hand = sampleDominantHand(headTransform: headTransform),
@@ -2188,6 +2341,75 @@ actor Renderer {
             headOffset = SIMD3<Float>(d.x * c + d.y * s, -d.x * s + d.y * c, d.z)
             avatarHeadOffsetZ = d.z
 
+            // Free aim (keyboard/mouse/gamepad): the gun points along the zone
+            // centre (the body's forward, or the head's lagged yaw) plus the
+            // offset. The engine gets it as an aim offset from the composed
+            // head view, applied around the weapon frame (VR_ItemPostFrame)
+            // and to the local bullet events, exactly as hands mode's barrel
+            // aim; the usercmd keeps the head's view, so movement, NPC sight
+            // and the rendered camera are untouched. Shots leave the swung
+            // viewmodel's muzzle (the eye with no muzzle), and its attachments
+            // and transform go along so flashes and shells leave the gun.
+            var freeAimOffset: (pitch: Float, yaw: Float)? = nil
+            freeAimGun = nil
+            freeAimRay = nil
+            if freeAimActive {
+                let center = freeAimZone.updateCenter(bodyYaw: headBaselineYaw!, headYaw: yawDeg, dt: freeAimFrameDt)
+                let aim = freeAimZone.aim(centerYaw: center)
+                let off = FreeAimZone.engineOffset(aimYaw: aim.yaw, aimPitchDown: aim.pitchDown,
+                                                   headYaw: yawDeg, headPitchDown: pitchDeg)
+                freeAimOffset = off
+                let eye = cur.pos * appleToXash
+                let gun = FreeAimZone.gunTransform(eye: eye, centerYaw: center, aimYaw: aim.yaw,
+                                                   aimPitchDown: aim.pitchDown, pivot: freeAimPivotPoint())
+                freeAimGun = gun
+                let r = yawDeg * .pi / 180
+                let c = cosf(r), s = sinf(r)
+                func level(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3(v.x * c + v.y * s, -v.x * s + v.y * c, v.z) }
+                func apply(_ p: SIMD3<Float>) -> SIMD3<Float> { let q = gun * SIMD4<Float>(p, 1); return SIMD3(q.x, q.y, q.z) }
+                let base = headBaselinePos! * appleToXash
+                let pass = lambda_weapon_active() != 0 ? weaponPass : nil
+                // The idle muzzle, so recoil doesn't move where the next shot starts.
+                let muzzle = pass?.muzzle.map(apply) ?? eye
+                muzzleOffset = level(muzzle - base)
+                if let pass {
+                    attachmentOffsets = pass.attachments.prefix(4).compactMap { a in
+                        guard a.bone < pass.palette.count else { return nil }
+                        let p = pass.palette[a.bone] * SIMD4<Float>(a.org, 1)
+                        return level(apply(SIMD3(p.x, p.y, p.z)) - base)
+                    }
+                    let cols = [gun.columns.0, gun.columns.1, gun.columns.2].map { level(SIMD3($0.x, $0.y, $0.z)) }
+                    let o = level(SIMD3(gun.columns.3.x, gun.columns.3.y, gun.columns.3.z) - base)
+                    gunTransform = (cols + [o]).flatMap { [$0.x, $0.y, $0.z] }
+                }
+                let f = gun.columns.0
+                freeAimRay = (appleDirection(muzzle) / 39.37, appleDirection(SIMD3(f.x, f.y, f.z)))
+                if Renderer.flashlightOnGun {
+                    flashlightBeam = (muzzleOffset!, off.pitch, off.yaw)
+                }
+                let now = CACurrentMediaTime()
+                let z = freeAimZone
+                Renderer.publishFreeAim(FreeAimStatus(
+                    setting: Renderer.freeAimEnabled, active: true,
+                    offsetYawDeg: z.yaw, offsetPitchDeg: z.pitch,
+                    yawLimitDeg: z.yawLimit(atPitch: z.pitch), pitchLimitDeg: z.pitchLimit(atYaw: z.yaw),
+                    shape: z.config.shape.rawValue, anchor: z.config.anchor.rawValue,
+                    pivot: Renderer.freeAimPivot.rawValue,
+                    centerFromBodyDeg: FreeAimZone.wrap(center - headBaselineYaw!),
+                    pinnedYaw: z.pinnedYaw(), pinnedPitch: z.pinnedPitch(),
+                    overflowTurning: now - freeAimLastOverflowAt < 0.15,
+                    lastOverflowAgoMs: freeAimLastOverflowAt > 0 ? (now - freeAimLastOverflowAt) * 1000 : nil,
+                    overflowTurnedDegTotal: freeAimTurnedTotal,
+                    recentering: z.config.recenter && z.idleTime > z.config.recenterDelay && (z.yaw != 0 || z.pitch != 0),
+                    engineOffsetPitchDeg: off.pitch, engineOffsetYawDeg: off.yaw,
+                    muzzle: pass?.muzzle != nil))
+            } else {
+                Renderer.publishFreeAim(FreeAimStatus(
+                    setting: Renderer.freeAimEnabled, active: false,
+                    shape: Renderer.freeAimConfig.shape.rawValue, anchor: Renderer.freeAimConfig.anchor.rawValue,
+                    pivot: Renderer.freeAimPivot.rawValue, overflowTurnedDegTotal: freeAimTurnedTotal))
+            }
+
             // Aim ray + hand-anchored weapon. With the dominant hand
             // tracked, the weapon renders at the hand (p_ model, composed
             // hlsdk-side) and fires along the hand's pointing direction;
@@ -2204,7 +2426,8 @@ actor Renderer {
             }
             if inputMode != .hands {
                 lambda_clear_hand_pose()
-                Renderer.aimDiag.aimSource = "view (\(inputMode.label))"
+                Renderer.aimDiag.aimSource = freeAimOffset != nil ? "free aim (\(inputMode.label))"
+                                                                   : "view (\(inputMode.label))"
             } else if let hand = handSample {
                 let p = hand.localPos * appleToXash
                 lambda_set_hand_pose(p.x, p.y, p.z,
@@ -2269,7 +2492,11 @@ actor Renderer {
                 Renderer.aimDiag.aimSource = "gaze(fallback)"
             }
             Renderer.aimDiag.fireAlongGaze = Renderer.fireAlongGaze
-            if inputMode != .hands {
+            if let off = freeAimOffset {
+                lambda_set_aim_offset(off.pitch, off.yaw)
+                Renderer.aimDiag.pitch = off.pitch
+                Renderer.aimDiag.yaw = off.yaw
+            } else if inputMode != .hands {
                 lambda_set_aim_offset(0, 0)
                 Renderer.aimDiag.pitch = 0
                 Renderer.aimDiag.yaw = 0
@@ -2475,6 +2702,9 @@ actor Renderer {
                     var duy = uYaw - yawDeg
                     if duy > 180 { duy -= 360 } else if duy < -180 { duy += 360 }
                     lambda_set_use_offset(uPitch - pitchDeg, duy, 1)
+                } else if let off = freeAimOffset, Renderer.freeAimUse {
+                    // Free aim: +use picks what the gun points at.
+                    lambda_set_use_offset(off.pitch, off.yaw, 1)
                 } else {
                     lambda_set_use_offset(0, 0, 0)
                 }
@@ -2494,7 +2724,11 @@ actor Renderer {
         }
         do {
             var flat = false
-            if lambda_weapon_active() != 0, let pass = weaponPass { flat = pass.drawsFlat && !pass.showsWorldModel }
+            // A free-aimed gun is swung off the view, whatever the pass would
+            // otherwise draw: the game fires it along the aim offset.
+            if lambda_weapon_active() != 0, let pass = weaponPass {
+                flat = pass.drawsFlat && !pass.showsWorldModel && freeAimGun == nil
+            }
             let xyz = attachmentOffsets.flatMap { [$0.x, $0.y, $0.z] }
             if let t = gunTransform {
                 lambda_set_weapon_draw(flat ? 1 : 0, t, xyz, Int32(attachmentOffsets.count))
@@ -3222,9 +3456,11 @@ actor Renderer {
             // way the engine drew it (the head is the camera; mouse or stick
             // pitch turns the world, not the screen, so the view's centre
             // stays at head-forward and the gun with it).
+            // Free aim swings it: the same viewmodel turned onto the aim about
+            // its pivot, placed from the body rather than the head.
             if weaponActive, !handsMode {
                 drawWeapon = true
-                model = anchorM * studioToWorld
+                model = freeAimGun.map { studioToWorld * $0 } ?? anchorM * studioToWorld
             }
 
             // Radial weapon menu: one wedge per entry, the armed one grown and

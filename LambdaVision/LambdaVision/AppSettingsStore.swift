@@ -305,6 +305,60 @@ enum AppSettingsStore {
         get { bool(lookPitchKey, false) }
         set { defaults.set(newValue, forKey: lookPitchKey) }
     }
+    // Free aim (FreeAim.swift): the mouse and right stick swing the gun
+    // inside a zone; only the excess turns the body.
+    private static let freeAimKey              = "lambdavision.settings.freeAim"
+    private static let freeAimYawKey           = "lambdavision.settings.freeAimYaw"
+    private static let freeAimPitchKey         = "lambdavision.settings.freeAimPitch"
+    private static let freeAimShapeKey         = "lambdavision.settings.freeAimShape"
+    private static let freeAimAnchorKey        = "lambdavision.settings.freeAimAnchor"
+    private static let freeAimFollowKey        = "lambdavision.settings.freeAimFollow"
+    private static let freeAimRecenterKey      = "lambdavision.settings.freeAimRecenter"
+    private static let freeAimRecenterTimeKey  = "lambdavision.settings.freeAimRecenterTime"
+    private static let freeAimPivotKey         = "lambdavision.settings.freeAimPivot"
+    private static let freeAimUseKey           = "lambdavision.settings.freeAimUse"
+
+    static var freeAim: Bool {
+        get { bool(freeAimKey, true) }
+        set { defaults.set(newValue, forKey: freeAimKey) }
+    }
+    static var freeAimYaw: Double {
+        get { double(freeAimYawKey, 20) }
+        set { defaults.set(newValue, forKey: freeAimYawKey) }
+    }
+    static var freeAimPitch: Double {
+        get { double(freeAimPitchKey, 15) }
+        set { defaults.set(newValue, forKey: freeAimPitchKey) }
+    }
+    static var freeAimShape: FreeAimShape {
+        get { defaults.string(forKey: freeAimShapeKey).flatMap(FreeAimShape.init(rawValue:)) ?? .ellipse }
+        set { defaults.set(newValue.rawValue, forKey: freeAimShapeKey) }
+    }
+    static var freeAimAnchor: FreeAimAnchor {
+        get { defaults.string(forKey: freeAimAnchorKey).flatMap(FreeAimAnchor.init(rawValue:)) ?? .body }
+        set { defaults.set(newValue.rawValue, forKey: freeAimAnchorKey) }
+    }
+    static var freeAimFollow: Double {
+        get { double(freeAimFollowKey, 0.35) }
+        set { defaults.set(newValue, forKey: freeAimFollowKey) }
+    }
+    static var freeAimRecenter: Bool {
+        get { bool(freeAimRecenterKey, false) }
+        set { defaults.set(newValue, forKey: freeAimRecenterKey) }
+    }
+    static var freeAimRecenterTime: Double {
+        get { double(freeAimRecenterTimeKey, 0.8) }
+        set { defaults.set(newValue, forKey: freeAimRecenterTimeKey) }
+    }
+    static var freeAimPivot: FreeAimPivot {
+        get { defaults.string(forKey: freeAimPivotKey).flatMap(FreeAimPivot.init(rawValue:)) ?? .shoulder }
+        set { defaults.set(newValue.rawValue, forKey: freeAimPivotKey) }
+    }
+    static var freeAimUse: Bool {
+        get { bool(freeAimUseKey, true) }
+        set { defaults.set(newValue, forKey: freeAimUseKey) }
+    }
+
     private static let inputCatcherKey         = "lambdavision.settings.inputCatcher"
     private static let inputCatcherRecenterKey = "lambdavision.settings.inputCatcherRecenter"
     /// The invisible mouse-capture window (InputCatcher).

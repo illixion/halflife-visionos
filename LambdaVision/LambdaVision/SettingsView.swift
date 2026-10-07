@@ -193,6 +193,35 @@ struct SettingsView: View {
                     }
                     .disabled(!settings.stickSmoothTurn)
                     Toggle("Look up/down with mouse and stick", isOn: $settings.lookPitch)
+                    Toggle("Free aim", isOn: $settings.freeAim)
+                    Group {
+                        slider("Free-aim zone width", $settings.freeAimYaw, 0...45, 1) {
+                            String(format: "±%.0f°", $0)
+                        }
+                        slider("Free-aim zone height", $settings.freeAimPitch, 0...35, 1) {
+                            String(format: "±%.0f°", $0)
+                        }
+                        Picker("Zone shape", selection: $settings.freeAimShape) {
+                            ForEach(FreeAimShape.allCases) { Text($0.label).tag($0) }
+                        }
+                        Picker("Zone centred on", selection: $settings.freeAimAnchor) {
+                            ForEach(FreeAimAnchor.allCases) { Text($0.label).tag($0) }
+                        }
+                        slider("Head follow lag", $settings.freeAimFollow, 0.1...1.5, 0.05) {
+                            String(format: "%.2f s", $0)
+                        }
+                        .disabled(settings.freeAimAnchor != .head)
+                        Picker("Weapon turns about", selection: $settings.freeAimPivot) {
+                            ForEach(FreeAimPivot.allCases) { Text($0.label).tag($0) }
+                        }
+                        Toggle("Re-centre the aim when idle", isOn: $settings.freeAimRecenter)
+                        slider("Re-centre speed", $settings.freeAimRecenterTime, 0.2...3, 0.1) {
+                            String(format: "%.1f s", $0)
+                        }
+                        .disabled(!settings.freeAimRecenter)
+                        Toggle("Use (E) picks what the gun points at", isOn: $settings.freeAimUse)
+                    }
+                    .disabled(!settings.freeAim || !settings.weaponExternal)
                     Toggle("Mouse capture window", isOn: $settings.inputCatcher)
                     Toggle("Ask before locking the mouse", isOn: $settings.inputCatcherAskBeforeLock)
                         .disabled(!settings.inputCatcher)
@@ -212,7 +241,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Keyboard, mouse & gamepad")
                 } footer: {
-                    Text("“Input mode” on Auto follows the last thing you used: a key, the mouse or the gamepad switches to it at once, and a look-and-pinch brings the hands back (once the other device has been still for a second). With a keyboard, mouse or gamepad the game plays like the desktop original in stereo: the weapon is the classic viewmodel in front of you, shots go where you look (the crosshair marks it), the body’s arms stop following your hands and the hand gestures rest. Movement always reaches full run speed. The mouse and the right stick turn you smoothly; Z and X snap-turn. “Look up/down” adds mouse and stick pitch to your head’s; it tilts the game’s horizon away from the room’s, which some find uncomfortable, and hides the first-person body while a tilt is set. “HEV holograms” on “Follow view” moves health and suit to the lower left of your view and ammo to the lower right, like Half-Life 2; they trail your head slightly, never far, instead of sticking to your eyes. “Attached to hands” keeps them on your hands as in hands mode. “Mouse capture window” keeps an invisible window in front of you while you play with a mouse: visionOS only lets the game read the mouse while the pointer is over one of its windows. It stays up while a mouse is connected and steps aside for the menu and the console; a look-and-pinch works through it as it does on the game, and brings the hands back. “Ask before locking the mouse” shows a small “Click to lock mouse” pane first; click it (or pinch it) to hand the mouse to the game. Moving the pointer off the game, or Esc (the game menu), releases it and the pane comes back. In Auto, the pane appears once you use the keyboard or the mouse. With asking off, the window takes over straight away and “Re-centre” reopens it in front of you when the pointer slips off it. The pointer only counts what a window draws, so the window keeps a faint fill (“Capture window opacity”); if the mouse goes unheard it turns the fill up a little on its own. Rebind keys in the game’s menu (Configuration › Controls).")
+                    Text("“Input mode” on Auto follows the last thing you used: a key, the mouse or the gamepad switches to it at once, and a look-and-pinch brings the hands back (once the other device has been still for a second). With a keyboard, mouse or gamepad the game plays like the desktop original in stereo: the weapon is the classic viewmodel in front of you, the body’s arms stop following your hands and the hand gestures rest. Movement always reaches full run speed. With “Free aim” (the Razer Hydra mods’ scheme) the mouse and the right stick swing the gun inside a zone ahead of your body, and only pushing past the zone’s edge turns you; the aim reticle marks where shots land, and looking around with your head doesn’t drag the gun. “Zone centred on → Head” lets the zone drift after your head instead. Up/down past the zone is clamped, or tilts the view with “Look up/down” on. “Re-centre the aim when idle” eases the gun back to the middle when you stop moving the mouse. With the stick on snap turning, holding it at the zone’s edge snaps you once per push. Free aim off: the mouse and the right stick turn you directly and shots go where you look (the crosshair marks it). Z and X always snap-turn. Free aim needs “Hand-tracked weapon model”. “Look up/down” adds mouse and stick pitch to your head’s; it tilts the game’s horizon away from the room’s, which some find uncomfortable, and hides the first-person body while a tilt is set. “HEV holograms” on “Follow view” moves health and suit to the lower left of your view and ammo to the lower right, like Half-Life 2; they trail your head slightly, never far, instead of sticking to your eyes. “Attached to hands” keeps them on your hands as in hands mode. “Mouse capture window” keeps an invisible window in front of you while you play with a mouse: visionOS only lets the game read the mouse while the pointer is over one of its windows. It stays up while a mouse is connected and steps aside for the menu and the console; a look-and-pinch works through it as it does on the game, and brings the hands back. “Ask before locking the mouse” shows a small “Click to lock mouse” pane first; click it (or pinch it) to hand the mouse to the game. Moving the pointer off the game, or Esc (the game menu), releases it and the pane comes back. In Auto, the pane appears once you use the keyboard or the mouse. With asking off, the window takes over straight away and “Re-centre” reopens it in front of you when the pointer slips off it. The pointer only counts what a window draws, so the window keeps a faint fill (“Capture window opacity”); if the mouse goes unheard it turns the fill up a little on its own. Rebind keys in the game’s menu (Configuration › Controls).")
                 }
 
                 Section {

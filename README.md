@@ -369,7 +369,7 @@ lists them under *Controls*.
 
 | Mouse | Action |
 |---|---|
-| Move | Turn smoothly (and look up/down with *Look up/down* on) |
+| Move | *Free aim* (default): swing the gun inside a zone ahead of your body; pushing past its edge turns you. Off: turn smoothly (and look up/down with *Look up/down* on) |
 | Left button | Fire |
 | Right button | Alt-fire |
 | Wheel | Previous / next weapon |
@@ -379,7 +379,7 @@ lists them under *Controls*.
 |---|---|
 | Left stick | Move |
 | Left stick click | Walk (hold) |
-| Right stick | Turn, smooth (*Stick turn speed*, 100°/s default) or snap |
+| Right stick | *Free aim*: swing the gun, turning past the zone's edge (smoothly, or one snap per push). Off: turn, smooth (*Stick turn speed*, 100°/s default) or snap |
 | Right stick click | Crouch toggle (B drops it) |
 | Right trigger | Fire |
 | Left trigger | Alt-fire |

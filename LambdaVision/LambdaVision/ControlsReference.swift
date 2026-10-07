@@ -37,7 +37,7 @@ struct ControlsReferenceView: View {
         ("~", "Console"),
     ]
     private let mouse: [Row] = [
-        ("Move", "Turn (and look up/down with that setting)"),
+        ("Move", "Aim the gun; past the free-aim zone, turn (free aim off: turn)"),
         ("Left button", "Fire"),
         ("Right button", "Alt-fire"),
         ("Wheel", "Previous / next weapon"),
@@ -46,7 +46,7 @@ struct ControlsReferenceView: View {
     private let gamepad: [Row] = [
         ("Left stick", "Move"),
         ("Left stick click", "Walk (hold)"),
-        ("Right stick", "Turn (smooth or snap)"),
+        ("Right stick", "Aim the gun; past the zone, turn (smooth or snap)"),
         ("Right stick click", "Crouch toggle"),
         ("Right trigger", "Fire"),
         ("Left trigger", "Alt-fire"),

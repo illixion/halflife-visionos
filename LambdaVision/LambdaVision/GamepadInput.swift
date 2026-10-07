@@ -52,7 +52,7 @@ nonisolated final class GamepadInput {
     private(set) var wheel = GamepadWheel()
 
     private static let deadzone: Float = 0.15
-    private static let snapThreshold: Float = 0.5
+    static let snapThreshold: Float = 0.5
     /// Stick or trigger travel that counts as using the pad (input mode).
     private static let activityThreshold: Float = 0.3
     /// Hold the View/Options button this long to quick-load (a tap saves).
@@ -70,7 +70,12 @@ nonisolated final class GamepadInput {
     /// `snapTurn` receives ±1 on a right-stick snap edge; `turn` a smooth
     /// turn in degrees (+ = right) and `look` a pitch change in degrees
     /// (+ = down, xash), both already scaled by the frame time `dt`.
-    func poll(dt: Float, typing: Bool = false, snapTurn: (Float) -> Void, turn: (Float) -> Void, look: (Float) -> Void) {
+    /// With `aim` (free aim, FreeAim.swift) the right stick goes there instead,
+    /// smooth turning or not: yaw (+ = right) and pitch (+ = up) degrees at
+    /// the turn speed, plus the raw stick X so the caller can snap-turn when
+    /// the aim is pinned at the zone's edge.
+    func poll(dt: Float, typing: Bool = false, snapTurn: (Float) -> Void, turn: (Float) -> Void, look: (Float) -> Void,
+              aim: ((_ yaw: Float, _ pitch: Float, _ stickX: Float) -> Void)? = nil) {
         // Discovery is cheap enough to re-check per frame; GCController state
         // reads are snapshot-based and thread-agnostic.
         guard let pad = source.extendedGamepad() else {
@@ -112,15 +117,22 @@ nonisolated final class GamepadInput {
         // "Look up/down" setting allows it (Renderer applies it outside
         // hands mode only).
         let sx = wheel.isOpen ? 0 : rs.x
-        if Self.smoothTurn {
-            let v = Self.shaped(sx)
-            if v != 0 { turn(v * Self.turnSpeed * dt) }
-        } else if abs(sx) >= Self.snapThreshold, abs(prevSnapAxis) < Self.snapThreshold {
-            snapTurn(sx > 0 ? 1 : -1)
+        if let aim {
+            // Free aim: the stick swings the aim (rate control); the caller
+            // turns the body with what spills past the zone.
+            let vx = Self.shaped(sx), vy = wheel.isOpen ? 0 : Self.shaped(rs.y)
+            aim(vx * Self.turnSpeed * dt, vy * Self.turnSpeed * dt, sx)
+        } else {
+            if Self.smoothTurn {
+                let v = Self.shaped(sx)
+                if v != 0 { turn(v * Self.turnSpeed * dt) }
+            } else if abs(sx) >= Self.snapThreshold, abs(prevSnapAxis) < Self.snapThreshold {
+                snapTurn(sx > 0 ? 1 : -1)
+            }
+            let sy = wheel.isOpen ? 0 : Self.shaped(rs.y)
+            if sy != 0 { look(-sy * Self.turnSpeed * dt) }
         }
         prevSnapAxis = sx
-        let sy = wheel.isOpen ? 0 : Self.shaped(rs.y)
-        if sy != 0 { look(-sy * Self.turnSpeed * dt) }
 
         // --- buttons/triggers → engine commands ---
         hold(pad.rightTrigger.isPressed,       "attack")

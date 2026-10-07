@@ -446,6 +446,9 @@ enum DebugEndpoints {
         let mouseEventsTotal: Int
         let lastMouseEventAgoMs: Double?
         let inputCatcher: InputCatcher.Status
+        /// Free aim (keyboard/mouse/gamepad): the aim offset in its zone, the
+        /// overflow turning the body, the anchor, and what the engine got.
+        let freeAim: Renderer.FreeAimStatus
     }
 
     static func stateReply() throws(DebugError) -> some Encodable & Sendable {
@@ -500,7 +503,8 @@ enum DebugEndpoints {
             mouseMovesLastSecond: InputCatcher.shared.mouseMovesLastSecond,
             mouseEventsTotal: InputCatcher.shared.mouseEventsTotal,
             lastMouseEventAgoMs: InputCatcher.shared.secondsSinceMouseEvent.map { $0 * 1000 },
-            inputCatcher: InputCatcher.shared.status)
+            inputCatcher: InputCatcher.shared.status,
+            freeAim: Renderer.freeAimStatus)
     }
 
     // MARK: Settings table
@@ -605,6 +609,16 @@ enum DebugEndpoints {
         .flag("stickSmoothTurn", \.stickSmoothTurn),
         .number("stickTurnSpeed", \.stickTurnSpeed, 45...240),
         .flag("lookPitch", \.lookPitch),
+        .flag("freeAim", \.freeAim, note: "keyboard/mouse/gamepad: the mouse and right stick swing the gun inside a zone and only the excess turns the body; false = they turn the view as before. GET /state › freeAim"),
+        .number("freeAimYaw", \.freeAimYaw, 0...45, note: "the zone's half-width, degrees; 0 = every bit of mouse yaw turns the body"),
+        .number("freeAimPitch", \.freeAimPitch, 0...35, note: "the zone's half-height, degrees; excess pitch is clamped (tilts the view with lookPitch)"),
+        .choice("freeAimShape", \.freeAimShape, note: "ellipse narrows toward its corners; rectangle doesn't"),
+        .choice("freeAimAnchor", \.freeAimAnchor, note: "body: the zone stays ahead of the body while the head looks around; head: it follows the head's yaw lazily (freeAimFollow)"),
+        .number("freeAimFollow", \.freeAimFollow, 0.1...1.5, note: "head anchor: the follow's time constant, seconds"),
+        .flag("freeAimRecenter", \.freeAimRecenter, note: "ease the aim back to the zone's centre while the mouse and stick rest"),
+        .number("freeAimRecenterTime", \.freeAimRecenterTime, 0.2...3, note: "the recentre's time constant, seconds"),
+        .choice("freeAimPivot", \.freeAimPivot, note: "what the swung viewmodel turns about: shoulder, its grip hand, or the eye"),
+        .flag("freeAimUse", \.freeAimUse, note: "+use picks what the gun points at (true) or the view's centre (false)"),
         .flag("hideParkedParts", \.hideParkedParts),
         .flag("inputCatcher", \.inputCatcher, note: "the invisible mouse-capture window; GET /state › inputCatcher and mouseEventsLastSecond show its effect"),
         .flag("inputCatcherAskBeforeLock", \.inputCatcherAskBeforeLock, note: "show the 'Click to lock mouse' prompt before the catcher (GET /state › inputCatcher.phase: idle / prompt / locked); off = the catcher opens directly"),
@@ -694,7 +708,7 @@ enum DebugEndpoints {
         let sources = FrameCapture.Source.allCases.map(\.rawValue)
         return [
             // Queries
-            .query("state", "Start here. Engine and immersive-space state, the loaded map and game, input mode, the player's view origin, view angles and velocity, the HEV HUD values (health, armor, weapon, ammo), the last frame / capture, and the mouse: GCMouse events in the last second (mouseEventsLastSecond) and the invisible mouse-capture window (inputCatcher).",
+            .query("state", "Start here. Engine and immersive-space state, the loaded map and game, input mode, the player's view origin, view angles and velocity, the HEV HUD values (health, armor, weapon, ammo), the last frame / capture, and the mouse: GCMouse events in the last second (mouseEventsLastSecond) and the invisible mouse-capture window (inputCatcher), and free aim (freeAim: offset in the zone, overflow turning, anchor, the engine aim offset).",
                    releaseSafe: true) { _ in
                 try stateReply()
             },
