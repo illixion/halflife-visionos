@@ -1,4 +1,4 @@
-# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 13)
+# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 14)
 
 Self-contained state of the glass/water reflection work for the next agent.
 Longer history: `docs/plans/modern-lighting.md` sections 3–3l, `ISSUES.md`.
@@ -33,7 +33,8 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 
 ### App side
 - `GlassProbe.swift`: probe schedule (128² faces, one per frame after eye 2,
-  refresh after 160 units / 30 s while glass/water in sight, 3 slots, 0.3 s fade).
+  refresh after 48 units / 30 s while glass/water in sight, 3 slots, 0.3 s
+  fade; 160 units until round 14).
 - `Shaders.metal` `glassShade` (composite, kGlass variant): stencil → plane
   row → world point P; occluder rule (engine depth nearer than plane → skip);
   water from below → skip; `waterRipple` (6 waves, 2.4–6.6 units, slope
@@ -44,7 +45,10 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
   env tinted by water hue (sharp: full weight, 30% tint; probe-only: half
   weight, 50% tint). Sharp mirror read: coverage from un-rippled uv, colour
   from rippled uv (offset clamped to 1.5 mirror texels). Probe skipped where
-  mirror ≥ 98% confident.
+  mirror ≥ 98% confident. Probe read through `probeReflect` (round 14): the
+  parallax walk, and where its last step still moved the hit (not settled:
+  it jumped a depth edge of a probe taken elsewhere) the plain direction
+  lookup blended in.
 - `SharpWater.swift` + `Shaders.metal` (SSPR, compute, both eyes in one grid,
   target = engine size / `Renderer.sharpWaterDivisor` (4)):
   1. `ssprClear` — keys = 0xFFFFFFFF (uint4/thread). Timer `gMirrorFill`.
@@ -70,7 +74,10 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
      distance) surface key up and down within 6, left/right; the nearest
      occluder key in each of the four directions within 6; surfaces merged
      if same distance, occluders if same height (≤ 5 surfaces, ≤ 3 occluder
-     heights). **Occluder test** (`ssprOcclude`) once per texel on its centre
+     heights). With two or more surfaces, each candidate's point is moved to
+     where the texel's centre ray meets it (one depth read each; round 14:
+     the sub-rays' miss had depended on which point of a slanted face the
+     texel held). **Occluder test** (`ssprOcclude`) once per texel on its centre
      ray: where the ray climbs to an occluder's height − `SSPR_SLAB` (4) and
      to its height, a surface on screen on or in front of that point, at the
      occluder's height (between hz − 5 and hz + 1: the top or rim, not a leg)
@@ -80,7 +87,8 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
      skips verify unless a block is near; surfaces whose real distance lies
      past the texel's block skipped; none → first surface's own source,
      unless blocked). A sub-ray whose texel and three neighbours toward it
-     agree takes the texel's block; at an outline it runs its own test.
+     agree takes the texel's block; at an outline it runs its own test,
+     before the surfaces are chosen (they are skipped past the block).
      Blocked nearer than the shown surface → **underside**: the top right
      above the point reached, × `waterDebug.y` ("waterUnderside", 0.35; 0 =
      probe), confidence from that sample's frame edge. Surface colour = 4
@@ -113,7 +121,11 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Right eye only: dark stipple near the far legs (strong roll) | **not reproduced offline**; round 12's both-eye and rolled-stereo checks pass on 3c8241d and now; see round 12 |
 | Both eyes: blocky occluder edges under the near table | as the close-up row |
 | Round 12 on device: underside "looks correct now"; resolve 1.00, project 0.42 (facing away) | — |
-| Sink water sheet: dark blocks at its base where it meets the flood, reflection cut off below | **round 13 untested**: surfaces behind glass/water kept, blurred; view 97 "past a visible surface" 13.7% → 0.06% |
+| Sink water sheet: dark blocks at its base where it meets the flood, reflection cut off below | fixed on device by round 13 (1ee4d4f); mirror 1.58 ms there |
+| Round 13: "stripes" that "self-heal randomly"; sink basin full of poster shards for 15–30 s | **round 14 untested**: the probe, not the mirror (stale probe from ≤160 units; now 48, plus the settle fallback); view 101 "probe refresh" |
+| Round 13: saw teeth on the sink's vertical falling sheet | **round 14 untested**: same stale-probe walk (the sheet is glass kind, probe-lit) |
+| Round 13: faint diagonal stripes on the flood | **round 14 untested**: the same walk where the mirror hands over to the probe |
+| Round 13: staircase (one texel) at the counter's mirrored edge, light strip along it | **round 14 untested**: candidates moved onto the texel's centre ray; view 101 wrong-surface sub-rays at the lip 53 → 8 |
 
 ### Cases the mirror must handle (each has a harness view)
 - A table or counter top seen from above (a back face to the reflected
@@ -128,6 +140,16 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
   at 31–33, 62/63, 81–88).
 - Models over water (the headcrab at 33/63, the c2a3a ichthyosaur rule in
   the composite).
+- Other horizontal "water" in view: the sink basin is the top of a
+  TransTexture box (glass kind 0, z −535, above the flood): probe-lit, never
+  the mirror (the mirror needs kind 1 and row == `sspr.x`) — 101.
+- A probe taken elsewhere but still current (within `refreshDistance`):
+  no shards, teeth or stripes on glass or water — 101 with probes 31 and 61
+  ("probe refresh"; 41/71 are the round-13 failures, now out of range).
+- A grazing face's mirrored edge (the counter's front lip, the room behind
+  it): smooth at sub-ray steps, no texel staircase — 101.
+- A still camera over several engine frames: the mirror's coverage
+  identical — 101/102.
 
 ### Round 11: why the table was transparent, and the fix
 The eye sees the steel table's top; the reflected ray always climbs, so it
@@ -228,6 +250,65 @@ Known failing at 97 (also on round 12): see-through 5.4% under the near
 table where it is cut by the frame's bottom edge (its top's mirror images
 land off the frame, so no occluder claims reach there).
 
+### Round 14: "stripes that self-heal" (the probe), and the lip staircase
+Device on 1ee4d4f (c1a2, eye 1147.4 −301.8 −512.6, pitch 14.8, yaw 37.3, roll
+3.8): the sheet's reflection fixed, but stripes that come and go; a second
+capture showed the sink basin full of poster shards, healed 15–30 s later.
+Findings (view 101 at that pose, `default_fov 90`):
+1. *The healing glitch is the probe.* The basin is the top of the sink's
+   TransTexture box: glass kind 0 (row z −535), never the mirror's plane, so
+   probe-lit. A probe stays current until the head moves `refreshDistance`
+   (160) or 30 s pass; a probe from beside or behind the counter (dumps
+   41/71, 157/129 units off) reproduces the shards, wedges and teeth in the
+   basin, teeth on the sheet and faint stripes on the flood exactly; the
+   eye's own probe shows none. Fix: `refreshDistance` 48 (probes 31/61, 48/38
+   units off, look right) and `probeReflect`: an unsettled walk (its last
+   step moved the hit more than 0.1·t + 4) blends to the plain direction
+   lookup (fully by 0.5·t + 16); the walk's discontinuities are what draw
+   the shards. A visibility test (P hidden from the probe → ambient) and a
+   parallax-angle test were tried and dropped: no gain on the new check,
+   and the angle test blanked correct reflections at the eye's own probe.
+2. *Nothing in the mirror changes at a still camera.* Dumps 101–105 (one
+   engine second apart): stencil, depth and plane table identical; the
+   mirror's coverage identical (new check). Ruled out: missing clear or
+   barrier, stale per-eye slice (also the both-eyes check), the 10-bit
+   distance (log2(1 + d)/15: wraps past 32767 units only), the ripple (it
+   never decides coverage). The plane choice is per frame but deterministic
+   for a given table; the basin can never be chosen (kind 0).
+3. *The staircase at the counter's mirrored lip* is static: the reflected
+   rays graze the lip's front face (r·n ≈ 0.2), and each sub-ray chose
+   between the lip and the room behind it by its miss from the candidate's
+   point — which, on a face struck at a slant, depended on which point of
+   the face the texel's key held, so whole texels flipped together (one
+   texel steps, magnified ×9 on the headset). With two or more surface
+   candidates each point now moves to where the texel's centre ray meets
+   it (the surface seen there, if at the same distance): edge texels blend,
+   wrong-surface sub-rays at the lip 53 → 8 (an offline trace), "past a
+   visible surface" at 101 1.01% → 0.60%, bench 31–33 0.8–1.6% → 0.5%.
+   Tried and dropped: plane intersection with a normal from depth
+   neighbours (noisy on a thin lip, new artifacts), a secant step per
+   sub-ray (diverged off the lip onto the top), extra up/down candidates
+   (no change). Also, the outline sub-ray's own block is now decided before
+   the surfaces are chosen (a free sub-ray at a blocked texel's outline had
+   lost every surface past the occluder).
+Cost: resolve within ±3% of round 13 on the Mac GPU (31 0.068→0.067, 62
+0.068→0.066, 84 0.075→0.076, 88 0.078→0.080, 91 0.076→0.077, 97
+0.072→0.071, 101 0.054→0.053 ms); expected device mirror ≈1.58–1.62 ms as
+measured. Probe: at most one capture (six 128² faces) per ~0.4 s while
+moving, instead of per 160 units; still at rest. The composite reads one
+more probe sample only where a walk has not settled.
+What to look at on the headset: walk around the c1a2 sink and stop at the
+pose above; the basin shows the faucet and a soft room at once, never
+shards, and does not change 30 s later. No teeth on the falling sheet, no
+diagonal stripes on the flood. The lip's mirrored edge under the counter
+smooth (with `waterMirrorView=onWater` the edge between the dark lip and
+the room behind it has no one-texel steps). `gProbe` / `probeCPU` in
+`/perf` while walking: the probe now refreshes more often.
+Residuals offline: a stale probe from 90+ units still adds some edges
+(0.05%; out of range now); one-texel steps remain where the mirror runs off
+the frame's bottom edge (to the probe, as before); view 97's comb +1.84
+(limit 2.0, was +1.49) and hatching 1× at its limit (1.33).
+
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror
   view on device was correct; the blend cancelled it.
@@ -237,6 +318,10 @@ land off the frame, so no occluder claims reach there).
 - The resolve's choice between unverified candidates causing the comb: a
   miss-rejection variant changed nothing offline; the composite's ±1-texel
   coverage search was the cause.
+- Round 13's "self-healing" stripes from the mirror (clears, barriers,
+  per-eye slices, the 10-bit distance, the ripple, the plane choice): the
+  mirror is identical frame to frame at a still camera; the probe refresh
+  was the cause (round 14).
 
 ## DepthProbe (`LambdaVision/Tools/DepthProbe`, `./build.sh [--png DIR] dumps… probes…`)
 Runs the real shaders on Mac dumps. Env: `SHARP=0` (probe only), `RIPPLE=x`
@@ -269,6 +354,15 @@ Runs the real shaders on Mac dumps. Env: `SHARP=0` (probe only), `RIPPLE=x`
   confidence-weighted share where the mirror shows something clearly past
   it (> 1.05·hit + 8) must be ≤ 3%. 62e9483: 97 13.7%, 31–33 7–13%, 62/63
   6–7%, 81–88 3–5%; round 13 ≤ 1.6%.
+- **probe refresh** (round 14): every extra probe within
+  `GlassProbeSchedule.refreshDistance` of the dump's eye (read from
+  `GlassProbe.swift`; `GLASS_PROBE_SWIFT=path` for an old one) is one the
+  app may still show there: the composite with it (grey ambient) may add
+  new edges (a neighbour step > 48/255 where the eye's probe steps < 16)
+  at ≤ 0.1% of marked pixels. Round 13 at 101: 0.24% (probe 41) and 0.48%
+  (71) fail; now only 61 is in range, 0.03%.
+- **still camera** (round 14): dumps with the same origin and angles (later
+  engine frames): mirror coverage identical texel for texel.
 - **rolled heads** (round 12): `vrdumpN.bin@deg` re-renders a dump rolled
   about its forward axis; 93/94@30 and 93/95@−30 are stereo pairs an eye
   apart along the rolled right vector (stereo rule as above).
@@ -280,7 +374,10 @@ ratios carry over), `SSPR_KEYS=prefix` dumps the key buffer and the debug
 record, `UNDERSIDE=x` the underside brightness (0.35), `MIRRORVIEW=1|2|3`.
 Known failing, not regressions: gaze pairs that differ in pitch/yaw at
 views 62/63, 71–74 and 81–88 (4–7/255; the mirror holds only what is on
-screen) and the probe view at 63 (13.0, probe from 62's origin).
+screen), the probe view at 63 (13.0, probe from 62's origin) and 97's
+see-through 5.45% (frame-cut table, round 13). Suite as run in round 14:
+g62 2, g71 6, g81 22, g97 1 failures (as round 13), the rest OK. The probe
+view rule skips probes over 100 units off (the probe-refresh check's).
 Known limit: the device composite runs at ~2.3× the engine resolution with
 foveation; some artifacts (box moiré) never reproduced on the Mac.
 
@@ -300,11 +397,17 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
 - 97 (eye 961.9 −527.2 −512.3, yaw 39.9, pitch 7.5, `default_fov 40` for
   the device crop's scale: the sink's water sheet meeting the flood);
   probe 97. (96 is the same pose at the default fov.)
+- 101 (eye 1147.4 −301.8 −512.6, yaw 37.3, pitch 15.5, fov 90: round 13's
+  device stripes pose, the sink basin and sheet); 102 the same pose one
+  engine second later (103–105 further); probe 101. Probes 31 (48 units
+  off), 41 (157), 51 (90), 61 (38), 71 (129) as stale ones; `@3.8` the
+  device's roll.
 - 93 (eye 1023 −479 −514, yaw 349.5, pitch 35), 94 / 95 (2.5 units along
   the right vector of that view rolled +30° / −30°); probe 93.
   Groups as run: 9 10 11 +probe9; 31 32 33 +31; 41 +41; 51 +51; 61 +61;
   62 63 +62; 71–74 +71; 81–88 +81; 91 +91; 93 94 93@30 94@30 93@-30 95@-30
-  +93; 97 +97 (one probe per run: the first). Turning right runs ≈0.104°
+  +93; 97 +97; 101 102 101@3.8 +101 (then 31 41 51 61 71) (the first probe
+  is the current one; later ones feed the probe view and probe refresh). Turning right runs ≈0.104°
   per frame at `cl_yawspeed 10` (left ≈0.099°); `default_fov N` in the cfg
   narrows the view.
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
@@ -317,6 +420,8 @@ SDL_MAC_BACKGROUND_APP=1 timeout 150 ./xash3d -game valve -dev 1 -window -nomsgb
   -noenginemouse -width 960 -height 540 +m_ignore 1 +exec <cfg>
 ```
 Keep `valve/video.cfg` at `fullscreen "0"` (else dumps are 5120×2880).
+`default_fov` persists in `valve/config.cfg`: after a `default_fov 40` run
+(view 97) set it back to `"90"` there, or every later dump is narrow.
 cfg: `sv_cheats 1; sv_enttools_enable 1; r_vrglass 1; r_vrwater 1; map c1a2;`
 wait chains (`alias w1 "wait;…×100"`), `noclip; god; host_framerate 0.01;
 cl_yawspeed 100; ent_fire 1 set origin "x y z"` (exact; eye = origin+28;
@@ -352,6 +457,11 @@ viewmodel.
   `SSPR_CANDIDATES` 3 (no left/right surface candidates), saves ≈12% of the
   resolve but takes view 91's comb to +1.93 (limit 2.0) and costs stability;
   not taken.
+
+- round 13 on device (1ee4d4f, sink): fill 0.03, project 0.43, resolve 1.12,
+  total 1.58, gpuQueue 7.13.
+- round 14 vs round 13 on the Mac GPU: resolve ±3%, project unchanged;
+  expected device ≈1.58–1.62 ms.
 
 ## Rules that bit before
 - Mac engine runs must use the background/no-mouse flags above.

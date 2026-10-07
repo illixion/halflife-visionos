@@ -472,6 +472,15 @@ func render(_ pipeline: MTLRenderPipelineState, _ w: Int, _ h: Int, _ params: Di
 }
 
 let probes = try probePaths.map { ProbeTextures(try Probe(path: $0)) }
+/// GlassProbeSchedule.refreshDistance, read from the app's source (build.sh
+/// passes its path): how far a probe may be from the eye and still be shown.
+let PROBE_EDGE_LIMIT: Float = 0.001
+let probeRefreshDistance: Float? = {
+    guard let path = ProcessInfo.processInfo.environment["GLASS_PROBE_SWIFT"],
+          let text = try? String(contentsOfFile: path, encoding: .utf8),
+          let r = text.range(of: #"refreshDistance: Float = [0-9.]+"#, options: .regularExpression) else { return nil }
+    return Float(text[r].split(separator: "=").last!.trimmingCharacters(in: .whitespaces))
+}()
 let plainPipeline = try glassPipeline(false)
 let glassOnPipeline = try glassPipeline(true)
 let probeViewPipeline = try glassPipeline(false, fragment: "glassProbeView")
@@ -798,7 +807,10 @@ for path in args {
                      name, offset, errors[0], errors[1]))
         // At the eye both lookups must match the image to within the probe's
         // resolution; away from it the parallax walk must do clearly better.
-        if offset < 1 ? errors[1] > 12 : errors[1] > errors[0] * 0.8 { failures += 1 }
+        // (Probes over 100 units off, from beyond a counter, are there for
+        // the probe-refresh check below: the walk cannot beat the plain
+        // lookup from there, which is why such a probe must not be shown.)
+        if offset < 1 ? errors[1] > 12 : offset <= 100 && errors[1] > errors[0] * 0.8 { failures += 1 }
     }
 
     current.use(&params, iterations: 3)
@@ -1136,6 +1148,52 @@ for path in args {
             } else if changed { changedOutside += 1 }
         }
     }
+    // Probe refresh at a still camera (the headset's "self-healing" glitch:
+    // the c1a2 sink basin full of shards for 15–30 s, until the probe was
+    // recaptured). A probe stays current until the head moves
+    // GlassProbeSchedule.refreshDistance from where it was taken, so every
+    // other probe given within that distance of this eye is one the app may
+    // still be showing here: the composite with it must stay close to the
+    // one with the probe taken at the eye. Measured on marked pixels, both
+    // with a grey ambient (the fallback where a probe cannot know): the share
+    // differing by more than 48/255. Round 13 (160 units) at view 101 with
+    // probe 41 (157 units away, behind the counter): fails.
+    if let refresh = probeRefreshDistance {
+        var still = params
+        still.glassAmbient = SIMD4(0.25, 0.25, 0.25, 0)
+        let atEye = render(glassOnPipeline, w, h, still, textures)
+        for other in probes.dropFirst() {
+            let offset = simd_length(other.probe.origin - dump.origin)
+            guard offset > 1, offset <= refresh else { continue }
+            var pp = still
+            other.use(&pp, iterations: 3)
+            var t2 = textures
+            t2[3] = other.color; t2[4] = other.depth
+            let swapped = render(glassOnPipeline, w, h, pp, t2)
+            // new edges: a step to the right or down neighbour (both marked)
+            // over 48/255 in some channel where the image with the eye's
+            // probe steps under 16 — the shards and saw teeth, not the
+            // smooth offset any probe from elsewhere has
+            func marked(_ row: Int, _ col: Int) -> Bool {
+                let code = stencil[(h - 1 - row) * w + col]; return code >= 16 && code <= 239
+            }
+            func step(_ img: [UInt8], _ i: Int, _ j: Int) -> Int { (0..<3).map { abs(Int(img[i + $0]) - Int(img[j + $0])) }.max()! }
+            var n = 0, big = 0
+            for row in 0..<(h - 1) {
+                for col in 0..<(w - 1) where marked(row, col) {
+                    n += 1
+                    let i = (row * w + col) * 4
+                    for j in [i + 4, i + w * 4] where marked(j == i + 4 ? row : row + 1, j == i + 4 ? col + 1 : col) {
+                        if step(swapped, i, j) > 48 && step(atEye, i, j) < 16 { big += 1; break }
+                    }
+                }
+            }
+            let share = Float(big) / Float(max(n, 1))
+            print(String(format: "%@ probe refresh: a probe %.0f units away (within %.0f) adds edges at %.3f%% of %d marked px",
+                         name, offset, refresh, share * 100, n))
+            if share > PROBE_EDGE_LIMIT { failures += 1 }
+        }
+    }
     // From below: the eye moved under every water plane must leave water alone.
     let waterRows = Set(dump.kinds.enumerated().filter { $0.element == 1 }.map { $0.offset })
     if !waterRows.isEmpty, let planes = dump.planes {
@@ -1408,6 +1466,17 @@ for (i, a) in glassViews.enumerated() {
             print(String(format: "%@ vs %@ sharp mirror (%@): %d mirrored points both hold, mean difference %.1f/255 (the same points unmirrored in the engine images: %.1f/255)",
                          a.name, b.name, apart < 0.01 ? "same origin" : "an eye apart", m.n, m.mean, m.baseline))
             if apart >= 0.01, m.mean > m.baseline * 1.5 + 2 { failures += 1 }
+        }
+        // Still camera, a later engine frame (the water's warp texture and
+        // the time move on, nothing else): the mirror's coverage must not
+        // change at all — what it shows and where is decided by depth and
+        // stencil alone. Flicker in the keys or the confidence (a missing
+        // clear, a stale buffer, a time-dependent choice) shows up here.
+        if apart < 0.01, sameGaze, let sa = a.sharp, let sb = b.sharp, sa.w == sb.w, sa.h == sb.h {
+            var differ = 0
+            for t in 0..<(sa.w * sa.h) where abs(Float(sa.rgba[t * 4 + 3]) - Float(sb.rgba[t * 4 + 3])) > 1.0 / 255 { differ += 1 }
+            print("\(a.name) vs \(b.name) still camera: \(differ) of \(sa.w * sa.h) mirror texels change coverage")
+            if differ > 0 { failures += 1 }
         }
         // gaze, on what reaches the eye: the composite at the same glass and
         // water points (the mirror holds only what is on screen, so it shifts

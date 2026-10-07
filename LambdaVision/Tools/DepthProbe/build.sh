@@ -18,4 +18,4 @@ xcrun -sdk macosx metal -std=metal3.1 -DSSPR_DEBUG=1 ${SSPR_DEFINES:-} -I "$app"
 xcrun -sdk macosx metallib "$work/s.air" -o "$work/shaders.metallib"
 swiftc -O -import-objc-header "$app/ShaderTypes.h" "$here/main.swift" -o "$work/probe" \
     -framework Metal -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
-"$work/probe" "$work/shaders.metallib" "$@"
+GLASS_PROBE_SWIFT="${GLASS_PROBE_SWIFT:-$app/GlassProbe.swift}" "$work/probe" "$work/shaders.metallib" "$@"

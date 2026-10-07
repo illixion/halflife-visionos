@@ -246,7 +246,23 @@ instead of deleting them.
   underside. They now also keep what is behind them as a surface, shown
   blurred (no moiré). DepthProbe's new "past a visible surface" check: 13.7%
   → 0.06% at the sink view. Expected mirror ≈1.50 ms. Handoff:
-  `docs/plans/sharp-water-handoff.md`.
+  `docs/plans/sharp-water-handoff.md`. Confirmed on device: the sheet's
+  reflection at the original pose is fixed (mirror 1.58 ms).
+- **Sharp water, round 14: device check pending.** Round 13 on device
+  showed stripes that "self-heal randomly". The glitch that heals (the c1a2
+  sink basin, a glass-kind box top, full of shards of the poster for 15–30 s)
+  is not the mirror but the environment probe: it was recaptured only every
+  160 units or 30 s, so a probe from the far side of the counter stayed
+  current and its parallax walk drew shards, the sheet's saw teeth and faint
+  stripes on the flood until the 30 s refresh. Now recaptured every 48 units,
+  and an unsettled walk falls back to the plain lookup. The mirror's own
+  staircase at a counter's mirrored lip (the sub-ray choice between the lip
+  and the room behind flipped texel by texel) is smoothed by moving each
+  candidate's point onto the texel's centre ray. No frame-to-frame change in
+  the mirror at a still camera (new check). New checks: "probe refresh"
+  (fails round 13 at the new view 101: 0.24% / 0.48% new edges, limit 0.1%;
+  now 0.03%) and "still camera". Resolve unchanged offline (±3%). Handoff:
+  `docs/plans/sharp-water-handoff.md` (round 14).
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift

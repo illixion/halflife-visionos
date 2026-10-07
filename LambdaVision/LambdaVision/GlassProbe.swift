@@ -20,10 +20,13 @@
 //
 //  Cost control: the engine draws one 128² face per frame, after the second
 //  eye, and only while glass is in sight (the engine's plane table is not
-//  empty) and the probe is stale — the head has moved 160 units from where it
+//  empty) and the probe is stale — the head has moved 48 units from where it
 //  was captured, or 30 s have passed (doors, lights). Otherwise nothing. (The
 //  first headset build drew 256² faces every 48 units / 4 s and measured
-//  2.2 ms GPU p50 per face.) A face draws no dynamic lights, and its render
+//  2.2 ms GPU p50 per face. Round 13 recaptured only every 160 units: a probe
+//  taken that far off, from beside a counter, filled the c1a2 sink basin
+//  with shards of the room until the 30 s refresh — the headset's
+//  "self-healing" glitch; Tools/DepthProbe "probe refresh" checks it.) A face draws no dynamic lights, and its render
 //  targets are kept per slice rather than rebuilt per face. A face
 //  is world and brush entities only (no studio models, sprites, particles or
 //  glass), so the extra view is cheap; its GPU and worker CPU times are logged
@@ -39,8 +42,12 @@ import simd
 /// composite blends. Pure state, no Metal.
 struct GlassProbeSchedule {
     static let slotCount = 3
-    /// Head movement (xash units) after which the probe is recaptured.
-    static let refreshDistance: Float = 160
+    /// Head movement (xash units) after which the probe is recaptured. At
+    /// 160 a probe from the far side of the c1a2 sink counter stayed current
+    /// and its parallax walk drew shards in the basin; within 48 the walk
+    /// holds (DepthProbe "probe refresh", view 101). Moving, that is a capture
+    /// about every 0.4 s at most (six faces, then the 0.3 s fade).
+    static let refreshDistance: Float = 48
     /// Recapture this often while glass is in sight (doors open, lights change).
     /// Rare: each capture is six frames of an extra engine view.
     static let refreshAge: Double = 30
