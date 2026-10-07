@@ -564,9 +564,9 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
 /// hit is the leak. Rays that meet a visible surface first, or leave the
 /// frame, are not counted: the mirror may show them or fall to the probe.
 func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg: MTLBuffer,
-                thickness: Float = 4) -> (occluded: Int, share: Float, leak: Float, leakTable: Float, image: [UInt8]) {
+                thickness: Float = 4) -> (occluded: Int, share: Float, leak: Float, leakTable: Float, past: Float, image: [UInt8]) {
     let w = dump.width, h = dump.height
-    guard let stencil = dump.stencil else { return (0, 0, 0, 0, []) }
+    guard let stencil = dump.stencil else { return (0, 0, 0, 0, 0, []) }
     let (f, r, u) = dump.axes
     let p = dump.projection
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
@@ -594,6 +594,7 @@ func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg
     }
     var occluded = 0, water = 0
     var leak: Float = 0, leakNear: Float = 0, occNear = 0
+    var visibleN = 0, past: Float = 0
     var image = [UInt8](repeating: 0, count: mw * mh * 4)
     for gy in 0..<mh {
         for gx in 0..<mw {
@@ -608,14 +609,14 @@ func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg
                 let rr = SIMD3(d.x, d.y, -d.z)
                 let base = simd_length(P - E)
                 water += 1
-                var s: Float = 0.5, hit: Float = -1
+                var s: Float = 0.5, hit: Float = -1, seen: Float = -1
                 while s < 4000 {
                     let X = P + rr * s
                     guard let (xs, qz) = project(X) else { break }
                     let (zv, V) = visible(xs)
                     let tol = 0.5 + 0.005 * zv
                     if V.z > height + 1 {
-                        if abs(qz - zv) <= tol { break }                       // a visible surface
+                        if abs(qz - zv) <= tol { seen = base + s; break }      // a visible surface
                         // under a surface: X behind it, and climbing from X
                         // within `thickness` reaches a point in front of or
                         // on it, the visible depth continuous across that
@@ -634,9 +635,16 @@ func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg
                     }
                     s += max(0.5, 0.005 * (base + s))
                 }
+                let k = (gy * mw + gx) * 4 + sj * 2 + si
+                // a visible surface first, within 120 units: the mirror must
+                // not show something clearly past it (the sink's water box
+                // over the counter front once drew a dark underside there)
+                if seen > 0, seen - base < 120 {
+                    visibleN += 1
+                    if rec[k].y > 0 && rec[k].x > seen * 1.05 + 8 { past += rec[k].y }
+                }
                 guard hit > 0 else { continue }
                 occluded += 1; texelOcc = true
-                let k = (gy * mw + gx) * 4 + sj * 2 + si
                 let shown = rec[k]
                 let bad = shown.y > 0 && shown.x > hit * 1.05 + 8 ? shown.y : 0
                 leak += bad; texelLeak += bad
@@ -648,7 +656,7 @@ func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg
         }
     }
     return (occluded, Float(occluded) / Float(max(water, 1)), leak / Float(max(occluded, 1)),
-            leakNear / Float(max(occNear, 1)), image)
+            leakNear / Float(max(occNear, 1)), past / Float(max(visibleN, 1)), image)
 }
 
 /// Mac GPU time of the two mirror dispatches (SSPR_TIMING=1): per dispatch,
@@ -822,6 +830,10 @@ for path in args {
                 let r = seeThrough(dump, plane, t.width, t.height, dbg)
                 print(String(format: "%@ see-through: %d sub-rays meet a hidden underside first (%.1f%% of the mirror's water); mirror shows something farther on %.2f%% of them (confidence-weighted), %.2f%% where the hit is within 120 units",
                              name, r.occluded, r.share * 100, r.leak * 100, r.leakTable * 100))
+                print(String(format: "%@ past a visible surface: %.2f%% of the rays that meet one first within 120 units (confidence-weighted)", name, r.past * 100))
+                // 62e9483 at the sink pose (97): 13.7%, at the bench (31–33)
+                // 7–13%, the table views 81–88 3–5% (fails)
+                if r.past > 0.03 { failures += 1 }
                 // b2e7e18 at the c1a2 table (dumps 81–88): 6–18% (fails)
                 if r.occluded > 500 && r.leak > 0.03 { failures += 1 }
                 if let dir = pngDir { writePNG(r.image, t.width, t.height, "\(dir)/seethrough-\(name).png") }
