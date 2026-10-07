@@ -608,7 +608,9 @@ enum DebugEndpoints {
         .flag("hideParkedParts", \.hideParkedParts),
         .flag("inputCatcher", \.inputCatcher, note: "the invisible mouse-capture window; GET /state › inputCatcher and mouseEventsLastSecond show its effect"),
         .flag("inputCatcherRecenter", \.inputCatcherRecenter, note: "reopen the catcher in front of the player when the pointer leaves it"),
-        .choice("inputCatcherFill", \.inputCatcherFill, note: "not stored; clear (default), faint (alpha 0.003), visible (tint + outline, to see where it is)"),
+        .number("inputCatcherAlpha", \.inputCatcherAlpha, 0...0.2, note: "the catcher's fill opacity; the pointer ignores undrawn pixels. The catcher steps its effective alpha up on its own when GCMouse stays silent (GET /state › inputCatcher.effectiveAlpha)"),
+        .flag("inputCatcherOutline", \.inputCatcherOutline, note: "not stored; draw the catcher's outline and label to see where it is"),
+        .flag("inputCatcherMaterial", \.inputCatcherMaterial, note: "not stored; fill with .ultraThinMaterial at inputCatcherAlpha instead of white"),
     ]
 
     private static func settingsReply(_ settings: GameSettings) -> JSONValue {

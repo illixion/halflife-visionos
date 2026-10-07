@@ -397,8 +397,19 @@ final class GameSettings {
                  InputCatcher.shared.recenterOnExit = inputCatcherRecenter }
     }
     /// What the catcher draws, for A/B on the headset. Not stored.
-    var inputCatcherFill: InputCatcherFill = .clear {
-        didSet { InputCatcher.shared.fill = inputCatcherFill }
+    /// The catcher's fill opacity (the pointer only counts drawn pixels).
+    /// InputCatcher may step its effective alpha above this on its own.
+    var inputCatcherAlpha: Double = AppSettingsStore.inputCatcherAlpha {
+        didSet { AppSettingsStore.inputCatcherAlpha = inputCatcherAlpha
+                 InputCatcher.shared.alpha = inputCatcherAlpha }
+    }
+    /// Debug: draw the catcher's outline and label to see where it is. Not stored.
+    var inputCatcherOutline: Bool = false {
+        didSet { InputCatcher.shared.outline = inputCatcherOutline }
+    }
+    /// Debug: fill with .ultraThinMaterial at the alpha instead of white. Not stored.
+    var inputCatcherMaterial: Bool = false {
+        didSet { InputCatcher.shared.material = inputCatcherMaterial }
     }
 
     init() {
@@ -446,7 +457,9 @@ final class GameSettings {
         Renderer.lookPitchEnabled = lookPitch
         InputCatcher.shared.enabled = inputCatcher
         InputCatcher.shared.recenterOnExit = inputCatcherRecenter
-        InputCatcher.shared.fill = inputCatcherFill
+        InputCatcher.shared.alpha = inputCatcherAlpha
+        InputCatcher.shared.outline = inputCatcherOutline
+        InputCatcher.shared.material = inputCatcherMaterial
         applyHEVHUD()
     }
 

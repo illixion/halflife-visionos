@@ -7,11 +7,18 @@
 //  and not over one of the app's windows, and no API claims the mouse for an
 //  immersive space (~/Memory: Projects visionos-input-window-focus). But the
 //  system routes the mouse to the app whenever the pointer is over one of its
-//  windows, and a window doesn't need to show anything to count. So this is a
-//  large plain window with no glass, no content and no system controls, kept
-//  up in front of the player while a mouse is in play. Confirmed on the
-//  headset 2026-10-07 (fill = visible): GCMouse flowed, the mouse drove the
-//  game.
+//  windows. So this is a large plain window with no glass and no system
+//  controls, kept up in front of the player while a mouse is in play.
+//  Confirmed on the headset 2026-10-07 with a visible tint: GCMouse flowed,
+//  the mouse drove the game.
+//
+//  It has to draw something. With Color.clear (and a contentShape) the
+//  pointer went straight through: the system pointer hit-tests drawn pixels,
+//  not SwiftUI shapes. UIKit documents the same rule for its own hit-testing
+//  (UIView.hitTest ignores views with an alpha below 0.01), so the default is
+//  a white fill at 0.01 (`inputCatcherAlpha`, stored). If GCMouse stays
+//  silent with a mouse in use, the effective alpha steps up on its own
+//  (`alphaLadder`, capped), and stops stepping once an event comes through.
 //
 //  The decision rule, the events-per-second counter and the "isn't catching"
 //  watch are RAVEInput's (`RAVEMouseCatcherRule`, `RAVEEventRate`,
@@ -34,8 +41,7 @@
 //  Keyboard, mouse & gamepad › "Mouse capture window" on, and either the mode
 //  is forced to keyboard+mouse, or Auto with a mouse connected (whatever the
 //  last pinch picked: mouse events are what switch Auto back, and they only
-//  come through the catcher — taking it down on a pinch trapped the game in
-//  hands mode on the first headset test).
+//  come through the catcher).
 //
 //  Placement: visionOS gives an app no say. `defaultWindowPlacement` can
 //  only place a window beside another of the app's windows, there's no
@@ -44,34 +50,26 @@
 //  reopening when the pointer leaves it (`onContinuousHover` .ended), at most
 //  every few seconds.
 //
-//  Closing: through the main window's captured `dismissWindow(id:)` and the
-//  catcher's own `dismissWindow`, and a catcher scene gone to the background
-//  counts as closed: once, the state still said open after the immersive
-//  space had closed.
+//  Closing: SwiftUI's dismissWindow — the main window's and the catcher's
+//  own — didn't close it once the immersive space had closed (headset,
+//  2026-10-07: "still up … after asking it to close" for 20+ s). So the
+//  catcher keeps its UIWindowScene, and whether it's open is read from UIKit
+//  (the scene still connected and not background) rather than from
+//  onAppear/onDisappear. When SwiftUI's dismissal hasn't landed within
+//  `destroyAfter`, the scene session is destroyed through UIKit
+//  (`requestSceneSessionDestruction`).
 //
 //  Diagnostics: GET /state carries `mouseEventsLastSecond` and an
-//  `inputCatcher` object; while it's up a line is logged every few seconds.
-//  If a pointer event reaches the layer while the catcher is up (the pointer
-//  went through a clear catcher), the fill steps up to `faint` on its own.
+//  `inputCatcher` object; while it's up a line is logged every few seconds
+//  with the event count and the effective alpha.
 //
 
 import SwiftUI
+import UIKit
 import QuartzCore
 import RAVEInput
 import DebugTrace
 import GameController
-
-/// Settings › Keyboard, mouse & gamepad › catcher fill, for A/B on the
-/// headset (debug API key `inputCatcherFill`, not stored).
-nonisolated enum InputCatcherFill: String, CaseIterable, Identifiable, Sendable {
-    /// Nothing drawn: Color.clear with a content shape (the default).
-    case clear
-    /// An alpha the eye can't see, in case the system hit-tests by pixels.
-    case faint
-    /// A visible tint and outline, to see where the system put it.
-    case visible
-    var id: String { rawValue }
-}
 
 @MainActor @Observable
 final class InputCatcher {
@@ -82,10 +80,24 @@ final class InputCatcher {
     /// head or a long mouse sweep takes the pointer off it.
     static let requestedSize = CGSize(width: 4000, height: 2600)
 
+    /// The stored default fill opacity, until a headset sweep picks one.
+    nonisolated static let defaultAlpha = 0.01
+    /// The automatic steps when GCMouse stays silent; never above the last.
+    static let alphaLadder: [Double] = [0.003, 0.01, 0.02, 0.03, 0.05]
+    /// GCMouse silent this long, with a mouse in use and the catcher up,
+    /// before the alpha steps up (and again after each step).
+    static let silenceBeforeStep: TimeInterval = 2
+    /// SwiftUI's dismissal gets this long before the scene is destroyed.
+    static let destroyAfter: TimeInterval = 0.5
+
     // Settings (GameSettings pushes them).
     var enabled = true
     var recenterOnExit = true
-    var fill: InputCatcherFill = .clear
+    var alpha = InputCatcher.defaultAlpha {
+        didSet { if alpha != oldValue { autoAlpha = nil; catchConfirmed = false } }
+    }
+    var outline = false
+    var material = false
 
     // State, for the view and GET /state.
     private(set) var isOpen = false
@@ -96,23 +108,38 @@ final class InputCatcher {
     private(set) var opens = 0
     private(set) var recenters = 0
     private(set) var pinches = 0
-    private(set) var autoFallbacks = 0
+    private(set) var autoSteps = 0
     private(set) var lastFinding: String?
+    /// The automatic alpha, when it has stepped above the setting.
+    private(set) var autoAlpha: Double?
+    /// GCMouse events arrived while the catcher was up (at `confirmedAlpha`):
+    /// automatic stepping stops until the alpha setting changes.
+    private(set) var catchConfirmed = false
+    private(set) var confirmedAlpha: Double?
     /// Bumped to ask the catcher's own view to dismiss its window.
     private(set) var closeRequests = 0
+    private(set) var destructions = 0
+
+    /// What the window draws.
+    var effectiveAlpha: Double { max(alpha, autoAlpha ?? 0) }
 
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private var dismissWindow: DismissWindowAction?
     @ObservationIgnored private weak var appModel: AppModel?
     @ObservationIgnored private var loop: Task<Void, Never>?
+    /// The catcher's UIKit scene, captured from inside its window.
+    @ObservationIgnored private weak var scene: UIWindowScene?
 
     // Lifecycle bookkeeping.
     @ObservationIgnored private var requestedOpenAt: TimeInterval?
     @ObservationIgnored private var openRequestsUnanswered = 0
     @ObservationIgnored private var dismissingOurselves = false
-    @ObservationIgnored private var unwantedSince: TimeInterval?
+    @ObservationIgnored private var closeAskedAt: TimeInterval?
     @ObservationIgnored private var lastStuckLogAt: TimeInterval = -.infinity
     @ObservationIgnored private var reopenNotBefore: TimeInterval = 0
+    @ObservationIgnored private var openedAt: TimeInterval = 0
+    @ObservationIgnored private var lastStepAt: TimeInterval = 0
+    @ObservationIgnored private var warnedAtCap = false
     @ObservationIgnored private var hoverEndedAt: TimeInterval?
     @ObservationIgnored private var lastHoverPoint: CGPoint?
     @ObservationIgnored private var lastRecenterAt: TimeInterval = -.infinity
@@ -165,14 +192,18 @@ final class InputCatcher {
         let now = CACurrentMediaTime()
         switch event {
         case .connected, .disconnected:
-            break
+            return
         case .moved:
             mouseEvents.record(at: now)
             mouseMoves.record(at: now)
-            watch.mouseEvent(at: now)
         case .button, .scroll:
             mouseEvents.record(at: now)
-            watch.mouseEvent(at: now)
+        }
+        watch.mouseEvent(at: now)
+        if isOpen, !catchConfirmed {
+            catchConfirmed = true
+            confirmedAlpha = effectiveAlpha
+            AppLog.input.log("[InputCatcher] GCMouse events arrive with the catcher up at alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public); automatic stepping stops")
         }
     }
 
@@ -218,6 +249,7 @@ final class InputCatcher {
 
     private func tick() {
         let now = CACurrentMediaTime()
+        reconcileWithUIKit()
         let decision = decide()
         if decision.reason != reason {
             AppLog.input.log("[InputCatcher] \(decision.wanted ? "wanted" : "not wanted", privacy: .public): \(decision.reason, privacy: .public)")
@@ -226,24 +258,31 @@ final class InputCatcher {
         reason = decision.reason
 
         if wanted {
-            unwantedSince = nil
+            closeAskedAt = nil
             if isOpen {
                 recenterIfPointerLeft(now: now)
+                stepAlphaIfMouseSilent(now: now)
                 checkWatch(now: now)
             } else if now >= reopenNotBefore, requestedOpenAt.map({ now - $0 > 2 }) ?? true {
                 open(now: now)
             }
         } else if isOpen || requestedOpenAt != nil {
-            if isOpen {
-                if unwantedSince == nil { unwantedSince = now }
-                if let since = unwantedSince, now - since > 2, now - lastStuckLogAt > 10 {
-                    lastStuckLogAt = now
-                    AppLog.input.error("[InputCatcher] still up \(String(format: "%.0f", now - since), privacy: .public) s after asking it to close (\(self.reason, privacy: .public)); asking again")
-                }
-            }
-            close()
+            close(now: now)
         }
         logActivity(now: now)
+    }
+
+    /// The truth about the window from UIKit: its scene connected and not in
+    /// the background. onAppear/onDisappear and the scene phase alone left
+    /// `isOpen` stale.
+    private func reconcileWithUIKit() {
+        guard isOpen else { return }
+        guard let scene else { return }   // not captured yet: trust onAppear
+        let connected = UIApplication.shared.connectedScenes.contains(scene)
+        if !connected || scene.activationState == .background || scene.activationState == .unattached {
+            AppLog.input.log("[InputCatcher] UIKit says the window is gone (\(connected ? "connected" : "disconnected", privacy: .public), \(Self.describe(scene.activationState), privacy: .public))")
+            windowDisappeared()
+        }
     }
 
     private func open(now: TimeInterval) {
@@ -264,13 +303,34 @@ final class InputCatcher {
         openWindow(id: Self.windowID)
     }
 
-    private func close() {
+    /// SwiftUI first (the main window's action and the catcher's own); if the
+    /// window is still up `destroyAfter` later, UIKit destroys its session.
+    private func close(now: TimeInterval) {
         requestedOpenAt = nil
         guard isOpen else { return }
         dismissingOurselves = true
-        dismissWindow?(id: Self.windowID)
-        // And from inside: works even if the main window's action doesn't.
-        closeRequests += 1
+        guard let asked = closeAskedAt else {
+            closeAskedAt = now
+            dismissWindow?(id: Self.windowID)
+            closeRequests += 1
+            return
+        }
+        guard now - asked >= Self.destroyAfter else { return }
+        if now - lastStuckLogAt > 5 {
+            lastStuckLogAt = now
+            let state = scene.map { Self.describe($0.activationState) } ?? "no scene captured"
+            AppLog.input.error("[InputCatcher] still up \(String(format: "%.1f", now - asked), privacy: .public) s after dismissWindow (\(self.reason, privacy: .public), scene \(state, privacy: .public)); destroying its scene session")
+        }
+        if let scene {
+            destructions += 1
+            UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil) { error in
+                AppLog.input.error("[InputCatcher] scene session destruction failed: \(String(describing: error), privacy: .public)")
+            }
+        } else {
+            dismissWindow?(id: Self.windowID)
+            closeRequests += 1
+        }
+        closeAskedAt = now
     }
 
     private func recenterIfPointerLeft(now: TimeInterval) {
@@ -281,9 +341,35 @@ final class InputCatcher {
         hoverEndedAt = nil
         recenters += 1
         AppLog.input.log("[InputCatcher] pointer left the catcher: re-centring (#\(self.recenters))")
-        close()
+        close(now: now)
         // Reopened by the next ticks, once the dismissal has landed.
         reopenNotBefore = now + 0.3
+    }
+
+    /// GCMouse silent while a mouse is in use and the catcher is up: the
+    /// pointer probably goes through it, so draw a little more.
+    private func stepAlphaIfMouseSilent(now: TimeInterval) {
+        guard !catchConfirmed, MouseInput.connected,
+              InputModeState.current == .keyboardMouse || InputModeState.setting == .keyboardMouse else { return }
+        let quietSince = max(openedAt, lastStepAt, mouseEvents.lastAt ?? 0)
+        guard now - quietSince >= Self.silenceBeforeStep else { return }
+        stepAlpha(now: now, why: "GCMouse silent \(String(format: "%.0f", now - quietSince)) s")
+    }
+
+    private func stepAlpha(now: TimeInterval, why: String) {
+        let current = effectiveAlpha
+        guard let next = Self.alphaLadder.first(where: { $0 > current + 1e-6 }) else {
+            if !warnedAtCap {
+                warnedAtCap = true
+                AppLog.input.error("[InputCatcher] \(why, privacy: .public) at the top of the ladder (alpha \(String(format: "%.3f", current), privacy: .public)); not going higher on its own — try inputCatcherOutline or a higher inputCatcherAlpha")
+            }
+            lastStepAt = now
+            return
+        }
+        autoAlpha = next
+        autoSteps += 1
+        lastStepAt = now
+        AppLog.input.error("[InputCatcher] \(why, privacy: .public): alpha \(String(format: "%.3f", current), privacy: .public) → \(String(format: "%.3f", next), privacy: .public) (step #\(self.autoSteps))")
     }
 
     private func checkWatch(now: TimeInterval) {
@@ -291,16 +377,10 @@ final class InputCatcher {
         lastFinding = finding.rawValue
         switch finding {
         case .pointerPassedCatcher:
-            if fill == .clear {
-                autoFallbacks += 1
-                AppLog.input.error("[InputCatcher] a pointer event reached the immersive layer through the clear catcher: switching fill to faint (#\(self.autoFallbacks))")
-                // Through the settings, so GET /settings and the toggle agree.
-                if let settings = appModel?.gameSettings { settings.inputCatcherFill = .faint } else { fill = .faint }
-            } else {
-                AppLog.input.error("[InputCatcher] a pointer event reached the immersive layer with the catcher up (fill \(self.fill.rawValue, privacy: .public)): the pointer is off it or it doesn't catch")
-            }
+            AppLog.input.error("[InputCatcher] a pointer event reached the immersive layer with the catcher up")
+            if !catchConfirmed { stepAlpha(now: now, why: "pointer reached the layer") }
         case .pointerOnCatcherMouseSilent:
-            AppLog.input.error("[InputCatcher] the pointer moves on the catcher but GCMouse is silent (fill \(self.fill.rawValue, privacy: .public)); try inputCatcherFill=faint or visible")
+            AppLog.input.error("[InputCatcher] the pointer moves on the catcher but GCMouse is silent (alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
         }
     }
 
@@ -312,31 +392,36 @@ final class InputCatcher {
         lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] up: \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), fill \(self.fill.rawValue, privacy: .public)")
+        AppLog.input.log("[InputCatcher] up: \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
     }
 
     // MARK: From the window
 
     func windowAppeared() {
+        guard !isOpen else { return }
         isOpen = true
         requestedOpenAt = nil
         openRequestsUnanswered = 0
+        closeAskedAt = nil
         hovering = false
         hoverEndedAt = nil
         lastHoverPoint = nil
         watch.reset()
         opens += 1
-        lastLogAt = CACurrentMediaTime()
+        let now = CACurrentMediaTime()
+        openedAt = now
+        lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] window up (#\(self.opens), fill \(self.fill.rawValue, privacy: .public))")
+        AppLog.input.log("[InputCatcher] window up (#\(self.opens), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
     }
 
     func windowDisappeared() {
         guard isOpen else { return }
         isOpen = false
         hovering = false
-        unwantedSince = nil
+        closeAskedAt = nil
+        scene = nil
         if !dismissingOurselves {
             // Closed by the system or the player while we still want it.
             reopenNotBefore = CACurrentMediaTime() + Self.externalCloseBackoff
@@ -346,15 +431,18 @@ final class InputCatcher {
         AppLog.input.log("[InputCatcher] window down")
     }
 
-    /// The catcher scene's phase. A window the system took away goes to the
-    /// background, sometimes without `onDisappear`.
+    /// The catcher scene's phase, for the log; UIKit (reconcileWithUIKit)
+    /// decides whether it's open.
     func windowPhase(_ phase: ScenePhase) {
         AppLog.input.log("[InputCatcher] window scene phase \(String(describing: phase), privacy: .public)")
-        switch phase {
-        case .background: windowDisappeared()
-        case .active where !isOpen: windowAppeared()
-        default: break
-        }
+        if phase == .active, !isOpen { windowAppeared() }
+    }
+
+    /// The catcher's UIWindowScene, from a view inside it.
+    func attach(scene: UIWindowScene) {
+        guard self.scene !== scene else { return }
+        self.scene = scene
+        AppLog.input.log("[InputCatcher] scene captured (\(Self.describe(scene.activationState), privacy: .public))")
     }
 
     func sized(_ size: CGSize) {
@@ -391,6 +479,16 @@ final class InputCatcher {
         ImmersiveSpatialInput.handle(events, appModel: appModel, source: .catcher)
     }
 
+    private static func describe(_ state: UIScene.ActivationState) -> String {
+        switch state {
+        case .unattached: "unattached"
+        case .foregroundActive: "foregroundActive"
+        case .foregroundInactive: "foregroundInactive"
+        case .background: "background"
+        @unknown default: "unknown"
+        }
+    }
+
     // MARK: GET /state
 
     nonisolated struct Status: Encodable, Sendable {
@@ -398,23 +496,34 @@ final class InputCatcher {
         let wanted: Bool
         let open: Bool
         let reason: String
-        let fill: String
+        let alphaSetting: Double
+        let effectiveAlpha: Double
+        let autoSteps: Int
+        let catchConfirmed: Bool
+        let confirmedAlpha: Double?
+        let outline: Bool
+        let material: Bool
         let recenterOnExit: Bool
         let pointerOnCatcher: Bool
         let sizePt: [Double]?
+        let sceneState: String?
         let opens: Int
         let recenters: Int
+        let destructions: Int
         let pinches: Int
-        let autoFallbacks: Int
         let lastFinding: String?
     }
 
     var status: Status {
-        Status(enabled: enabled, wanted: wanted, open: isOpen, reason: reason, fill: fill.rawValue,
+        Status(enabled: enabled, wanted: wanted, open: isOpen, reason: reason,
+               alphaSetting: alpha, effectiveAlpha: effectiveAlpha, autoSteps: autoSteps,
+               catchConfirmed: catchConfirmed, confirmedAlpha: confirmedAlpha,
+               outline: outline, material: material,
                recenterOnExit: recenterOnExit, pointerOnCatcher: hovering,
                sizePt: actualSize.map { [Double($0.width), Double($0.height)] },
-               opens: opens, recenters: recenters, pinches: pinches,
-               autoFallbacks: autoFallbacks, lastFinding: lastFinding)
+               sceneState: scene.map { Self.describe($0.activationState) },
+               opens: opens, recenters: recenters, destructions: destructions,
+               pinches: pinches, lastFinding: lastFinding)
     }
 }
 
@@ -444,8 +553,8 @@ struct InputCatcherView: View {
     var body: some View {
         fillView
             .frame(width: InputCatcher.requestedSize.width, height: InputCatcher.requestedSize.height)
-            // Hit-testable everywhere even where nothing is drawn.
             .contentShape(Rectangle())
+            .background(SceneReader { catcher.attach(scene: $0) })
             .onGeometryChange(for: CGSize.self) { $0.size } action: { catcher.sized($0) }
             // No hover highlight anywhere in the window.
             .hoverEffectDisabled()
@@ -464,17 +573,46 @@ struct InputCatcherView: View {
             .onChange(of: scenePhase) { _, phase in catcher.windowPhase(phase) }
     }
 
+    /// The pointer only counts drawn pixels, so the fill is never fully clear.
     @ViewBuilder private var fillView: some View {
-        switch catcher.fill {
-        case .clear:
-            Color.clear
-        case .faint:
-            Color.white.opacity(0.003)
-        case .visible:
-            Rectangle()
-                .fill(Color.cyan.opacity(0.08))
-                .overlay(Rectangle().stroke(Color.cyan.opacity(0.6), lineWidth: 6))
-                .overlay(Text("Mouse capture window").font(.largeTitle).foregroundStyle(.cyan.opacity(0.7)))
+        let a = catcher.effectiveAlpha
+        ZStack {
+            if catcher.material {
+                Rectangle().fill(.ultraThinMaterial).opacity(a)
+            } else {
+                Color.white.opacity(a)
+            }
+            if catcher.outline {
+                Rectangle().stroke(Color.cyan.opacity(0.6), lineWidth: 6)
+                Text("Mouse capture window  ·  alpha \(String(format: "%.3f", a))")
+                    .font(.largeTitle)
+                    .foregroundStyle(.cyan.opacity(0.7))
+            }
+        }
+    }
+}
+
+/// Hands the hosting UIWindowScene to `found` once the view is in a window.
+private struct SceneReader: UIViewRepresentable {
+    let found: (UIWindowScene) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let v = ProbeView()
+        v.found = found
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.found = found
+        if let scene = uiView.window?.windowScene { found(scene) }
+    }
+
+    final class ProbeView: UIView {
+        var found: ((UIWindowScene) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if let scene = window?.windowScene { found?(scene) }
         }
     }
 }

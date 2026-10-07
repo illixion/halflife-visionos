@@ -312,6 +312,13 @@ enum AppSettingsStore {
         get { bool(inputCatcherKey, true) }
         set { defaults.set(newValue, forKey: inputCatcherKey) }
     }
+    private static let inputCatcherAlphaKey = "lambdavision.settings.inputCatcherAlpha"
+    /// The catcher's fill opacity: the visionOS pointer ignores a window
+    /// where nothing is drawn (Color.clear didn't catch on the headset).
+    static var inputCatcherAlpha: Double {
+        get { double(inputCatcherAlphaKey, InputCatcher.defaultAlpha) }
+        set { defaults.set(newValue, forKey: inputCatcherAlphaKey) }
+    }
     static var inputCatcherRecenter: Bool {
         get { bool(inputCatcherRecenterKey, true) }
         set { defaults.set(newValue, forKey: inputCatcherRecenterKey) }
