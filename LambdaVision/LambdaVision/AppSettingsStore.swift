@@ -319,6 +319,15 @@ enum AppSettingsStore {
         get { double(inputCatcherAlphaKey, InputCatcher.defaultAlpha) }
         set { defaults.set(newValue, forKey: inputCatcherAlphaKey) }
     }
+    private static let inputCatcherTechniqueKey = "lambdavision.settings.inputCatcherTechnique"
+    static var inputCatcherTechnique: InputCatcherTechnique {
+        get {
+            guard let raw = defaults.string(forKey: inputCatcherTechniqueKey),
+                  let v = InputCatcherTechnique(rawValue: raw) else { return .swiftuiFill }
+            return v
+        }
+        set { defaults.set(newValue.rawValue, forKey: inputCatcherTechniqueKey) }
+    }
     static var inputCatcherRecenter: Bool {
         get { bool(inputCatcherRecenterKey, true) }
         set { defaults.set(newValue, forKey: inputCatcherRecenterKey) }

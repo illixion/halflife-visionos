@@ -98,6 +98,9 @@ final class InputCatcher {
     }
     var outline = false
     var material = false
+    /// How the window is filled (InputCatcherTechniques.swift). The alpha
+    /// and its step-up apply to `.swiftuiFill` only.
+    var technique: InputCatcherTechnique = .swiftuiFill
     /// Step the alpha up on its own when GCMouse stays silent. Off: draw
     /// exactly `alpha`, for A/B tests at a fixed value.
     var autoStep = true {
@@ -124,6 +127,8 @@ final class InputCatcher {
     /// Bumped to ask the catcher's own view to dismiss its window.
     private(set) var closeRequests = 0
     private(set) var destructions = 0
+    /// UIHoverGestureRecognizer callbacks (the `uiview` technique).
+    private(set) var uikitHovers = 0
 
     /// What the window draws.
     var effectiveAlpha: Double { max(alpha, autoAlpha ?? 0) }
@@ -354,7 +359,7 @@ final class InputCatcher {
     /// GCMouse silent while a mouse is in use and the catcher is up: the
     /// pointer probably goes through it, so draw a little more.
     private func stepAlphaIfMouseSilent(now: TimeInterval) {
-        guard autoStep, !catchConfirmed, MouseInput.connected,
+        guard autoStep, technique == .swiftuiFill, !catchConfirmed, MouseInput.connected,
               InputModeState.current == .keyboardMouse || InputModeState.setting == .keyboardMouse else { return }
         let quietSince = max(openedAt, lastStepAt, mouseEvents.lastAt ?? 0)
         guard now - quietSince >= Self.silenceBeforeStep else { return }
@@ -383,7 +388,7 @@ final class InputCatcher {
         switch finding {
         case .pointerPassedCatcher:
             AppLog.input.error("[InputCatcher] a pointer event reached the immersive layer with the catcher up")
-            if autoStep, !catchConfirmed { stepAlpha(now: now, why: "pointer reached the layer") }
+            if autoStep, technique == .swiftuiFill, !catchConfirmed { stepAlpha(now: now, why: "pointer reached the layer") }
         case .pointerOnCatcherMouseSilent:
             AppLog.input.error("[InputCatcher] the pointer moves on the catcher but GCMouse is silent (alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
         }
@@ -397,7 +402,7 @@ final class InputCatcher {
         lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] up: \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
+        AppLog.input.log("[InputCatcher] up: \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
     }
 
     // MARK: From the window
@@ -418,7 +423,7 @@ final class InputCatcher {
         lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] window up (#\(self.opens), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
+        AppLog.input.log("[InputCatcher] window up (#\(self.opens), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
     }
 
     func windowDisappeared() {
@@ -484,6 +489,13 @@ final class InputCatcher {
         ImmersiveSpatialInput.handle(events, appModel: appModel, source: .catcher)
     }
 
+    func uikitHovered() {
+        uikitHovers += 1
+        if uikitHovers == 1 || uikitHovers % 200 == 0 {
+            AppLog.input.log("[InputCatcher] UIKit hover on the catcher (#\(self.uikitHovers))")
+        }
+    }
+
     private static func describe(_ state: UIScene.ActivationState) -> String {
         switch state {
         case .unattached: "unattached"
@@ -501,6 +513,8 @@ final class InputCatcher {
         let wanted: Bool
         let open: Bool
         let reason: String
+        let technique: String
+        let uikitHovers: Int
         let alphaSetting: Double
         let effectiveAlpha: Double
         let autoSteps: Int
@@ -521,6 +535,7 @@ final class InputCatcher {
 
     var status: Status {
         Status(enabled: enabled, wanted: wanted, open: isOpen, reason: reason,
+               technique: technique.rawValue, uikitHovers: uikitHovers,
                alphaSetting: alpha, effectiveAlpha: effectiveAlpha, autoSteps: autoSteps,
                catchConfirmed: catchConfirmed, confirmedAlpha: confirmedAlpha,
                outline: outline, material: material,
@@ -578,20 +593,19 @@ struct InputCatcherView: View {
             .onChange(of: scenePhase) { _, phase in catcher.windowPhase(phase) }
     }
 
-    /// The pointer only counts drawn pixels, so the fill is never fully clear.
-    @ViewBuilder private var fillView: some View {
+    /// The fill (InputCatcherTechniques.swift), plus the debug outline.
+    private var fillView: some View {
         let a = catcher.effectiveAlpha
-        ZStack {
-            if catcher.material {
-                Rectangle().fill(.ultraThinMaterial).opacity(a)
-            } else {
-                Color.white.opacity(a)
-            }
+        return ZStack {
+            InputCatcherFill(technique: catcher.technique, alpha: a, material: catcher.material,
+                             onUIKitHover: { catcher.uikitHovered() })
             if catcher.outline {
                 Rectangle().stroke(Color.cyan.opacity(0.6), lineWidth: 6)
-                Text("Mouse capture window  ·  alpha \(String(format: "%.3f", a))")
+                    .allowsHitTesting(false)
+                Text("Mouse capture window  ·  \(catcher.technique.rawValue)  ·  alpha \(String(format: "%.3f", a))")
                     .font(.largeTitle)
                     .foregroundStyle(.cyan.opacity(0.7))
+                    .allowsHitTesting(false)
             }
         }
     }

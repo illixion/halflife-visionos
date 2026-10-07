@@ -403,6 +403,11 @@ final class GameSettings {
         didSet { AppSettingsStore.inputCatcherAlpha = inputCatcherAlpha
                  InputCatcher.shared.alpha = inputCatcherAlpha }
     }
+    /// How the catcher fills its window (InputCatcherTechniques.swift).
+    var inputCatcherTechnique: InputCatcherTechnique = AppSettingsStore.inputCatcherTechnique {
+        didSet { AppSettingsStore.inputCatcherTechnique = inputCatcherTechnique
+                 InputCatcher.shared.technique = inputCatcherTechnique }
+    }
     /// Debug: draw the catcher's outline and label to see where it is. Not stored.
     var inputCatcherOutline: Bool = false {
         didSet { InputCatcher.shared.outline = inputCatcherOutline }
@@ -463,6 +468,7 @@ final class GameSettings {
         InputCatcher.shared.recenterOnExit = inputCatcherRecenter
         InputCatcher.shared.alpha = inputCatcherAlpha
         InputCatcher.shared.outline = inputCatcherOutline
+        InputCatcher.shared.technique = inputCatcherTechnique
         InputCatcher.shared.material = inputCatcherMaterial
         applyHEVHUD()
     }
