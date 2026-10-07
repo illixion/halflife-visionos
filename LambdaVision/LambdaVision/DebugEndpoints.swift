@@ -744,7 +744,7 @@ enum DebugEndpoints {
                      .integer("width", "cap on the PNG's width in pixels for the whole picture, aspect kept; 0 = native (logical) resolution, large", default: 1600, range: 0...16384),
                      .boolean("unwarp", "undo the drawable's foveation (false = the physical, centre-magnified layout the GPU stored)", default: true),
                  ],
-                 trace: .never, timeout: .seconds(20)) { args in
+                 trace: .never, sensitivity: .screenCapture, timeout: .seconds(20)) { args in
                 var request = FrameCapture.Request()
                 request.eye = FrameCapture.Eye(rawValue: args.string("eye") ?? "both") ?? .both
                 request.source = FrameCapture.Source(rawValue: args.string("source") ?? "composited") ?? .composited
