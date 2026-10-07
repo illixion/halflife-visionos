@@ -328,6 +328,12 @@ enum AppSettingsStore {
         }
         set { defaults.set(newValue.rawValue, forKey: inputCatcherTechniqueKey) }
     }
+    private static let inputCatcherAskKey = "lambdavision.settings.inputCatcherAskBeforeLock"
+    /// Show "Click to lock mouse" before the catcher takes over.
+    static var inputCatcherAskBeforeLock: Bool {
+        get { bool(inputCatcherAskKey, true) }
+        set { defaults.set(newValue, forKey: inputCatcherAskKey) }
+    }
     static var inputCatcherRecenter: Bool {
         get { bool(inputCatcherRecenterKey, true) }
         set { defaults.set(newValue, forKey: inputCatcherRecenterKey) }

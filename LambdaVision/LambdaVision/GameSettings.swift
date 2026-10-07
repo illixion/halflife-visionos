@@ -391,6 +391,11 @@ final class GameSettings {
         didSet { AppSettingsStore.inputCatcher = inputCatcher
                  InputCatcher.shared.enabled = inputCatcher }
     }
+    /// Show "Click to lock mouse" before the catcher takes over (InputCatcher).
+    var inputCatcherAskBeforeLock: Bool = AppSettingsStore.inputCatcherAskBeforeLock {
+        didSet { AppSettingsStore.inputCatcherAskBeforeLock = inputCatcherAskBeforeLock
+                 InputCatcher.shared.askBeforeLock = inputCatcherAskBeforeLock }
+    }
     /// Reopen the catcher in front of the player when the pointer leaves it.
     var inputCatcherRecenter: Bool = AppSettingsStore.inputCatcherRecenter {
         didSet { AppSettingsStore.inputCatcherRecenter = inputCatcherRecenter
@@ -468,6 +473,7 @@ final class GameSettings {
         InputCatcher.shared.recenterOnExit = inputCatcherRecenter
         InputCatcher.shared.alpha = inputCatcherAlpha
         InputCatcher.shared.outline = inputCatcherOutline
+        InputCatcher.shared.askBeforeLock = inputCatcherAskBeforeLock
         InputCatcher.shared.technique = inputCatcherTechnique
         InputCatcher.shared.material = inputCatcherMaterial
         applyHEVHUD()

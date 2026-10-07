@@ -59,6 +59,23 @@
 //  `destroyAfter`, the scene session is destroyed through UIKit
 //  (`requestSceneSessionDestruction`).
 //
+//  Lock prompt (browser pointer-lock style; Settings › "Ask before locking
+//  the mouse", on by default): when the catcher would open, a small glass
+//  "Click to lock mouse" pane (InputCatcherPrompt.swift) opens first. A
+//  click or pinch on it opens the invisible catcher ("locked"). The lock is
+//  lost — back to the prompt — when the pointer leaves the catcher, when the
+//  catcher closes for any reason (Esc opens the game menu, which closes it),
+//  or when the catcher window goes away. `phase` (idle / prompt / locked) is
+//  in GET /state. The prompt only shows while the mode is keyboard+mouse
+//  (current or forced): in hands mode a pane in the middle of the view would
+//  take the look-and-pinches meant for the game, and a pinch on it would
+//  lock. In Auto with a mouse connected but hands in use, any key switches
+//  to keyboard+mouse and brings the prompt. While the prompt is up the
+//  game ignores mouse motion, buttons and wheel (reaching for the pane
+//  mustn't turn the view or fire), including the release of the click that
+//  locks. With the setting off, the catcher opens directly and re-centres on
+//  pointer exit as before.
+//
 //  Diagnostics: GET /state carries `mouseEventsLastSecond` and an
 //  `inputCatcher` object; while it's up a line is logged every few seconds
 //  with the event count and the effective alpha.
@@ -75,6 +92,17 @@ import GameController
 final class InputCatcher {
     static let shared = InputCatcher()
     static let windowID = "input-catcher"
+    static let promptWindowID = "input-catcher-prompt"
+
+    enum Phase: String, Sendable {
+        /// Neither window: the catcher isn't wanted, or the prompt isn't
+        /// allowed (hands mode).
+        case idle
+        /// The "Click to lock mouse" pane is up.
+        case prompt
+        /// The invisible catcher is up (or opening).
+        case locked
+    }
     /// Requested size in points. Large on purpose: the system clamps a
     /// window to its maximum, and the bigger it is the less a turn of the
     /// head or a long mouse sweep takes the pointer off it.
@@ -98,6 +126,8 @@ final class InputCatcher {
     }
     var outline = false
     var material = false
+    /// Show the "Click to lock mouse" prompt before the catcher.
+    var askBeforeLock = true
     /// How the window is filled (InputCatcherTechniques.swift). The alpha
     /// and its step-up apply to `.swiftuiFill` only.
     var technique: InputCatcherTechnique = .metalClear
@@ -129,6 +159,20 @@ final class InputCatcher {
     private(set) var destructions = 0
     /// UIHoverGestureRecognizer callbacks (the `uiview` technique).
     private(set) var uikitHovers = 0
+
+    // The lock prompt.
+    private(set) var phase: Phase = .idle
+    private(set) var promptOpen = false
+    private(set) var locks = 0
+    private(set) var unlocks = 0
+    private(set) var lastUnlockReason: String?
+    /// Bumped to ask the prompt's own view to dismiss its window.
+    private(set) var promptCloseRequests = 0
+    @ObservationIgnored private weak var promptScene: UIWindowScene?
+    @ObservationIgnored private var promptRequestedAt: TimeInterval?
+    @ObservationIgnored private var promptCloseAskedAt: TimeInterval?
+    @ObservationIgnored private var promptReopenNotBefore: TimeInterval = 0
+    @ObservationIgnored private var dismissingPrompt = false
 
     /// What the window draws.
     var effectiveAlpha: Double { max(alpha, autoAlpha ?? 0) }
@@ -267,10 +311,31 @@ final class InputCatcher {
         wanted = decision.wanted
         reason = decision.reason
 
-        if wanted {
+        reconcilePromptWithUIKit()
+        if !wanted {
+            setPhase(.idle, why: decision.reason)
+        } else if !askBeforeLock {
+            setPhase(.locked, why: "no prompt (setting off)")
+        } else if phase != .locked {
+            setPhase(promptAllowed ? .prompt : .idle,
+                     why: promptAllowed ? decision.reason : "prompt waits for keyboard+mouse mode")
+        }
+
+        // The prompt.
+        if phase == .prompt {
+            if !promptOpen, now >= promptReopenNotBefore, promptRequestedAt.map({ now - $0 > 2 }) ?? true {
+                openPrompt(now: now)
+            }
+            promptCloseAskedAt = nil
+        } else if promptOpen || promptRequestedAt != nil {
+            closePrompt(now: now)
+        }
+
+        // The catcher.
+        if phase == .locked {
             closeAskedAt = nil
             if isOpen {
-                recenterIfPointerLeft(now: now)
+                if askBeforeLock { unlockIfPointerLeft(now: now) } else { recenterIfPointerLeft(now: now) }
                 stepAlphaIfMouseSilent(now: now)
                 checkWatch(now: now)
             } else if now >= reopenNotBefore, requestedOpenAt.map({ now - $0 > 2 }) ?? true {
@@ -281,6 +346,115 @@ final class InputCatcher {
         }
         logActivity(now: now)
     }
+
+    /// The prompt shows only while the keyboard and mouse have the controls
+    /// (see the header): in hands mode it would take the game's pinches.
+    private var promptAllowed: Bool {
+        InputModeState.current == .keyboardMouse || InputModeState.setting == .keyboardMouse
+    }
+
+    private func setPhase(_ new: Phase, why: String) {
+        guard new != phase else { return }
+        AppLog.input.log("[InputCatcher] phase \(self.phase.rawValue, privacy: .public) → \(new.rawValue, privacy: .public) (\(why, privacy: .public))")
+        phase = new
+    }
+
+    /// A click or pinch on the prompt: open the catcher.
+    func lock(via source: String) {
+        guard phase == .prompt else { return }
+        locks += 1
+        AppLog.input.log("[InputCatcher] locked by \(source, privacy: .public) on the prompt (#\(self.locks))")
+        setPhase(.locked, why: "clicked the prompt")
+        let now = CACurrentMediaTime()
+        closePrompt(now: now)
+        // The catcher's own reopen backoff doesn't apply to a deliberate lock.
+        reopenNotBefore = 0
+        if !isOpen { open(now: now) }
+    }
+
+    private func unlock(_ why: String, now: TimeInterval) {
+        guard phase == .locked else { return }
+        unlocks += 1
+        lastUnlockReason = why
+        AppLog.input.log("[InputCatcher] lock released: \(why, privacy: .public) (#\(self.unlocks))")
+        setPhase(promptAllowed ? .prompt : .idle, why: why)
+        close(now: now)
+    }
+
+    private func unlockIfPointerLeft(now: TimeInterval) {
+        guard !hovering, let ended = hoverEndedAt, now - ended >= Self.recenterDelay else { return }
+        hoverEndedAt = nil
+        unlock("pointer left the catcher", now: now)
+    }
+
+    // MARK: The prompt window
+
+    private func openPrompt(now: TimeInterval) {
+        guard let openWindow else { return }
+        promptRequestedAt = now
+        openWindow(id: Self.promptWindowID)
+    }
+
+    private func closePrompt(now: TimeInterval) {
+        promptRequestedAt = nil
+        guard promptOpen else { return }
+        dismissingPrompt = true
+        guard let asked = promptCloseAskedAt else {
+            promptCloseAskedAt = now
+            dismissWindow?(id: Self.promptWindowID)
+            promptCloseRequests += 1
+            return
+        }
+        guard now - asked >= Self.destroyAfter else { return }
+        AppLog.input.error("[InputCatcher] prompt still up \(String(format: "%.1f", now - asked), privacy: .public) s after dismissWindow; destroying its scene session")
+        if let promptScene {
+            UIApplication.shared.requestSceneSessionDestruction(promptScene.session, options: nil) { error in
+                AppLog.input.error("[InputCatcher] prompt scene destruction failed: \(String(describing: error), privacy: .public)")
+            }
+        } else {
+            dismissWindow?(id: Self.promptWindowID)
+            promptCloseRequests += 1
+        }
+        promptCloseAskedAt = now
+    }
+
+    private func reconcilePromptWithUIKit() {
+        guard promptOpen, let promptScene else { return }
+        let connected = UIApplication.shared.connectedScenes.contains(promptScene)
+        if !connected || promptScene.activationState == .background || promptScene.activationState == .unattached {
+            promptDisappeared()
+        }
+    }
+
+    func promptAppeared() {
+        guard !promptOpen else { return }
+        promptOpen = true
+        promptRequestedAt = nil
+        promptCloseAskedAt = nil
+        AppLog.input.log("[InputCatcher] prompt up")
+    }
+
+    func promptDisappeared() {
+        guard promptOpen else { return }
+        promptOpen = false
+        promptScene = nil
+        promptCloseAskedAt = nil
+        if !dismissingPrompt {
+            promptReopenNotBefore = CACurrentMediaTime() + Self.externalCloseBackoff
+            AppLog.input.log("[InputCatcher] prompt closed from outside")
+        }
+        dismissingPrompt = false
+        AppLog.input.log("[InputCatcher] prompt down")
+    }
+
+    func attachPrompt(scene: UIWindowScene) {
+        guard promptScene !== scene else { return }
+        promptScene = scene
+    }
+
+    /// While the prompt is up the game ignores the mouse (MouseInput):
+    /// reaching for the pane mustn't turn the view or fire.
+    var swallowsGameMouse: Bool { phase == .prompt }
 
     /// The truth about the window from UIKit: its scene connected and not in
     /// the background. onAppear/onDisappear and the scene phase alone left
@@ -402,7 +576,7 @@ final class InputCatcher {
         lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] up: \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
+        AppLog.input.log("[InputCatcher] up (\(self.phase.rawValue, privacy: .public)): \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
     }
 
     // MARK: From the window
@@ -436,6 +610,7 @@ final class InputCatcher {
             // Closed by the system or the player while we still want it.
             reopenNotBefore = CACurrentMediaTime() + Self.externalCloseBackoff
             AppLog.input.log("[InputCatcher] window closed from outside; reopening no sooner than \(Int(Self.externalCloseBackoff)) s")
+            if askBeforeLock { unlock("catcher window closed", now: CACurrentMediaTime()) }
         }
         dismissingOurselves = false
         AppLog.input.log("[InputCatcher] window down")
@@ -513,6 +688,12 @@ final class InputCatcher {
         let wanted: Bool
         let open: Bool
         let reason: String
+        let phase: String
+        let askBeforeLock: Bool
+        let promptOpen: Bool
+        let locks: Int
+        let unlocks: Int
+        let lastUnlockReason: String?
         let technique: String
         let uikitHovers: Int
         let alphaSetting: Double
@@ -535,6 +716,8 @@ final class InputCatcher {
 
     var status: Status {
         Status(enabled: enabled, wanted: wanted, open: isOpen, reason: reason,
+               phase: phase.rawValue, askBeforeLock: askBeforeLock, promptOpen: promptOpen,
+               locks: locks, unlocks: unlocks, lastUnlockReason: lastUnlockReason,
                technique: technique.rawValue, uikitHovers: uikitHovers,
                alphaSetting: alpha, effectiveAlpha: effectiveAlpha, autoSteps: autoSteps,
                catchConfirmed: catchConfirmed, confirmedAlpha: confirmedAlpha,
@@ -612,7 +795,7 @@ struct InputCatcherView: View {
 }
 
 /// Hands the hosting UIWindowScene to `found` once the view is in a window.
-private struct SceneReader: UIViewRepresentable {
+struct SceneReader: UIViewRepresentable {
     let found: (UIWindowScene) -> Void
 
     func makeUIView(context: Context) -> ProbeView {

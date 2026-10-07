@@ -36,6 +36,9 @@ nonisolated final class MouseInput {
     // Main queue only (RAVEMouseSource delivers there).
     private var scroll = RAVEMouseStepAccumulator()
     private var subscription: RAVEMouseSubscription?
+    // Buttons pressed while the lock prompt was up: their release is the
+    // prompt's too (main queue only).
+    private var swallowedButtons = Set<Int32>()
 
     /// Whether any mouse is connected (spatial pointer events stand down).
     static var connected: Bool { RAVEMouseSource.shared.isConnected }
@@ -59,6 +62,7 @@ nonisolated final class MouseInput {
                 InputModeState.deviceGone(.keyboardMouse)
             }
         case .moved(let dx, let dy):
+            if InputCatcher.shared.swallowsGameMouse { return }
             motion.add(dx: dx, dy: dy)
             Self.used()
         case .button(let button, let pressed):
@@ -70,9 +74,12 @@ nonisolated final class MouseInput {
             case .auxiliary(let i) where i < 2: keynum = Int32(244 + i) // K_MOUSE4/5
             case .auxiliary: return
             }
+            if pressed, InputCatcher.shared.swallowsGameMouse { swallowedButtons.insert(keynum); return }
+            if !pressed, swallowedButtons.remove(keynum) != nil { return }
             lambda_key_event(keynum, pressed ? 1 : 0)
             Self.used()
         case .scroll(_, let y):
+            if InputCatcher.shared.swallowsGameMouse { return }
             // One wheel notch ≈ 1.0 of axis value. Each whole step is a press and
             // release of the wheel key, like a desktop wheel. Vertical only.
             let steps = scroll.add(y)

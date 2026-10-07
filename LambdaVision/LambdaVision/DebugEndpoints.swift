@@ -607,6 +607,7 @@ enum DebugEndpoints {
         .flag("lookPitch", \.lookPitch),
         .flag("hideParkedParts", \.hideParkedParts),
         .flag("inputCatcher", \.inputCatcher, note: "the invisible mouse-capture window; GET /state › inputCatcher and mouseEventsLastSecond show its effect"),
+        .flag("inputCatcherAskBeforeLock", \.inputCatcherAskBeforeLock, note: "show the 'Click to lock mouse' prompt before the catcher (GET /state › inputCatcher.phase: idle / prompt / locked); off = the catcher opens directly"),
         .flag("inputCatcherRecenter", \.inputCatcherRecenter, note: "reopen the catcher in front of the player when the pointer leaves it"),
         .number("inputCatcherAlpha", \.inputCatcherAlpha, 0...0.2, note: "the catcher's fill opacity; the pointer ignores undrawn pixels. The catcher steps its effective alpha up on its own when GCMouse stays silent (GET /state › inputCatcher.effectiveAlpha)"),
         .choice("inputCatcherTechnique", \.inputCatcherTechnique, note: "how the catcher fills its window: swiftuiFill (white at inputCatcherAlpha), uiview (clear UIView, UIKit hover counted), metalEmpty (MTKView that never draws: the Convolution case), metalClear (one cleared drawable), realityTarget (invisible RealityKit input target)"),
