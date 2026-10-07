@@ -365,6 +365,7 @@ struct LambdaVisionApp: App {
         // while the pointer is over one of its windows.
         InputCatcherWindow()
         InputCatcherPromptWindow()
+        InputCatcherVolumeWindow()
 
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)

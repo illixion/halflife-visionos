@@ -486,6 +486,14 @@ final class GameSettings {
         didSet { AppSettingsStore.inputCatcherTechnique = inputCatcherTechnique
                  InputCatcher.shared.technique = inputCatcherTechnique }
     }
+    /// Debug: the catcher's requested size. Not stored.
+    var inputCatcherSize: InputCatcherSize = .standard {
+        didSet { InputCatcher.shared.size = inputCatcherSize }
+    }
+    /// Debug: the catcher as a plain window or a fixed-scale volume. Not stored.
+    var inputCatcherPlacement: InputCatcherPlacement = .window {
+        didSet { InputCatcher.shared.placement = inputCatcherPlacement }
+    }
     /// Debug: draw the catcher's outline and label to see where it is. Not stored.
     var inputCatcherOutline: Bool = false {
         didSet { InputCatcher.shared.outline = inputCatcherOutline }

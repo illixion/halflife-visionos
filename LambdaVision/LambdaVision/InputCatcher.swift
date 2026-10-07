@@ -107,6 +107,7 @@ final class InputCatcher {
     /// window to its maximum, and the bigger it is the less a turn of the
     /// head or a long mouse sweep takes the pointer off it.
     static let requestedSize = CGSize(width: 4000, height: 2600)
+    static let volumeWindowID = "input-catcher-volume"
 
     /// The stored default fill opacity, until a headset sweep picks one.
     nonisolated static let defaultAlpha = 0.01
@@ -128,6 +129,17 @@ final class InputCatcher {
     var material = false
     /// Show the "Click to lock mouse" prompt before the catcher.
     var askBeforeLock = true
+    /// Requested catcher size (debug; InputCatcherGeometry.swift). Applies
+    /// from the next open: a change while it's up reopens it.
+    var size: InputCatcherSize = .standard {
+        didSet { if size != oldValue, isOpen { needsReopen = true } }
+    }
+    /// A plain window (default) or a fixed-scale volume (debug).
+    var placement: InputCatcherPlacement = .window {
+        didSet { if placement != oldValue, isOpen { needsReopen = true } }
+    }
+    /// The requested size of the plain window, in points.
+    var requestedSize: CGSize { size.points }
     /// How the window is filled (InputCatcherTechniques.swift). The alpha
     /// and its step-up apply to `.swiftuiFill` only.
     var technique: InputCatcherTechnique = .metalClear
@@ -159,6 +171,12 @@ final class InputCatcher {
     private(set) var destructions = 0
     /// UIHoverGestureRecognizer callbacks (the `uiview` technique).
     private(set) var uikitHovers = 0
+
+    /// The volume's size as the system gave it (placement .volume).
+    private(set) var volumeSizeMeters: [Double]?
+    @ObservationIgnored private var needsReopen = false
+    /// The window id the catcher was opened with (window or volume).
+    @ObservationIgnored private var openedID: String?
 
     // The lock prompt.
     private(set) var phase: Phase = .idle
@@ -332,7 +350,11 @@ final class InputCatcher {
         }
 
         // The catcher.
-        if phase == .locked {
+        if phase == .locked, needsReopen, isOpen {
+            AppLog.input.log("[InputCatcher] size/placement changed: reopening as \(self.placement.rawValue, privacy: .public) \(self.size.rawValue, privacy: .public)")
+            close(now: now)
+        } else if phase == .locked {
+            needsReopen = false
             closeAskedAt = nil
             if isOpen {
                 if askBeforeLock { unlockIfPointerLeft(now: now) } else { recenterIfPointerLeft(now: now) }
@@ -484,7 +506,9 @@ final class InputCatcher {
             }
         }
         requestedOpenAt = now
-        openWindow(id: Self.windowID)
+        let id = placement == .volume ? Self.volumeWindowID : Self.windowID
+        openedID = id
+        openWindow(id: id)
     }
 
     /// SwiftUI first (the main window's action and the catcher's own); if the
@@ -495,7 +519,7 @@ final class InputCatcher {
         dismissingOurselves = true
         guard let asked = closeAskedAt else {
             closeAskedAt = now
-            dismissWindow?(id: Self.windowID)
+            dismissWindow?(id: openedID ?? Self.windowID)
             closeRequests += 1
             return
         }
@@ -511,7 +535,7 @@ final class InputCatcher {
                 AppLog.input.error("[InputCatcher] scene session destruction failed: \(String(describing: error), privacy: .public)")
             }
         } else {
-            dismissWindow?(id: Self.windowID)
+            dismissWindow?(id: openedID ?? Self.windowID)
             closeRequests += 1
         }
         closeAskedAt = now
@@ -576,7 +600,7 @@ final class InputCatcher {
         lastLogAt = now
         eventsAtLastLog = mouseEvents.total
         movesAtLastLog = mouseMoves.total
-        AppLog.input.log("[InputCatcher] up (\(self.phase.rawValue, privacy: .public)): \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
+        AppLog.input.log("[InputCatcher] up (\(self.phase.rawValue, privacy: .public), \(self.placement.rawValue, privacy: .public) \(self.size.rawValue, privacy: .public)): \(events) GCMouse events (\(moves) moves) in \(String(format: "%.1f", span), privacy: .public) s, pointer \(self.hovering ? "on" : "off", privacy: .public) the catcher, mode \(InputModeState.current.label, privacy: .public), technique \(self.technique.rawValue, privacy: .public), alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public)\(self.autoAlpha != nil ? " (auto)" : "", privacy: .public)\(self.material ? " material" : "", privacy: .public)")
     }
 
     // MARK: From the window
@@ -633,7 +657,16 @@ final class InputCatcher {
     func sized(_ size: CGSize) {
         guard size != actualSize else { return }
         actualSize = size
-        AppLog.input.log("[InputCatcher] window size \(Int(size.width))×\(Int(size.height)) pt (asked \(Int(Self.requestedSize.width))×\(Int(Self.requestedSize.height)))")
+        AppLog.input.log("[InputCatcher] window size \(Int(size.width))×\(Int(size.height)) pt (asked \(Int(self.requestedSize.width))×\(Int(self.requestedSize.height)), \(self.size.rawValue, privacy: .public))")
+    }
+
+    /// The volume's size in points and metres (placement .volume).
+    func volumeSized(points: Size3D, meters: SIMD3<Double>) {
+        let m = [meters.x, meters.y, meters.z]
+        guard m != volumeSizeMeters else { return }
+        volumeSizeMeters = m
+        actualSize = CGSize(width: points.width, height: points.height)
+        AppLog.input.log("[InputCatcher] volume size \(String(format: "%.2f×%.2f×%.2f", meters.x, meters.y, meters.z), privacy: .public) m (asked \(String(format: "%.0f×%.0f×%.0f", InputCatcherVolume.requestedMeters.x, InputCatcherVolume.requestedMeters.y, InputCatcherVolume.requestedMeters.z), privacy: .public))")
     }
 
     func hover(_ phase: HoverPhase) {
@@ -706,6 +739,10 @@ final class InputCatcher {
         let recenterOnExit: Bool
         let pointerOnCatcher: Bool
         let sizePt: [Double]?
+        let requestedSizePt: [Double]
+        let size: String
+        let placement: String
+        let volumeSizeMeters: [Double]?
         let sceneState: String?
         let opens: Int
         let recenters: Int
@@ -724,6 +761,9 @@ final class InputCatcher {
                outline: outline, material: material,
                recenterOnExit: recenterOnExit, pointerOnCatcher: hovering,
                sizePt: actualSize.map { [Double($0.width), Double($0.height)] },
+               requestedSizePt: [Double(requestedSize.width), Double(requestedSize.height)],
+               size: size.rawValue, placement: placement.rawValue,
+               volumeSizeMeters: volumeSizeMeters,
                sceneState: scene.map { Self.describe($0.activationState) },
                opens: opens, recenters: recenters, destructions: destructions,
                pinches: pinches, lastFinding: lastFinding)
@@ -755,7 +795,7 @@ struct InputCatcherView: View {
 
     var body: some View {
         fillView
-            .frame(width: InputCatcher.requestedSize.width, height: InputCatcher.requestedSize.height)
+            .frame(width: catcher.requestedSize.width, height: catcher.requestedSize.height)
             .contentShape(Rectangle())
             .background(SceneReader { catcher.attach(scene: $0) })
             .onGeometryChange(for: CGSize.self) { $0.size } action: { catcher.sized($0) }
