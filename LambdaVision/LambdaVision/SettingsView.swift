@@ -198,7 +198,7 @@ struct SettingsView: View {
                         slider("Free-aim zone width", $settings.freeAimYaw, 0...45, 1) {
                             String(format: "±%.0f°", $0)
                         }
-                        slider("Free-aim zone height", $settings.freeAimPitch, 0...35, 1) {
+                        slider("Free-aim zone height", $settings.freeAimPitch, 0...60, 1) {
                             String(format: "±%.0f°", $0)
                         }
                         Picker("Zone shape", selection: $settings.freeAimShape) {

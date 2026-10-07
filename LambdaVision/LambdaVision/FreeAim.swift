@@ -37,7 +37,7 @@ nonisolated struct FreeAimZone {
         /// Half-width of the zone (degrees either side of its centre).
         var yawLimit: Float = 20
         /// Half-height of the zone.
-        var pitchLimit: Float = 15
+        var pitchLimit: Float = 35
         var shape: Shape = .ellipse
         var anchor: Anchor = .body
         /// Head anchor: the follow's spring time constant (s).

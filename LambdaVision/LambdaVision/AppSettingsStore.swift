@@ -327,7 +327,7 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: freeAimYawKey) }
     }
     static var freeAimPitch: Double {
-        get { double(freeAimPitchKey, 15) }
+        get { double(freeAimPitchKey, 35) }
         set { defaults.set(newValue, forKey: freeAimPitchKey) }
     }
     static var freeAimShape: FreeAimShape {

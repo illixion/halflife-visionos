@@ -611,7 +611,7 @@ enum DebugEndpoints {
         .flag("lookPitch", \.lookPitch),
         .flag("freeAim", \.freeAim, note: "keyboard/mouse/gamepad: the mouse and right stick swing the gun inside a zone and only the excess turns the body; false = they turn the view as before. GET /state › freeAim"),
         .number("freeAimYaw", \.freeAimYaw, 0...45, note: "the zone's half-width, degrees; 0 = every bit of mouse yaw turns the body"),
-        .number("freeAimPitch", \.freeAimPitch, 0...35, note: "the zone's half-height, degrees; excess pitch is clamped (tilts the view with lookPitch)"),
+        .number("freeAimPitch", \.freeAimPitch, 0...60, note: "the zone's half-height, degrees; excess pitch is clamped (tilts the view with lookPitch)"),
         .choice("freeAimShape", \.freeAimShape, note: "ellipse narrows toward its corners; rectangle doesn't"),
         .choice("freeAimAnchor", \.freeAimAnchor, note: "body: the zone stays ahead of the body while the head looks around; head: it follows the head's yaw lazily (freeAimFollow)"),
         .number("freeAimFollow", \.freeAimFollow, 0.1...1.5, note: "head anchor: the follow's time constant, seconds"),
