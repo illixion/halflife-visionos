@@ -308,6 +308,27 @@ actor Renderer {
     private var freeAimLastOverflowAt: TimeInterval = 0
     private var freeAimTurnedTotal: Float = 0
     private var freeAimFrameDt: Float = 0
+    private var freeAimRecenters = 0
+    /// Mouse motion smoothing (MouseSmoothing.swift). Render thread only.
+    private var mouseSmoother = MotionSmoother(timeConstant: 0.03)
+    private var mouseFrameWindow: (start: TimeInterval, frames: Int, withMotion: Int) = (0, 0, 0)
+
+    /// Render-side view of the mouse for GET /state.
+    struct MouseFrameStatus: Encodable, Sendable {
+        var renderFramesPerSec: Double = 0
+        var framesWithMotionPerSec: Double = 0
+        var smoothing = true
+        var smoothingMs: Double = 30
+        var pendingCounts: Double = 0
+    }
+    nonisolated(unsafe) private static var mouseFramesValue = MouseFrameStatus()
+    nonisolated static var mouseFrames: MouseFrameStatus {
+        freeAimStatusLock.lock(); defer { freeAimStatusLock.unlock() }
+        return mouseFramesValue
+    }
+    nonisolated private static func publishMouseFrames(_ s: MouseFrameStatus) {
+        freeAimStatusLock.lock(); mouseFramesValue = s; freeAimStatusLock.unlock()
+    }
     /// This frame's swung gun, GoldSrc room axes and units (FreeAimZone.gunTransform).
     private var freeAimGun: float4x4?
     /// This frame's aim ray for the reticle, Apple world (metres, unit dir).
@@ -343,6 +364,12 @@ actor Renderer {
         var engineOffsetPitchDeg: Float = 0   // what lambda_set_aim_offset got
         var engineOffsetYawDeg: Float = 0
         var muzzle = false                // shots leave the swung gun's muzzle
+        var headFromCenterDeg: Float = 0  // head yaw − zone centre, + left: the drift
+        var alignOffsetDeg: Float = 0     // body anchor: how far the re-align turned the centre
+        var realign = true
+        var realigning = false            // catching up to a head past the dead band
+        var realignAngleDeg: Float = 40
+        var trackingRecenters = 0         // origin jumps seen (Digital Crown recenter, relocalisation)
     }
     nonisolated(unsafe) private static var freeAimStatusValue = FreeAimStatus()
     private static let freeAimStatusLock = NSLock()
@@ -736,18 +763,26 @@ actor Renderer {
                 }
             }
         } else if !typing {
+            // GCMouse arrives at visionOS's own, lower and uneven rate; spread
+            // each delta over the frames after it so turning and aiming move
+            // every frame (MotionSmoother; counts are conserved). The menu
+            // cursor above stays raw.
+            mouseSmoother.timeConstant = MouseInput.smoothing ? MouseInput.smoothingSeconds : 0
+            let sm = mouseSmoother.step(SIMD2(m.dx, m.dy), dt: dt)
             let k = MouseInput.sensitivity * MouseInput.degreesPerCount
             if freeAim {
-                if m.dx != 0 || m.dy != 0 {
+                if sm.x != 0 || sm.y != 0 {
                     aimInput = true
-                    applyFreeAimOverflow(freeAimZone.move(yaw: m.dx * k, pitch: m.dy * k), pitchOK: pitchOK, now: now)
+                    applyFreeAimOverflow(freeAimZone.move(yaw: sm.x * k, pitch: sm.y * k), pitchOK: pitchOK, now: now)
                 }
             } else {
-                if m.dx != 0 { Renderer.requestTurn(degrees: m.dx * k) }
-                if m.dy != 0, pitchOK { addViewPitch(-m.dy * k) }
+                if sm.x != 0 { Renderer.requestTurn(degrees: sm.x * k) }
+                if sm.y != 0, pitchOK { addViewPitch(-sm.y * k) }
             }
         }
+        if menuUp || typing { mouseSmoother.reset() }
         mouseMenuWasUp = menuUp
+        noteMouseFrame(raw: m.dx != 0 || m.dy != 0, now: now)
         if freeAim { freeAimZone.step(dt: dt, hadInput: aimInput) }
 
         // Hands own the view's pitch: drop any mouse/stick pitch when they
@@ -818,6 +853,23 @@ actor Renderer {
     }
     static let freeAimShoulder = SIMD3<Float>(-3, -7, -9)
     static let freeAimHand = SIMD3<Float>(10, -6, -8)
+
+    /// Counts render frames, and those that got any raw mouse motion, over
+    /// one-second windows (GET /state › mouseMotion): with a 90 Hz render a
+    /// mouse delivering below that shows as frames without motion.
+    private func noteMouseFrame(raw: Bool, now: TimeInterval) {
+        mouseFrameWindow.frames += 1
+        if raw { mouseFrameWindow.withMotion += 1 }
+        if now - mouseFrameWindow.start >= 1 {
+            let span = max(now - mouseFrameWindow.start, 1e-3)
+            Renderer.publishMouseFrames(.init(renderFramesPerSec: Double(mouseFrameWindow.frames) / span,
+                                              framesWithMotionPerSec: Double(mouseFrameWindow.withMotion) / span,
+                                              smoothing: MouseInput.smoothing,
+                                              smoothingMs: Double(MouseInput.smoothingSeconds * 1000),
+                                              pendingCounts: Double(simd_length(mouseSmoother.pending))))
+            mouseFrameWindow = (now, 0, 0)
+        }
+    }
 
     private func noteFreeAimTurn(_ deg: Float, now: TimeInterval) {
         freeAimLastOverflowAt = now
@@ -2291,6 +2343,12 @@ actor Renderer {
                 headBaselineYaw = nil
                 headBaselinePos = nil
                 Renderer.aimDiag.nRecenter += 1
+                // Free aim's body forward is this baseline: it re-captures on
+                // the head below, so drop the zone's re-align and offset too.
+                // (No visionOS API announces a recenter; this origin-jump
+                // check is how the app sees the Digital Crown hold.)
+                freeAimZone.trackingRecentered()
+                freeAimRecenters += 1
                 AppLog.render.log("[LambdaVision] recenter: re-anchoring head baseline (#\(Renderer.aimDiag.nRecenter))")
             }
 
@@ -2402,12 +2460,17 @@ actor Renderer {
                     overflowTurnedDegTotal: freeAimTurnedTotal,
                     recentering: z.config.recenter && z.idleTime > z.config.recenterDelay && (z.yaw != 0 || z.pitch != 0),
                     engineOffsetPitchDeg: off.pitch, engineOffsetYawDeg: off.yaw,
-                    muzzle: pass?.muzzle != nil))
+                    muzzle: pass?.muzzle != nil,
+                    headFromCenterDeg: z.headFromCenter, alignOffsetDeg: z.alignOffset,
+                    realign: z.config.realign, realigning: z.realigning,
+                    realignAngleDeg: z.config.realignAngle, trackingRecenters: freeAimRecenters))
             } else {
                 Renderer.publishFreeAim(FreeAimStatus(
                     setting: Renderer.freeAimEnabled, active: false,
                     shape: Renderer.freeAimConfig.shape.rawValue, anchor: Renderer.freeAimConfig.anchor.rawValue,
-                    pivot: Renderer.freeAimPivot.rawValue, overflowTurnedDegTotal: freeAimTurnedTotal))
+                    pivot: Renderer.freeAimPivot.rawValue, overflowTurnedDegTotal: freeAimTurnedTotal,
+                    realign: Renderer.freeAimConfig.realign, realignAngleDeg: Renderer.freeAimConfig.realignAngle,
+                    trackingRecenters: freeAimRecenters))
             }
 
             // Aim ray + hand-anchored weapon. With the dominant hand

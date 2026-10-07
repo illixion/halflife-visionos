@@ -354,6 +354,31 @@ enum AppSettingsStore {
         get { defaults.string(forKey: freeAimPivotKey).flatMap(FreeAimPivot.init(rawValue:)) ?? .shoulder }
         set { defaults.set(newValue.rawValue, forKey: freeAimPivotKey) }
     }
+    private static let freeAimRealignKey       = "lambdavision.settings.freeAimRealign"
+    private static let freeAimRealignAngleKey  = "lambdavision.settings.freeAimRealignAngle"
+    private static let freeAimRealignTimeKey   = "lambdavision.settings.freeAimRealignTime"
+    private static let mouseSmoothingKey       = "lambdavision.settings.mouseSmoothing"
+    private static let mouseSmoothingMsKey     = "lambdavision.settings.mouseSmoothingMs"
+    static var freeAimRealign: Bool {
+        get { bool(freeAimRealignKey, true) }
+        set { defaults.set(newValue, forKey: freeAimRealignKey) }
+    }
+    static var freeAimRealignAngle: Double {
+        get { double(freeAimRealignAngleKey, 40) }
+        set { defaults.set(newValue, forKey: freeAimRealignAngleKey) }
+    }
+    static var freeAimRealignTime: Double {
+        get { double(freeAimRealignTimeKey, 1.5) }
+        set { defaults.set(newValue, forKey: freeAimRealignTimeKey) }
+    }
+    static var mouseSmoothing: Bool {
+        get { bool(mouseSmoothingKey, true) }
+        set { defaults.set(newValue, forKey: mouseSmoothingKey) }
+    }
+    static var mouseSmoothingMs: Double {
+        get { double(mouseSmoothingMsKey, 30) }
+        set { defaults.set(newValue, forKey: mouseSmoothingMsKey) }
+    }
     static var freeAimUse: Bool {
         get { bool(freeAimUseKey, true) }
         set { defaults.set(newValue, forKey: freeAimUseKey) }

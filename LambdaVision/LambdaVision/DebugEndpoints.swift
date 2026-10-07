@@ -449,6 +449,17 @@ enum DebugEndpoints {
         /// Free aim (keyboard/mouse/gamepad): the aim offset in its zone, the
         /// overflow turning the body, the anchor, and what the engine got.
         let freeAim: Renderer.FreeAimStatus
+        /// GCMouse delivery against the render: motion events per second, their
+        /// mean interval, jitter (interval standard deviation) and worst gap,
+        /// render frames per second and how many got motion, and the smoothing.
+        struct MouseMotion: Encodable, Sendable {
+            let eventRateHz: Double?
+            let meanIntervalMs: Double?
+            let jitterMs: Double?
+            let maxIntervalMs: Double?
+            let render: Renderer.MouseFrameStatus
+        }
+        let mouseMotion: MouseMotion
     }
 
     static func stateReply() throws(DebugError) -> some Encodable & Sendable {
@@ -504,7 +515,12 @@ enum DebugEndpoints {
             mouseEventsTotal: InputCatcher.shared.mouseEventsTotal,
             lastMouseEventAgoMs: InputCatcher.shared.secondsSinceMouseEvent.map { $0 * 1000 },
             inputCatcher: InputCatcher.shared.status,
-            freeAim: Renderer.freeAimStatus)
+            freeAim: Renderer.freeAimStatus,
+            mouseMotion: {
+                let s = MouseInput.shared.moveStats()
+                return .init(eventRateHz: s?.rateHz, meanIntervalMs: s?.meanIntervalMs, jitterMs: s?.jitterMs,
+                             maxIntervalMs: s?.maxIntervalMs, render: Renderer.mouseFrames)
+            }())
     }
 
     // MARK: Settings table
@@ -618,6 +634,11 @@ enum DebugEndpoints {
         .flag("freeAimRecenter", \.freeAimRecenter, note: "ease the aim back to the zone's centre while the mouse and stick rest"),
         .number("freeAimRecenterTime", \.freeAimRecenterTime, 0.2...3, note: "the recentre's time constant, seconds"),
         .choice("freeAimPivot", \.freeAimPivot, note: "what the swung viewmodel turns about: shoulder, its grip hand, or the eye"),
+        .flag("freeAimRealign", \.freeAimRealign, note: "body anchor: turn the zone toward a head that stays turned past freeAimRealignAngle (GET /state › freeAim.headFromCenterDeg, realigning)"),
+        .number("freeAimRealignAngle", \.freeAimRealignAngle, 15...90, note: "the re-align's dead band, degrees"),
+        .number("freeAimRealignTime", \.freeAimRealignTime, 0.3...5, note: "the re-align's catch-up time constant, seconds"),
+        .flag("mouseSmoothing", \.mouseSmoothing, note: "spread GCMouse deltas over render frames, free aim on or off (GET /state › mouseMotion)"),
+        .number("mouseSmoothingMs", \.mouseSmoothingMs, 5...100, note: "the smoothing's mean delay, ms"),
         .flag("freeAimUse", \.freeAimUse, note: "+use picks what the gun points at (true) or the view's centre (false)"),
         .flag("hideParkedParts", \.hideParkedParts),
         .flag("inputCatcher", \.inputCatcher, note: "the invisible mouse-capture window; GET /state › inputCatcher and mouseEventsLastSecond show its effect"),

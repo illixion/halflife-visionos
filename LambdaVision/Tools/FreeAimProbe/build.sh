@@ -14,5 +14,5 @@ app="$repo/LambdaVision/LambdaVision"
 out="$repo/build/free-aim-probe"
 mkdir -p "$out"
 
-swiftc -O "$app/FreeAim.swift" "$app/LazyViewFollower.swift" "$here/main.swift" -o "$out/probe"
+swiftc -O "$app/FreeAim.swift" "$app/LazyViewFollower.swift" "$app/MouseSmoothing.swift" "$here/main.swift" -o "$out/probe"
 "$out/probe" "$@"

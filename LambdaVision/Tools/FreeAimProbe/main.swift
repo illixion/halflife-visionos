@@ -164,11 +164,61 @@ do {
 
 do {
     var body = zone(anchor: .body)
+    body.config.realign = false
     let c0 = body.updateCenter(bodyYaw: 30, headYaw: 75, dt: 1.0 / 90)
     check(near(c0, 30), "body anchor: the centre is the body, wherever the head is: \(c0)")
     var turned = body
     for _ in 0..<90 { turned.updateCenter(bodyYaw: 30, headYaw: 120, dt: 1.0 / 90) }
-    check(near(turned.centerYaw!, 30), "body anchor: head turning never drags it")
+    check(near(turned.centerYaw!, 30), "body anchor, re-align off: head turning never drags it")
+    check(near(turned.headFromCenter, 90), "headFromCenter reports the drift: \(turned.headFromCenter)")
+
+    // Re-align (default on): inside the dead band nothing moves, however long.
+    var r = zone(anchor: .body)
+    for _ in 0..<(90 * 30) { r.updateCenter(bodyYaw: 0, headYaw: 35, dt: 1.0 / 90) }
+    check(near(r.centerYaw!, 0) && !r.realigning, "re-align: a head inside the dead band (35° < 40°) never moves the centre")
+    // Past it, the centre catches up to within the settle angle and stops.
+    var cross: Float = 0, t: Float = 0
+    var started = false
+    while t < 20 {
+        r.updateCenter(bodyYaw: 0, headYaw: 70, dt: 1.0 / 90)
+        if r.realigning { started = true }
+        t += 1.0 / 90
+        if started && !r.realigning && cross == 0 { cross = t }
+    }
+    check(started, "re-align starts once the head passes the dead band")
+    check(abs(r.headFromCenter) < r.config.realignSettle && abs(r.headFromCenter) > 0, "re-align settles near the head: \(r.headFromCenter)")
+    check(near(r.alignOffset, r.centerYaw!), "the centre is body + alignOffset: \(r.alignOffset)")
+    // Time to settle from 70° to 5°: τ·ln(70/5) ≈ 1.5·2.64 ≈ 4 s.
+    check(cross > 3.3 && cross < 4.7, "re-align takes τ·ln(start/settle): \(cross) s")
+    // Frame-rate independence of the catch-up.
+    func settleAngle(hz: Float) -> Float {
+        var z = zone(anchor: .body)
+        var tt: Float = 0
+        while tt < 1 { z.updateCenter(bodyYaw: 0, headYaw: 90, dt: 1 / hz); tt += 1 / hz }
+        return z.centerYaw!
+    }
+    check(near(settleAngle(hz: 90), settleAngle(hz: 120), 0.6), "re-align: same at 90 and 120 Hz: \(settleAngle(hz: 90)) vs \(settleAngle(hz: 120))")
+    // Wraps the short way across ±180.
+    var w = zone(anchor: .body)
+    for _ in 0..<(90 * 10) { w.updateCenter(bodyYaw: 170, headYaw: -120, dt: 1.0 / 90) }
+    check(abs(Zone.wrap(w.centerYaw! - -120)) < 5, "re-align crosses ±180 the short way: \(w.centerYaw!)")
+    // The aim offset rides with the centre: the realign never changes it.
+    var ride = zone(anchor: .body)
+    ride.move(yaw: 7, pitch: 3)
+    for _ in 0..<(90 * 3) { ride.updateCenter(bodyYaw: 0, headYaw: 80, dt: 1.0 / 90) }
+    check(near(ride.yaw, 7) && near(ride.pitch, 3), "re-align moves the zone, not the offset")
+    // A tracking recenter puts the centre back on the body (= the head's yaw
+    // there), zeroes the offset, and stops a catch-up in progress.
+    ride.trackingRecentered()
+    let afterRecenter = ride.updateCenter(bodyYaw: 80, headYaw: 80, dt: 1.0 / 90)
+    check(near(afterRecenter, 80) && ride.alignOffset == 0 && !ride.realigning && ride.yaw == 0,
+          "tracking recenter re-aligns at once: \(afterRecenter)")
+    // Head anchor: a recenter snaps the follow instead of swinging across.
+    var hz = zone(anchor: .head)
+    for _ in 0..<90 { hz.updateCenter(bodyYaw: 0, headYaw: 0, dt: 1.0 / 90) }
+    hz.trackingRecentered()
+    let snapped = hz.updateCenter(bodyYaw: 0, headYaw: 120, dt: 1.0 / 90)
+    check(near(snapped, 120, 0.05), "head anchor: recenter starts on the head: \(snapped)")
 
     var head = zone(anchor: .head)
     head.config.followTime = 0.3
@@ -244,6 +294,96 @@ do {
     // Eye pivot: the eye stays at the eye.
     let ge = Zone.gunTransform(eye: eye, centerYaw: 0, aimYaw: 20, aimPitchDown: 10, pivot: .zero)
     check(near(p(ge, .zero), eye), "eye pivot keeps the model origin on the eye")
+}
+
+// MARK: Mouse smoothing
+
+do {
+    // Off: straight through.
+    var off = MotionSmoother(timeConstant: 0)
+    check(off.step(SIMD2(3, -2), dt: 1.0 / 90) == SIMD2(3, -2), "smoothing off passes motion through")
+
+    // Conserves every count: a burst comes out in full.
+    var s = MotionSmoother(timeConstant: 0.03)
+    var total = SIMD2<Float>(repeating: 0)
+    total += s.step(SIMD2(100, -40), dt: 1.0 / 90)
+    for _ in 0..<90 { total += s.step(.zero, dt: 1.0 / 90) }
+    check(near(total.x, 100, 1e-3) && near(total.y, -40, 1e-3) && s.pending == .zero, "smoothing conserves motion: \(total)")
+
+    // Mean delay ≈ τ (impulse response centroid), and little of it is late.
+    func centroid(tau: Float, hz: Float) -> (mean: Float, after3tau: Float) {
+        var m = MotionSmoother(timeConstant: tau)
+        var t: Float = 0, weighted: Float = 0, late: Float = 0
+        var first = true
+        while t < 1 {
+            let o = m.step(first ? SIMD2(1, 0) : .zero, dt: 1 / hz).x
+            first = false
+            t += 1 / hz
+            weighted += o * t
+            if t > 3 * tau + 1 / hz { late += o }
+        }
+        return (weighted, late)
+    }
+    for tau: Float in [0.025, 0.03, 0.04] {
+        let c90 = centroid(tau: tau, hz: 90)
+        check(c90.mean < tau + 2 / 90 && c90.mean > tau * 0.6, "smoothing mean delay near τ=\(tau): \(c90.mean)")
+        check(c90.after3tau < 0.15, "smoothing: under 15% arrives after 3τ (τ=\(tau)): \(c90.after3tau)")
+        let c120 = centroid(tau: tau, hz: 120)
+        check(abs(c90.mean - c120.mean) < 1.5 / 90, "smoothing delay similar at 90/120 Hz: \(c90.mean) vs \(c120.mean)")
+    }
+
+    // A steady mouse whose events arrive every third frame (30 Hz into a
+    // 90 Hz render) comes out nearly even per frame instead of 0,0,3,0,0,3.
+    var steady = MotionSmoother(timeConstant: 0.03)
+    var outs: [Float] = []
+    for i in 0..<270 {
+        let o = steady.step(SIMD2(i % 3 == 0 ? 3 : 0, 0), dt: 1.0 / 90).x
+        if i >= 90 { outs.append(o) }
+    }
+    let mx = outs.max()!, mn = outs.min()!
+    check(mn > 0.6 && mx < 1.5, "smoothing evens a 30 Hz event train at 90 Hz: \(mn)…\(mx) (raw 0…3)")
+    // And irregular arrivals (gaps of 1–4 frames) too.
+    var irregular = MotionSmoother(timeConstant: 0.03)
+    var rng = SystemRandomNumberGenerator()
+    var next = 0
+    var outs2: [Float] = []
+    for i in 0..<900 {
+        var input: Float = 0
+        if i == next { let gap = Int.random(in: 1...4, using: &rng); input = Float(gap); next = i + gap }
+        let o = irregular.step(SIMD2(input, 0), dt: 1.0 / 90).x
+        if i >= 90 { outs2.append(o) }
+    }
+    check(outs2.max()! < 2.2 && outs2.min()! > 0.3, "smoothing evens irregular arrivals: \(outs2.min()!)…\(outs2.max()!) (raw 0…4)")
+
+    // Turning it off mid-stream releases what was held.
+    var flush = MotionSmoother(timeConstant: 0.04)
+    var got = flush.step(SIMD2(10, 0), dt: 1.0 / 90)
+    flush.timeConstant = 0
+    got += flush.step(.zero, dt: 1.0 / 90)
+    check(near(got.x, 10), "switching smoothing off flushes the rest: \(got.x)")
+    // Reset drops it (menu opened).
+    var drop = MotionSmoother(timeConstant: 0.04)
+    _ = drop.step(SIMD2(10, 0), dt: 1.0 / 90)
+    drop.reset()
+    check(drop.pending == .zero && drop.step(.zero, dt: 1.0 / 90) == .zero, "reset drops held motion")
+}
+
+// MARK: Event interval stats
+
+do {
+    var st = EventIntervalStats()
+    check(st.summary(now: 0) == nil, "no events, no summary")
+    for i in 0..<200 { st.record(Double(i) / 125) }   // 125 Hz for 1.6 s
+    let s = st.summary(now: 199.0 / 125)!
+    check(abs(s.rateHz - 126) < 2 && abs(s.meanIntervalMs - 8) < 0.01 && s.jitterMs < 0.01,
+          "steady 125 Hz: \(s)")
+    var j = EventIntervalStats()
+    var t = 0.0
+    for i in 0..<100 { t += i % 2 == 0 ? 0.010 : 0.030; j.record(t) }   // 10/30 ms alternating
+    let js = j.summary(now: t)!
+    check(abs(js.meanIntervalMs - 20) < 0.5 && abs(js.jitterMs - 10) < 0.5 && abs(js.maxIntervalMs - 30) < 0.01,
+          "alternating 10/30 ms: \(js)")
+    check(j.summary(now: t + 5) == nil, "old events age out of the window")
 }
 
 print("free-aim probe: \(checks) checks passed")

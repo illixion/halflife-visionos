@@ -447,6 +447,30 @@ final class GameSettings {
     var freeAimPivot: FreeAimPivot = AppSettingsStore.freeAimPivot {
         didSet { AppSettingsStore.freeAimPivot = freeAimPivot; applyFreeAim() }
     }
+    /// Body anchor: turn the zone toward a head that stays turned past the
+    /// dead band (FreeAimZone.Config.realign).
+    var freeAimRealign: Bool = AppSettingsStore.freeAimRealign {
+        didSet { AppSettingsStore.freeAimRealign = freeAimRealign; applyFreeAim() }
+    }
+    /// The re-align's dead band, degrees.
+    var freeAimRealignAngle: Double = AppSettingsStore.freeAimRealignAngle {
+        didSet { AppSettingsStore.freeAimRealignAngle = freeAimRealignAngle; applyFreeAim() }
+    }
+    /// The re-align's catch-up time constant, seconds.
+    var freeAimRealignTime: Double = AppSettingsStore.freeAimRealignTime {
+        didSet { AppSettingsStore.freeAimRealignTime = freeAimRealignTime; applyFreeAim() }
+    }
+    /// Spread GCMouse deltas over render frames (MotionSmoother), with free
+    /// aim or without.
+    var mouseSmoothing: Bool = AppSettingsStore.mouseSmoothing {
+        didSet { AppSettingsStore.mouseSmoothing = mouseSmoothing
+                 MouseInput.smoothing = mouseSmoothing }
+    }
+    /// The smoothing's mean delay, milliseconds.
+    var mouseSmoothingMs: Double = AppSettingsStore.mouseSmoothingMs {
+        didSet { AppSettingsStore.mouseSmoothingMs = mouseSmoothingMs
+                 MouseInput.smoothingSeconds = Float(mouseSmoothingMs / 1000) }
+    }
     /// +use picks what the gun points at rather than the view's centre.
     var freeAimUse: Bool = AppSettingsStore.freeAimUse {
         didSet { AppSettingsStore.freeAimUse = freeAimUse; applyFreeAim() }
@@ -547,6 +571,8 @@ final class GameSettings {
         Renderer.debugPanelEnabled = developerMode
         InputModeState.setting = inputMode
         MouseInput.sensitivity = Float(mouseSensitivity)
+        MouseInput.smoothing = mouseSmoothing
+        MouseInput.smoothingSeconds = Float(mouseSmoothingMs / 1000)
         GamepadInput.smoothTurn = stickSmoothTurn
         GamepadInput.turnSpeed = Float(stickTurnSpeed)
         Renderer.lookPitchEnabled = lookPitch
@@ -586,6 +612,9 @@ final class GameSettings {
         c.followTime = Float(freeAimFollow)
         c.recenter = freeAimRecenter
         c.recenterTime = Float(freeAimRecenterTime)
+        c.realign = freeAimRealign
+        c.realignAngle = Float(freeAimRealignAngle)
+        c.realignTime = Float(freeAimRealignTime)
         Renderer.freeAimConfig = c
         Renderer.freeAimPivot = freeAimPivot
         Renderer.freeAimUse = freeAimUse

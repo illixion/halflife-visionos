@@ -30,6 +30,14 @@ nonisolated final class MouseInput {
     nonisolated(unsafe) static var sensitivity: Float = 3
     /// Stock `m_yaw` / `m_pitch`: degrees per count at sensitivity 1.
     static let degreesPerCount: Float = 0.022
+    /// Spread each GCMouse delta over the render frames after it
+    /// (MotionSmoother; Settings > Mouse smoothing). Read by the render thread.
+    nonisolated(unsafe) static var smoothing = true
+    /// The smoothing's mean delay, seconds.
+    nonisolated(unsafe) static var smoothingSeconds: Float = 0.03
+
+    // Arrival times of motion events (main queue), for GET /state.
+    private var moveTimes = EventIntervalStats()
 
     // Motion accumulated between frames, GCMouse convention (+y = up).
     private let motion = RAVEMouseMotionAccumulator()
@@ -62,6 +70,7 @@ nonisolated final class MouseInput {
                 InputModeState.deviceGone(.keyboardMouse)
             }
         case .moved(let dx, let dy):
+            moveTimes.record(CACurrentMediaTime())
             if InputCatcher.shared.swallowsGameMouse { return }
             motion.add(dx: dx, dy: dy)
             Self.used()
@@ -95,6 +104,12 @@ nonisolated final class MouseInput {
 
     private static func used() {
         InputModeState.deviceUsed(.keyboardMouse, now: CACurrentMediaTime())
+    }
+
+    /// GCMouse motion events over the last second: rate, mean interval,
+    /// jitter and worst gap (GET /state › mouseMotion). Main queue.
+    @MainActor func moveStats() -> EventIntervalStats.Summary? {
+        moveTimes.summary(now: CACurrentMediaTime())
     }
 
     /// The motion since the last call, in GCMouse units (+y = up). Render

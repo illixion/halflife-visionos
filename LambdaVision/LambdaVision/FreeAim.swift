@@ -50,6 +50,21 @@ nonisolated struct FreeAimZone {
         var recenterDelay: Float = 0.4
         /// The recentre's time constant (s): 63% of the way back after this.
         var recenterTime: Float = 0.8
+        /// Body anchor: re-align the centre with the head when the head has
+        /// turned further than `realignAngle` from it, as VR games turn the
+        /// body under a head that stays turned. The body's forward is the room
+        /// yaw the game's yaw was anchored to (the head's yaw at the last
+        /// tracking recenter), so a player who physically turns, or a seat
+        /// that swivels, otherwise leaves the zone behind until visionOS
+        /// recentres.
+        var realign: Bool = true
+        /// Dead band (degrees): head-to-centre angles inside it never move
+        /// the centre.
+        var realignAngle: Float = 40
+        /// The catch-up's time constant (s) once it starts.
+        var realignTime: Float = 1.5
+        /// The catch-up stops within this many degrees of the head.
+        var realignSettle: Float = 5
     }
 
     /// What a move pushed past the zone (same convention as the offset):
@@ -68,7 +83,15 @@ nonisolated struct FreeAimZone {
     private(set) var idleTime: Float = 0
     /// Room yaw of the zone's centre from the last `updateCenter`.
     private(set) var centerYaw: Float?
+    /// Body anchor: how far the re-align has turned the centre off the
+    /// body's forward (CCW +, degrees). Zeroed by a tracking recenter.
+    private(set) var alignOffset: Float = 0
+    /// The re-align is catching up (between the dead band and the settle).
+    private(set) var realigning = false
+    /// The head's yaw less the centre's at the last `updateCenter`.
+    private(set) var headFromCenter: Float = 0
     private var follower: LazyViewFollower
+    private var snapFollower = false
 
     init(config: Config = Config()) {
         self.config = config
@@ -168,15 +191,44 @@ nonisolated struct FreeAimZone {
     mutating func updateCenter(bodyYaw: Float, headYaw: Float, dt: Float) -> Float {
         switch config.anchor {
         case .body:
-            centerYaw = bodyYaw
+            var diff = Self.wrap(headYaw - (bodyYaw + alignOffset))
+            if config.realign {
+                if !realigning, abs(diff) > config.realignAngle { realigning = true }
+                if realigning, dt > 0, dt <= 0.25 {
+                    // Exponential catch-up toward the head (exact for a still
+                    // head), until it is within the settle angle.
+                    let k = 1 - expf(-dt / max(config.realignTime, 1e-3))
+                    alignOffset = Self.wrap(alignOffset + diff * k)
+                    diff = Self.wrap(headYaw - (bodyYaw + alignOffset))
+                }
+                if realigning, abs(diff) < config.realignSettle { realigning = false }
+            } else {
+                realigning = false
+            }
+            centerYaw = Self.wrap(bodyYaw + alignOffset)
             follower.reset(to: Self.yawQuat(headYaw))   // a switch to head starts at the head
         case .head:
             follower.tuning.timeConstant = config.followTime
             follower.tuning.maxLag = config.followMaxLag * .pi / 180
+            if snapFollower { follower.reset(to: Self.yawQuat(headYaw)) }
             let q = follower.update(target: Self.yawQuat(headYaw), dt: dt)
             centerYaw = Self.yawOf(q)
+            realigning = false
         }
+        snapFollower = false
+        headFromCenter = Self.wrap(headYaw - centerYaw!)
         return centerYaw!
+    }
+
+    /// The tracking origin was re-anchored (visionOS recenter, relocalisation):
+    /// the body's forward is the head's again, so drop the re-align, put the
+    /// aim back in the middle and let the head anchor start on the head.
+    mutating func trackingRecentered() {
+        alignOffset = 0
+        realigning = false
+        yaw = 0
+        pitch = 0
+        snapFollower = true
     }
 
     /// Back to the centre, idle, the follow forgotten.
@@ -185,6 +237,9 @@ nonisolated struct FreeAimZone {
         pitch = 0
         idleTime = 0
         centerYaw = nil
+        alignOffset = 0
+        realigning = false
+        headFromCenter = 0
         follower = LazyViewFollower(tuning: follower.tuning)
     }
 
