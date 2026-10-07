@@ -1,4 +1,4 @@
-# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 12)
+# Sharp water reflections — handoff (2026-10-07, branch p8-water, round 13)
 
 Self-contained state of the glass/water reflection work for the next agent.
 Longer history: `docs/plans/modern-lighting.md` sections 3–3l, `ISSUES.md`.
@@ -54,9 +54,11 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
      **Back faces → occluders**: facing from the engine depth's +x/+y
      neighbours (the other side where one steps off an edge) against the
      mirrored eye (`SSPR_BACKFACE` 0.1); a table/counter top is one. Glass/
-     water-marked sources (stencil ≥ 16) keep only occluders (the counter
-     under the sink's water box). atomic_min key = 11-bit log distance |
-     occluder flag | 10-bit src y | 10-bit src x (a surface wins a tie).
+     water-marked sources (stencil ≥ 16) keep both what is behind them
+     (round 13: the counter front behind the sink's water box as a surface,
+     the counter top as an occluder) with a through-glass flag. atomic_min
+     key = 10-bit log distance | through-glass flag | occluder flag | 10-bit
+     src y | 10-bit src x (at one distance a plain surface wins).
      **Occluder claims** (round 12): an occluder also writes its key along
      the line to its +y source neighbour's image (and to its ±x neighbour's
      at the top's side edges); past the top's edge that neighbour is taken
@@ -82,7 +84,8 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
      Blocked nearer than the shown surface → **underside**: the top right
      above the point reached, × `waterDebug.y` ("waterUnderside", 0.35; 0 =
      probe), confidence from that sample's frame edge. Surface colour = 4
-     bilinear taps ±0.5 px (2×2 box); confidence = edge fade (15%) of the
+     bilinear taps ±0.5 px (2×2 box; ±3 px, an 8×8 box, for a surface seen
+     through glass or water); confidence = edge fade (15%) of the
      **mean exact projection of all surfaces**. Timer `gMirror`.
   Plane choice: `SharpWater.planes` = highest horizontal water row below the
   eye. Renderer encodes it before the composite only when an eye has one.
@@ -108,7 +111,23 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Underside a blur showing the cabinet (probe fallback) | **round 12 untested**: underside fill (`waterUnderside`) |
 | Close, crouched: row of blocks at the table's mirrored edge, stair-stepped rim/underside outline | **round 12 untested**: occluder claims to the top's edges, 4-way occluder gather, outline tests per sub-ray; view 91 see-through 9.5% → 0.05% |
 | Right eye only: dark stipple near the far legs (strong roll) | **not reproduced offline**; round 12's both-eye and rolled-stereo checks pass on 3c8241d and now; see round 12 |
-| Both eyes: blocky occluder edges under the near table | **round 12 untested**: as the close-up row |
+| Both eyes: blocky occluder edges under the near table | as the close-up row |
+| Round 12 on device: underside "looks correct now"; resolve 1.00, project 0.42 (facing away) | — |
+| Sink water sheet: dark blocks at its base where it meets the flood, reflection cut off below | **round 13 untested**: surfaces behind glass/water kept, blurred; view 97 "past a visible surface" 13.7% → 0.06% |
+
+### Cases the mirror must handle (each has a harness view)
+- A table or counter top seen from above (a back face to the reflected
+  ray): its underside, never on screen — 71–74, 81–88.
+- The same top seen nearly edge-on, eye level with it, close — 91.
+- An overhang over a recessed face (the bench's counter over its cabinet)
+  and a face meeting the flood — 31–33, 41, 51, 61–63.
+- A rolled head, in both eyes — 93/94/95 (@±30, by hand @±55).
+- A translucent water/glass brush meeting the flood (the c1a2 sink's water
+  box): what is behind it reflected continuously, the brush itself soft or
+  omitted, no dark blocks or hard cut at the waterline — 97 (and in sight
+  at 31–33, 62/63, 81–88).
+- Models over water (the headcrab at 33/63, the c2a3a ichthyosaur rule in
+  the composite).
 
 ### Round 11: why the table was transparent, and the fix
 The eye sees the steel table's top; the reflected ray always climbs, so it
@@ -188,6 +207,27 @@ in either eye. Residuals offline: stretched side-rim texels beside the
 underside at view 91 (dark, reads as underside), a few light dots near the
 far edge there.
 
+### Round 13: the sink's water sheet meeting the flood
+Round 9 rejected glass/water-marked pixels as mirror sources (their colour
+is the sheet's warped texture over what is behind: moiré), and round 11
+kept only occluders there (the counter top under the box). With round 12's
+underside fill, the box's mirror image had no surface but an occluder: a
+dark slab of "underside" with notches at the waterline, and the counter
+front's reflection cut off around it (DepthProbe "past a visible surface":
+13.7% at view 97, 7–13% at the bench views). Now such pixels also store
+what is behind them as a surface (the depth is the counter front's, since
+the sheet writes none), flagged in the key; the resolve shows it through an
+8×8-pixel box, so the sheet reads softly over a continuous counter front
+and the moiré stays away (mirrored glass/water hatching check unchanged).
+Cost: resolve +5% of round 12 offline (the flag rides in the key: a stencil
+read per candidate was +11%); expected device ≈ fill 0.03 + project 0.42 +
+resolve 1.05 ≈ 1.50 ms. What to look at: the sink sheet from 961.9 −527.2
+(eye −512.3), yaw 40, pitch 7.5: the counter front's reflection continuous
+under the sheet, the sheet's reflection a soft blue, no blocks.
+Known failing at 97 (also on round 12): see-through 5.4% under the near
+table where it is cut by the frame's bottom edge (its top's mirror images
+land off the frame, so no occluder claims reach there).
+
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror
   view on device was correct; the blend cancelled it.
@@ -224,6 +264,11 @@ Runs the real shaders on Mac dumps. Env: `SHARP=0` (probe only), `RIPPLE=x`
   91 9.5%; round 12 ≤ 0.9% everywhere (91 0.05%).
 - **both eyes** (round 12): project + resolve dispatched as the app does
   (grid depth 2, the same view in both slices): slices identical.
+- **past a visible surface** (round 13): of the sub-rays whose traced
+  reflected ray meets a visible surface first within 120 units, the
+  confidence-weighted share where the mirror shows something clearly past
+  it (> 1.05·hit + 8) must be ≤ 3%. 62e9483: 97 13.7%, 31–33 7–13%, 62/63
+  6–7%, 81–88 3–5%; round 13 ≤ 1.6%.
 - **rolled heads** (round 12): `vrdumpN.bin@deg` re-renders a dump rolled
   about its forward axis; 93/94@30 and 93/95@−30 are stereo pairs an eye
   apart along the rolled right vector (stereo rule as above).
@@ -252,11 +297,16 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
   transparent-table view; pitch −2/3/8/15/23/33, 87 −5, 88 11.6); probe 81.
 - 91 (eye 1023.4 −479.1 −543.5 = origin z −571.5, yaw 349.5, pitch 13: the
   device's close, crouched capture; eye level with the table top); probe 91.
+- 97 (eye 961.9 −527.2 −512.3, yaw 39.9, pitch 7.5, `default_fov 40` for
+  the device crop's scale: the sink's water sheet meeting the flood);
+  probe 97. (96 is the same pose at the default fov.)
 - 93 (eye 1023 −479 −514, yaw 349.5, pitch 35), 94 / 95 (2.5 units along
   the right vector of that view rolled +30° / −30°); probe 93.
   Groups as run: 9 10 11 +probe9; 31 32 33 +31; 41 +41; 51 +51; 61 +61;
   62 63 +62; 71–74 +71; 81–88 +81; 91 +91; 93 94 93@30 94@30 93@-30 95@-30
-  +93 (one probe per run: the first).
+  +93; 97 +97 (one probe per run: the first). Turning right runs ≈0.104°
+  per frame at `cl_yawspeed 10` (left ≈0.099°); `default_fov N` in the cfg
+  narrows the view.
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
 Each dump needs its own probe (`r_vrprobedump`) from the same origin.
 

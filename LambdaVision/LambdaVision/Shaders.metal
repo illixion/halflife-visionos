@@ -485,8 +485,8 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 // viewmodel or anything mirrored behind the eye is dropped; W is mirrored to
 // W' = (W.x, W.y, 2h − W.z) and projected back into the same eye, and the
 // texel it lands on keeps, by atomic min, the key of the nearest such point:
-// its mirrored distance (11 bits, log scale), an occluder flag (a back face,
-// below) and its source texel (10 + 10).
+// its mirrored distance (10 bits, log scale), a seen-through-glass-or-water
+// flag, an occluder flag (a back face, below) and its source texel (10 + 10).
 // ssprResolve: each target texel decodes its key (or, if empty, the nearest
 // of its four neighbours', filling the gaps a forward projection leaves),
 // samples the engine image at the source and writes it premultiplied by a
@@ -613,13 +613,15 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
         if (dot(normalize(n + 1e-9), normalize(mirroredEye - W0)) < -SSPR_BACKFACE)
             hole = 1;
     }
-    // behind glass or water only an occluder is kept (the c1a2 counter top
-    // under the sink's water box: without it the room showed through the
-    // counter there)
-    if (marked && hole == 0)
-        return;
-    const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 2047.0);
-    const uint key = (dist << 21) | (hole << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
+    // Behind glass or water (the c1a2 sink's water box) both are kept: the
+    // occluder (the counter top under the box: without it the room showed
+    // through the counter there) and the surface (the counter front behind
+    // the sheet: without it the box's mirror image was a hole, which the
+    // underside fill painted as a dark slab with notches at the waterline on
+    // the headset). The resolve blurs what such a surface shows, since its
+    // pixels hold the sheet's warped texture over it (the moiré).
+    const uint dist = uint(saturate(log2(1.0 + length(q)) / 15.0) * 1023.0);
+    const uint key = (dist << 22) | (uint(marked) << 21) | (hole << 20) | (min(gid.y, 1023u) << 10) | min(gid.x, 1023u);
     device atomic_uint *row = keys + uint(eye) * size.y * size.x;
     atomic_fetch_min_explicit(&row[target.y * size.x + target.x], key, memory_order_relaxed);
     // An occluder also claims the mirror between its own image and its
@@ -830,6 +832,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     // height — the rest of a level top — adds nothing), packed.
     float3 Ws[5];
     float2 Wsrc[5];
+    bool Wmk[5];                      // seen through glass or water
     float hz[3];
     int ns = 0, nh = 0;
     for (int k = 0; k < 9 && live; k++) {
@@ -849,7 +852,10 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             // nothing: one candidate covers it
             for (int m = 0; m < ns; m++)
                 if (abs(length(Ws[m] - E) - length(W - E)) < 2.0 + 0.02 * length(Ws[m] - E)) fresh = false;
-            if (fresh && ns < 5) { Ws[ns] = W; Wsrc[ns] = src; ns++; }
+            if (fresh && ns < 5) {
+                Wmk[ns] = ((cand[k] >> 21) & 1u) != 0;
+                Ws[ns] = W; Wsrc[ns] = src; ns++;
+            }
         }
     }
     // The texel covers several engine pixels and the boundary between two
@@ -913,6 +919,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             const bool nearBlock = min(min(b0, b1), min(b2, b3)) < 1e29;
             float best = 1e30, bestLen = 1e30;
             float2 bestSrc = float2(-1.0);
+            bool bestMk = false;
             float2 exactSum = 0.0;
             float exactN = 0.0;
             for (int k = 0; k < ns; k++) {
@@ -923,7 +930,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
                 exactSum += src; exactN += 1.0;
                 if (any(src < 0.0) || any(src >= 1.0)) continue;
-                if (ns == 1 && !nearBlock) { bestSrc = src; best = 0.0; continue; }   // one surface: no check needed
+                if (ns == 1 && !nearBlock) { bestSrc = src; best = 0.0; bestMk = Wmk[k]; continue; }   // one surface: no check needed
                 const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
                 const float3 ds = ssprRay(src, eye, p);
                 const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
@@ -938,7 +945,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 const float len = length(off);
                 if (len > b0 + 2.0) continue;
                 const float miss = length(off - r * dot(off, r)) + 0.01 * along;   // nearer wins a tie
-                if (miss < best) { best = miss; bestSrc = src; bestLen = len; }
+                if (miss < best) { best = miss; bestSrc = src; bestLen = len; bestMk = Wmk[k]; }
             }
             // if no surface checks out (the ray's point lands on the water
             // itself, or off the frame), the first surface's own source
@@ -946,7 +953,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             // sample left the texel part-empty, and texels of uneven coverage
             // showed as fine horizontal hatching and dark smudges on the
             // headset
-            if (bestSrc.x < 0.0 && ns > 0 && b0 > 1e29) bestSrc = Wsrc[0];
+            if (bestSrc.x < 0.0 && ns > 0 && b0 > 1e29) { bestSrc = Wsrc[0]; bestMk = Wmk[0]; }
             // Occluded: blocked nearer than the surface this ray shows.
             float f = 0.0, blockedNear = 1e30;
             float2 blockSrc = float2(-1.0);
@@ -996,7 +1003,11 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             // point sample there aliased fine source texture into moiré.
             // This replaces a half-size prefiltered copy of the engine image,
             // whose extra pass measured 1.75 ms on the headset.
-            const float2 h = 0.5 / float2(colorMap.get_width(), colorMap.get_height());
+            // Seen through glass or water, an 8 × 8-pixel box instead: the
+            // sheet's warped texture over the surface, mirrored at the
+            // grid's rate, was moiré; blurred it reads as the sheet softly
+            // over the counter front, continuous with the rest.
+            const float2 h = (bestMk ? 3.0 : 0.5) / float2(colorMap.get_width(), colorMap.get_height());
             half3 col = 0.0h;
             if (wSurf > 0.0)
                 col += half(wSurf * cs) * 0.25h * (colorMap.sample(s, bestSrc + float2(-h.x, -h.y), eye).rgb

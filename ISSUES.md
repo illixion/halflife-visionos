@@ -239,7 +239,14 @@ instead of deleting them.
   rolled-head stereo pairs and both eye slices (pass on round 11 too; the
   right-eye-only stipple was not reproduced). Resolve ×0.9 of round 11
   offline (≈1.1 ms expected), total ≈1.65 ms, still a little over budget.
-  Handoff: `docs/plans/sharp-water-handoff.md`.
+  Confirmed on device: underside "looks correct now"; resolve 1.00 ms.
+- **Sharp water, round 13: device check pending.** The sink's translucent
+  water sheet broke the reflection where it meets the flood (dark blocks,
+  hard cut): its pixels had kept only an occluder, which round 12 filled as
+  underside. They now also keep what is behind them as a surface, shown
+  blurred (no moiré). DepthProbe's new "past a visible surface" check: 13.7%
+  → 0.06% at the sink view. Expected mirror ≈1.50 ms. Handoff:
+  `docs/plans/sharp-water-handoff.md`.
 - **Graphics presets (planned):** Modern / Original, every effect still its
   own named setting underneath; see `docs/plans/modern-lighting.md`.
 - **Weapon Metal-pass polish.** Weapon viewmodels can render in a Swift
