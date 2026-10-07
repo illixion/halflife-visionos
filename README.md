@@ -455,9 +455,11 @@ signed by `build-and-sign` or launched with `DEBUGTRACE_SERVER=1`
 switches it On (an Xcode run too) or Off. App Store and TestFlight builds
 never serve it. The port is the first free one in 8651–8691 (the app logs
 `listening on port N`); every request needs the build's bearer token, and the
-first request from each client asks for approval in the main window.
-The app knocks on its own port every 5 s and rebuilds the server (on the same
-port when it can) if the listener stops answering; `avp-screenshot.sh` says
+first request from each client opens DebugTrace's "Allow debug access?" window
+(a window of its own, since the immersive space has no UIKit alert) with a
+chime that repeats every 8 s until someone answers; a decline sticks for the
+launch. The app knocks on its own port every 5 s and rebuilds the server (on
+the same port when it can) if the listener stops answering; `avp-screenshot.sh` says
 REFUSED (device up, nothing listening) or UNREACHABLE (no route, asleep, off
 the network) when it can't connect.
 
