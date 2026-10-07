@@ -79,6 +79,117 @@ private enum PanelPinch {
     static var pressed = Set<SpatialEventCollection.Event.ID>()
 }
 
+/// Gaze-and-pinch (and pointer) spatial events, from the immersive layer and
+/// from the invisible mouse-capture window (InputCatcher), which sits in
+/// front of the layer and so receives the pinches aimed at it. One handler,
+/// so a pinch does the same thing wherever it lands: fire in hands mode, a
+/// menu click, a bid for hands mode.
+@MainActor
+enum ImmersiveSpatialInput {
+    enum Source {
+        /// The CompositorLayer: selection rays in world space (ARKit, +Y up).
+        case layer
+        /// The catcher window's SpatialEventGesture in `.immersiveSpace`
+        /// coordinates: SwiftUI's convention, +Y down (points; only the
+        /// direction is used, so the scale doesn't matter).
+        case catcher
+
+        func worldDirection(_ d: Vector3D) -> SIMD3<Float> {
+            switch self {
+            case .layer: SIMD3<Float>(Float(d.x), Float(d.y), Float(d.z))
+            case .catcher: simd_normalize(SIMD3<Float>(Float(d.x), -Float(d.y), Float(d.z)))
+            }
+        }
+    }
+
+    static func handle(_ events: SpatialEventCollection, appModel: AppModel, source: Source) {
+        // When the stock Half-Life menu is up it owns gaze+pinch: a
+        // pinch clicks the item the eyes are on (like a visionOS
+        // window), and must NOT fire the weapon.
+        let menuActive = lambda_menu_active() != 0
+        for event in events {
+            // A mouse click can also arrive as a pointer event; with a
+            // mouse connected GCMouse owns clicks (MouseInput), so it
+            // must not fire or click the menu twice.
+            if event.kind == .pointer, MouseInput.connected {
+                // On the layer while the catcher is up: the pointer got past
+                // it (InputCatcher's watch reacts).
+                if source == .layer, event.phase == .active {
+                    InputCatcher.shared.pointerReachedLayer()
+                }
+                // Whether mouse clicks reach the immersive layer at
+                // all (ISSUES.md, mouse focus): log the first few.
+                if PointerProbe.logged < 8, event.phase == .active {
+                    PointerProbe.logged += 1
+                    AppLog.input.log("[LambdaVision] pointer event in the immersive space (ray \(event.selectionRay != nil ? "Y" : "N", privacy: .public))")
+                }
+                continue
+            }
+            // A pinch on a palm debug panel button: the system routed
+            // it to that tracking area, so it is the button's — not
+            // the trigger's, not the menu's.
+            if let control = PalmDebugPanel.Control(rawValue: event.trackingAreaIdentifier.rawValue) {
+                if event.phase == .active {
+                    if PanelPinch.pressed.insert(event.id).inserted {
+                        PalmDebugPanel.interaction.recordPress(control.rawValue, at: CACurrentMediaTime())
+                        Task { @MainActor in appModel.gameSettings.performDebugPanelControl(control) }
+                    }
+                } else {
+                    PanelPinch.pressed.remove(event.id)
+                }
+                continue
+            }
+            switch event.phase {
+            case .active:
+                let dir = event.selectionRay.map { source.worldDirection($0.direction) }
+                if menuActive {
+                    // Keep the cursor under the gaze while held (for
+                    // highlight), but click only ONCE per pinch —
+                    // .active repeats each frame.
+                    if let d = dir, let (mx, my) = Renderer.menuCursorFromGaze(d) {
+                        lambda_menu_set_cursor(Int32(mx), Int32(my))
+                        if MenuPinch.clicked.insert(event.id).inserted {
+                            lambda_menu_click()
+                        }
+                    }
+                    continue
+                }
+                // A look-and-pinch is the hands' bid for the input mode;
+                // outside hands mode it doesn't fire (the hands have
+                // stepped aside for the keyboard, mouse or gamepad).
+                if HandBid.seen.insert(event.id).inserted {
+                    InputModeState.deviceUsed(.hands, now: CACurrentMediaTime())
+                }
+                if InputModeState.current != .hands { continue }
+                // When immersive gesture input is on, the render-thread
+                // gestures own both hands (dominant index-curl fires,
+                // off-hand pinch drives the joystick), so the pinch must
+                // NOT also fire. Gate the press only — a release still
+                // clears below, so toggling mid-pinch can't stick fire.
+                if Renderer.gestureInputEnabled { continue }
+                // Stage the gaze ray BEFORE +attack so the shot
+                // aims where the eyes point (renderFrame converts
+                // it to an aim offset for the weapon code).
+                if let d = dir { Renderer.setGazeRay(direction: d) }
+                if PinchFire.active.insert(event.id).inserted,
+                   PinchFire.active.count == 1 {
+                    _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
+                }
+            case .ended, .cancelled:
+                HandBid.seen.remove(event.id)
+                if menuActive { MenuPinch.clicked.remove(event.id); continue }
+                if PinchFire.active.remove(event.id) != nil,
+                   PinchFire.active.isEmpty {
+                    _ = "-attack".withCString { lambda_gl_worker_cmd($0) }
+                    Renderer.setGazeRay(direction: nil)
+                }
+            @unknown default:
+                break
+            }
+        }
+    }
+}
+
 struct ImmersiveSpaceContent: CompositorContent {
 
     var appModel: AppModel
@@ -153,89 +264,7 @@ struct ImmersiveSpaceContent: CompositorContent {
             // A held pinch holds +attack (HL's automatic weapons fire while
             // the trigger is down); release/cancel lets go.
             layerRenderer.onSpatialEvent = { events in
-                // When the stock Half-Life menu is up it owns gaze+pinch: a
-                // pinch clicks the item the eyes are on (like a visionOS
-                // window), and must NOT fire the weapon.
-                let menuActive = lambda_menu_active() != 0
-                for event in events {
-                    // A mouse click can also arrive as a pointer event; with a
-                    // mouse connected GCMouse owns clicks (MouseInput), so it
-                    // must not fire or click the menu twice.
-                    if event.kind == .pointer, MouseInput.connected {
-                        // Whether mouse clicks reach the immersive layer at
-                        // all (ISSUES.md, mouse focus): log the first few.
-                        if PointerProbe.logged < 8, event.phase == .active {
-                            PointerProbe.logged += 1
-                            AppLog.input.log("[LambdaVision] pointer event in the immersive space (ray \(event.selectionRay != nil ? "Y" : "N", privacy: .public))")
-                        }
-                        continue
-                    }
-                    // A pinch on a palm debug panel button: the system routed
-                    // it to that tracking area, so it is the button's — not
-                    // the trigger's, not the menu's.
-                    if let control = PalmDebugPanel.Control(rawValue: event.trackingAreaIdentifier.rawValue) {
-                        if event.phase == .active {
-                            if PanelPinch.pressed.insert(event.id).inserted {
-                                PalmDebugPanel.interaction.recordPress(control.rawValue, at: CACurrentMediaTime())
-                                Task { @MainActor in appModel.gameSettings.performDebugPanelControl(control) }
-                            }
-                        } else {
-                            PanelPinch.pressed.remove(event.id)
-                        }
-                        continue
-                    }
-                    switch event.phase {
-                    case .active:
-                        let dir = event.selectionRay.map {
-                            SIMD3<Float>(Float($0.direction.x),
-                                         Float($0.direction.y),
-                                         Float($0.direction.z))
-                        }
-                        if menuActive {
-                            // Keep the cursor under the gaze while held (for
-                            // highlight), but click only ONCE per pinch —
-                            // .active repeats each frame.
-                            if let d = dir, let (mx, my) = Renderer.menuCursorFromGaze(d) {
-                                lambda_menu_set_cursor(Int32(mx), Int32(my))
-                                if MenuPinch.clicked.insert(event.id).inserted {
-                                    lambda_menu_click()
-                                }
-                            }
-                            continue
-                        }
-                        // A look-and-pinch is the hands' bid for the input mode;
-                        // outside hands mode it doesn't fire (the hands have
-                        // stepped aside for the keyboard, mouse or gamepad).
-                        if HandBid.seen.insert(event.id).inserted {
-                            InputModeState.deviceUsed(.hands, now: CACurrentMediaTime())
-                        }
-                        if InputModeState.current != .hands { continue }
-                        // When immersive gesture input is on, the render-thread
-                        // gestures own both hands (dominant index-curl fires,
-                        // off-hand pinch drives the joystick), so the pinch must
-                        // NOT also fire. Gate the press only — a release still
-                        // clears below, so toggling mid-pinch can't stick fire.
-                        if Renderer.gestureInputEnabled { continue }
-                        // Stage the gaze ray BEFORE +attack so the shot
-                        // aims where the eyes point (renderFrame converts
-                        // it to an aim offset for the weapon code).
-                        if let d = dir { Renderer.setGazeRay(direction: d) }
-                        if PinchFire.active.insert(event.id).inserted,
-                           PinchFire.active.count == 1 {
-                            _ = "+attack".withCString { lambda_gl_worker_cmd($0) }
-                        }
-                    case .ended, .cancelled:
-                        HandBid.seen.remove(event.id)
-                        if menuActive { MenuPinch.clicked.remove(event.id); continue }
-                        if PinchFire.active.remove(event.id) != nil,
-                           PinchFire.active.isEmpty {
-                            _ = "-attack".withCString { lambda_gl_worker_cmd($0) }
-                            Renderer.setGazeRay(direction: nil)
-                        }
-                    @unknown default:
-                        break
-                    }
-                }
+                ImmersiveSpatialInput.handle(events, appModel: appModel, source: .layer)
             }
             KeyboardInput.shared.start()
             Renderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
