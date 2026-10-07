@@ -48,6 +48,8 @@ nonisolated final class MouseInput {
     }
 
     @MainActor private func handle(_ event: RAVEMouseEvent) {
+        // Counted for the input catcher's diagnostics (GET /state).
+        InputCatcher.shared.recordMouse(event)
         switch event {
         case .connected(let name, _):
             AppLog.input.log("[LambdaVision] mouse connected: \(name ?? "unknown", privacy: .public)")

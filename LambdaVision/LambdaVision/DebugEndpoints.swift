@@ -439,6 +439,13 @@ enum DebugEndpoints {
         let hud: HUD?
         let frames: Frames
         let debugServerPort: Int?
+        let mouseConnected: Bool
+        /// GCMouse events (moves, buttons, wheel) in the last second.
+        let mouseEventsLastSecond: Int
+        let mouseMovesLastSecond: Int
+        let mouseEventsTotal: Int
+        let lastMouseEventAgoMs: Double?
+        let inputCatcher: InputCatcher.Status
     }
 
     static func stateReply() throws(DebugError) -> some Encodable & Sendable {
@@ -487,7 +494,13 @@ enum DebugEndpoints {
             player: player, hud: hud,
             frames: .init(lastFrameAgoMs: FrameCapture.shared.secondsSinceLastFrame.map { $0 * 1000 },
                           lastCapture: FrameCapture.shared.lastInfo),
-            debugServerPort: LambdaDebugServer.port)
+            debugServerPort: LambdaDebugServer.port,
+            mouseConnected: MouseInput.connected,
+            mouseEventsLastSecond: InputCatcher.shared.mouseEventsLastSecond,
+            mouseMovesLastSecond: InputCatcher.shared.mouseMovesLastSecond,
+            mouseEventsTotal: InputCatcher.shared.mouseEventsTotal,
+            lastMouseEventAgoMs: InputCatcher.shared.secondsSinceMouseEvent.map { $0 * 1000 },
+            inputCatcher: InputCatcher.shared.status)
     }
 
     // MARK: Settings table
@@ -593,6 +606,9 @@ enum DebugEndpoints {
         .number("stickTurnSpeed", \.stickTurnSpeed, 45...240),
         .flag("lookPitch", \.lookPitch),
         .flag("hideParkedParts", \.hideParkedParts),
+        .flag("inputCatcher", \.inputCatcher, note: "the invisible mouse-capture window; GET /state › inputCatcher and mouseEventsLastSecond show its effect"),
+        .flag("inputCatcherRecenter", \.inputCatcherRecenter, note: "reopen the catcher in front of the player when the pointer leaves it"),
+        .choice("inputCatcherFill", \.inputCatcherFill, note: "not stored; clear (default), faint (alpha 0.003), visible (tint + outline, to see where it is)"),
     ]
 
     private static func settingsReply(_ settings: GameSettings) -> JSONValue {
@@ -673,7 +689,7 @@ enum DebugEndpoints {
         let sources = FrameCapture.Source.allCases.map(\.rawValue)
         return [
             // Queries
-            .query("state", "Start here. Engine and immersive-space state, the loaded map and game, input mode, the player's view origin, view angles and velocity, the HEV HUD values (health, armor, weapon, ammo), and the last frame / capture.",
+            .query("state", "Start here. Engine and immersive-space state, the loaded map and game, input mode, the player's view origin, view angles and velocity, the HEV HUD values (health, armor, weapon, ammo), the last frame / capture, and the mouse: GCMouse events in the last second (mouseEventsLastSecond) and the invisible mouse-capture window (inputCatcher).",
                    releaseSafe: true) { _ in
                 try stateReply()
             },

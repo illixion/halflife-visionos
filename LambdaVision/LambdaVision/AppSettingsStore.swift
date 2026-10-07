@@ -305,6 +305,17 @@ enum AppSettingsStore {
         get { bool(lookPitchKey, false) }
         set { defaults.set(newValue, forKey: lookPitchKey) }
     }
+    private static let inputCatcherKey         = "lambdavision.settings.inputCatcher"
+    private static let inputCatcherRecenterKey = "lambdavision.settings.inputCatcherRecenter"
+    /// The invisible mouse-capture window (InputCatcher).
+    static var inputCatcher: Bool {
+        get { bool(inputCatcherKey, true) }
+        set { defaults.set(newValue, forKey: inputCatcherKey) }
+    }
+    static var inputCatcherRecenter: Bool {
+        get { bool(inputCatcherRecenterKey, true) }
+        set { defaults.set(newValue, forKey: inputCatcherRecenterKey) }
+    }
 
     // MARK: HEV holograms outside hands mode
     private static let flatHUDPlacementKey = "lambdavision.settings.flatHUDPlacement"

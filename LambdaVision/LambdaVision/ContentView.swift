@@ -133,6 +133,8 @@ struct ContentView: View {
                 WiFiManageView(library: appModel.library)
             }
             .onAppear { runSmokeTests() }
+            // The mouse-capture window opens and closes from here.
+            .capturesInputCatcherActions()
             // Library scan + weapon warm-up; rerun the warm-up when the
             // selection or the installed games change before the game starts.
             .task {
@@ -143,6 +145,7 @@ struct ContentView: View {
                                             await openImmersiveSpace(id: appModel.immersiveSpaceID) == .opened
                                         },
                                         dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() })
+                InputCatcher.shared.start(appModel: appModel)
                 await appModel.prepare()
             }
             .onChange(of: appModel.library.selectionVersion) { Task { await appModel.warmUp() } }

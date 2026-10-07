@@ -193,6 +193,9 @@ struct SettingsView: View {
                     }
                     .disabled(!settings.stickSmoothTurn)
                     Toggle("Look up/down with mouse and stick", isOn: $settings.lookPitch)
+                    Toggle("Mouse capture window", isOn: $settings.inputCatcher)
+                    Toggle("Re-centre it when the pointer leaves", isOn: $settings.inputCatcherRecenter)
+                        .disabled(!settings.inputCatcher)
                     Picker("HEV holograms", selection: $settings.flatHUDPlacement) {
                         ForEach(FlatHUDPlacement.allCases) { Text($0.label).tag($0) }
                     }
@@ -203,7 +206,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Keyboard, mouse & gamepad")
                 } footer: {
-                    Text("“Input mode” on Auto follows the last thing you used: a key, the mouse or the gamepad switches to it at once, and a look-and-pinch brings the hands back (once the other device has been still for a second). With a keyboard, mouse or gamepad the game plays like the desktop original in stereo: the weapon is the classic viewmodel in front of you, shots go where you look (the crosshair marks it), the body’s arms stop following your hands and the hand gestures rest. Movement always reaches full run speed. The mouse and the right stick turn you smoothly; Z and X snap-turn. “Look up/down” adds mouse and stick pitch to your head’s; it tilts the game’s horizon away from the room’s, which some find uncomfortable, and hides the first-person body while a tilt is set. “HEV holograms” on “Follow view” moves health and suit to the lower left of your view and ammo to the lower right, like Half-Life 2; they trail your head slightly, never far, instead of sticking to your eyes. “Attached to hands” keeps them on your hands as in hands mode. Rebind keys in the game’s menu (Configuration › Controls).")
+                    Text("“Input mode” on Auto follows the last thing you used: a key, the mouse or the gamepad switches to it at once, and a look-and-pinch brings the hands back (once the other device has been still for a second). With a keyboard, mouse or gamepad the game plays like the desktop original in stereo: the weapon is the classic viewmodel in front of you, shots go where you look (the crosshair marks it), the body’s arms stop following your hands and the hand gestures rest. Movement always reaches full run speed. The mouse and the right stick turn you smoothly; Z and X snap-turn. “Look up/down” adds mouse and stick pitch to your head’s; it tilts the game’s horizon away from the room’s, which some find uncomfortable, and hides the first-person body while a tilt is set. “HEV holograms” on “Follow view” moves health and suit to the lower left of your view and ammo to the lower right, like Half-Life 2; they trail your head slightly, never far, instead of sticking to your eyes. “Attached to hands” keeps them on your hands as in hands mode. “Mouse capture window” keeps an invisible window in front of you while you play with a mouse: visionOS only lets the game read the mouse while the pointer is over one of its windows. It steps aside for the menu and the console, and a look-and-pinch on it hands control back to your hands. “Re-centre” reopens it in front of you when the pointer slips off it. Rebind keys in the game’s menu (Configuration › Controls).")
                 }
 
                 Section {

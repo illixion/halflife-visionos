@@ -169,6 +169,12 @@ nonisolated enum InputModeState {
         selector.deviceGone(device)
     }
 
+    /// When `device` was last used (CACurrentMediaTime clock), or nil.
+    static func lastUsed(_ device: InputMode) -> TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        return lastDevice[device]
+    }
+
     /// Diagnostics line: the mode, why, and when each device last spoke.
     static func diagLine(now: TimeInterval) -> String {
         lock.lock(); defer { lock.unlock() }

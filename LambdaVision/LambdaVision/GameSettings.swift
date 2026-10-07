@@ -385,6 +385,22 @@ final class GameSettings {
                  Renderer.hideParkedParts = hideParkedParts }
     }
 
+    /// The invisible mouse-capture window over the immersive space in
+    /// keyboard+mouse mode (InputCatcher).
+    var inputCatcher: Bool = AppSettingsStore.inputCatcher {
+        didSet { AppSettingsStore.inputCatcher = inputCatcher
+                 InputCatcher.shared.enabled = inputCatcher }
+    }
+    /// Reopen the catcher in front of the player when the pointer leaves it.
+    var inputCatcherRecenter: Bool = AppSettingsStore.inputCatcherRecenter {
+        didSet { AppSettingsStore.inputCatcherRecenter = inputCatcherRecenter
+                 InputCatcher.shared.recenterOnExit = inputCatcherRecenter }
+    }
+    /// What the catcher draws, for A/B on the headset. Not stored.
+    var inputCatcherFill: InputCatcherFill = .clear {
+        didSet { InputCatcher.shared.fill = inputCatcherFill }
+    }
+
     init() {
         applyRendererStatics()
     }
@@ -428,6 +444,9 @@ final class GameSettings {
         GamepadInput.smoothTurn = stickSmoothTurn
         GamepadInput.turnSpeed = Float(stickTurnSpeed)
         Renderer.lookPitchEnabled = lookPitch
+        InputCatcher.shared.enabled = inputCatcher
+        InputCatcher.shared.recenterOnExit = inputCatcherRecenter
+        InputCatcher.shared.fill = inputCatcherFill
         applyHEVHUD()
     }
 

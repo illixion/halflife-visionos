@@ -331,6 +331,11 @@ struct LambdaVisionApp: App {
         // system alert.
         DebugApprovalWindow()
 
+        // The invisible mouse-capture window (InputCatcher): over the
+        // immersive space the system only sends GCMouse events to the app
+        // while the pointer is over one of its windows.
+        InputCatcherWindow()
+
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }
