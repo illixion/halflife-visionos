@@ -98,6 +98,11 @@ final class InputCatcher {
     }
     var outline = false
     var material = false
+    /// Step the alpha up on its own when GCMouse stays silent. Off: draw
+    /// exactly `alpha`, for A/B tests at a fixed value.
+    var autoStep = true {
+        didSet { if !autoStep { autoAlpha = nil } }
+    }
 
     // State, for the view and GET /state.
     private(set) var isOpen = false
@@ -349,7 +354,7 @@ final class InputCatcher {
     /// GCMouse silent while a mouse is in use and the catcher is up: the
     /// pointer probably goes through it, so draw a little more.
     private func stepAlphaIfMouseSilent(now: TimeInterval) {
-        guard !catchConfirmed, MouseInput.connected,
+        guard autoStep, !catchConfirmed, MouseInput.connected,
               InputModeState.current == .keyboardMouse || InputModeState.setting == .keyboardMouse else { return }
         let quietSince = max(openedAt, lastStepAt, mouseEvents.lastAt ?? 0)
         guard now - quietSince >= Self.silenceBeforeStep else { return }
@@ -378,7 +383,7 @@ final class InputCatcher {
         switch finding {
         case .pointerPassedCatcher:
             AppLog.input.error("[InputCatcher] a pointer event reached the immersive layer with the catcher up")
-            if !catchConfirmed { stepAlpha(now: now, why: "pointer reached the layer") }
+            if autoStep, !catchConfirmed { stepAlpha(now: now, why: "pointer reached the layer") }
         case .pointerOnCatcherMouseSilent:
             AppLog.input.error("[InputCatcher] the pointer moves on the catcher but GCMouse is silent (alpha \(String(format: "%.3f", self.effectiveAlpha), privacy: .public))")
         }

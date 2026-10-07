@@ -611,6 +611,7 @@ enum DebugEndpoints {
         .number("inputCatcherAlpha", \.inputCatcherAlpha, 0...0.2, note: "the catcher's fill opacity; the pointer ignores undrawn pixels. The catcher steps its effective alpha up on its own when GCMouse stays silent (GET /state › inputCatcher.effectiveAlpha)"),
         .flag("inputCatcherOutline", \.inputCatcherOutline, note: "not stored; draw the catcher's outline and label to see where it is"),
         .flag("inputCatcherMaterial", \.inputCatcherMaterial, note: "not stored; fill with .ultraThinMaterial at inputCatcherAlpha instead of white"),
+        .flag("inputCatcherAutoStep", \.inputCatcherAutoStep, note: "not stored; false draws exactly inputCatcherAlpha (no automatic step-up when GCMouse is silent)"),
     ]
 
     private static func settingsReply(_ settings: GameSettings) -> JSONValue {

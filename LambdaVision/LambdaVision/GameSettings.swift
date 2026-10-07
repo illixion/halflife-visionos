@@ -411,6 +411,10 @@ final class GameSettings {
     var inputCatcherMaterial: Bool = false {
         didSet { InputCatcher.shared.material = inputCatcherMaterial }
     }
+    /// Debug: let the catcher raise its alpha when GCMouse stays silent. Not stored.
+    var inputCatcherAutoStep: Bool = true {
+        didSet { InputCatcher.shared.autoStep = inputCatcherAutoStep }
+    }
 
     init() {
         applyRendererStatics()
