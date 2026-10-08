@@ -211,7 +211,7 @@ source "$CONF_FILE"
 DEVICE_LIST=$(xcrun devicectl list devices 2>/dev/null || true)
 _device_uuid() {
     grep -v "simulated" \
-        | grep -oiE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' \
+        | grep -oiE '[0-9A-F]{8}-[0-9A-F]{16}|[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' \
         | head -1
 }
 DEVICE_ID=$(printf '%s\n' "$DEVICE_LIST" | grep -E "^${DEVICE_NAME}[[:space:]]" | _device_uuid || true)
