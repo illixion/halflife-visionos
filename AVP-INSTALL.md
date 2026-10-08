@@ -9,7 +9,7 @@ Lambda VisionPro is Half-Life running natively on Apple Vision Pro: the [Xash3D-
 - LLVM's `llvm-objcopy`, which the engine build needs (`brew install llvm`)
 - Apple Vision Pro. The app builds for the device only: Metal 4 (`CompositorServices.MTL4`) isn't available in the visionOS Simulator.
 - A Steam account that owns Half-Life. `scripts/fetch-assets.sh` downloads SteamCMD to `~/bin/steamcmd` if it isn't there yet.
-- Room for ANGLE's first build, which starts with a ~12 GiB `gclient sync`
+- Room for the sources and the prebuilt engine archives, or, if you build ANGLE yourself, its first ~12 GiB `gclient sync` (see Build from source)
 
 ## Your game files
 
@@ -22,6 +22,14 @@ Nothing from Half-Life is in this repository or in the app. Xash3D-FWGS expects 
    ```
 
    SteamCMD asks for your password and any Steam Guard code; the script never takes them as arguments or stores them. About 507 MB lands in `HalfLifeAssets/` (gitignored): `valve/`, plus the official HD pack in `valve_hd/`.
+
+   For Opposing Force (app 50) and Blue Shift (app 130), add them to the same call, optionally with `--zip` to write files for importing on the headset:
+
+   ```bash
+   ./scripts/fetch-assets.sh --zip YOUR_STEAM_USERNAME 50 130
+   ```
+
+   Both expansions need your Steam account to own them. Their folders (`gearbox*`, `bshift*`) go into `HalfLifeAssets/` alongside `valve/`, and their zips into `build/asset-zips/`.
 2. Build and install the app once (see below), so its data container exists on the headset.
 3. Copy `scripts/build-signing.conf.example` to `scripts/build-signing.conf` (gitignored) and set:
    - `DEVICE_NAME`: your headset's name as `xcrun devicectl list devices` shows it (the example uses `Apple Vision Pro`)
@@ -32,9 +40,13 @@ Nothing from Half-Life is in this repository or in the app. Xash3D-FWGS expects 
    ./scripts/push-assets.sh
    ```
 
-   This copies every gamedir (`valve/`, `valve_hd/`, mods) into the app's `Documents/GameData` with `devicectl`, and turns the HD pack on with a `vfs.cfg`. Later pushes skip unchanged files, and the data survives reinstalling over the existing app. Deleting the app from the headset wipes it; the app then shows a warning, and you run `push-assets.sh` again.
+   This copies every gamedir (`valve/`, `valve_hd/`, `gearbox/`, `bshift/`, mods) into the app's `Documents/GameData` with `devicectl`, and turns the HD pack on with a `vfs.cfg`. Later pushes skip unchanged files, and the data survives reinstalling over the existing app. Deleting the app from the headset wipes it; the app then shows a warning, and you run `push-assets.sh` again.
 
-To bake the assets into the app bundle instead, build with `BUNDLE_HL_ASSETS=1` (for example `xcodebuild ... build BUNDLE_HL_ASSETS=1`).
+   Without a cable, send the same folders from the headset: open **Manage over Wi-Fi** in the app, or AirDrop the zips from `build/asset-zips/` and choose *Open in LambdaVision*. The README's [Expansions and mods](README.md#expansions-and-mods) section covers all routes.
+
+5. Choose the game. The main window lists every installed game, Opposing Force and Blue Shift included. Pick one and the app starts it. Switching games needs an app relaunch, so relaunch after picking a different one.
+
+To bake the assets into the app bundle instead, build with `BUNDLE_HL_ASSETS=1` (for example `xcodebuild ... build BUNDLE_HL_ASSETS=1`). Bundled assets are read-only; the app doesn't normalize them.
 
 ## Build from source
 
@@ -50,7 +62,14 @@ cd -         # back into the checkout
 
 Without them, Xcode fails at package resolution, before it compiles anything.
 
-From the repository root, fetch the pinned engine sources, then build the two engine artifacts once. All three scripts are idempotent, so rerunning them later is a fast no-op:
+The quickest route is the prebuilt engine archives, which is what the Xcode build uses by default. From the repository root:
+
+```bash
+./scripts/prebuilt-keys.sh      # the release tags your checkout needs
+./scripts/fetch-prebuilts.sh    # download what's missing (never overwrites)
+```
+
+Prebuilt releases include the built-in game ports (Opposing Force and Blue Shift). To build the engine yourself instead, from the repository root, fetch the pinned engine sources, then build the two engine artifacts once. All three scripts are idempotent, so rerunning them later is a fast no-op:
 
 ```bash
 ./VisionPort/setup.sh                 # pinned xash3d-fwgs, hlsdk-portable and MoltenVK, with the visionOS patches
@@ -85,6 +104,7 @@ Then push your game files as described above.
 
 ## Notes
 
-- The main input is hand tracking: hand-tracked aim, an off-hand locomotion joystick, gaze-and-pinch menus, a radial weapon menu and finger-gun fire. The README describes the VR input as proof-of-concept quality, functional but rough; [ISSUES.md](ISSUES.md) lists the specifics. The app also reads an extended gamepad and a hardware keyboard (`GamepadInput.swift`, `KeyboardInput.swift`).
+- The main input is hand tracking: hand-tracked aim, an off-hand locomotion joystick, gaze-and-pinch menus, a radial weapon menu and finger-gun fire. The README describes the VR input as proof-of-concept quality, functional but rough; [ISSUES.md](ISSUES.md) lists the specifics.
+- Keyboard, mouse and gamepad also work. With a mouse connected, a *Click to lock mouse* panel appears first; clicking it hands the mouse to the game, and moving the pointer off the game or opening the menu releases it. The Settings window's *Ask before locking the mouse* turns the panel off. Free aim moves the weapon inside a zone in front of you and only turns your body at the zone's edge; its size and centring are in Settings.
 - The settings window covers render scale, gamma and brightness, snap-turn angle, audio volumes, dominant hand, gesture toggles, and the stock Half-Life menu and console.
 - Half-Life is a trademark of Valve Corporation. This is a fan-made, non-commercial port, not affiliated with or endorsed by Valve.
