@@ -1,6 +1,10 @@
 # Installing Lambda VisionPro on Apple Vision Pro
 
-Lambda VisionPro is Half-Life running natively on Apple Vision Pro: the [Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs) engine and [hlsdk-portable](https://github.com/FWGS/hlsdk-portable), with Xash3D's `ref_gl` renderer running on Metal through [ANGLE](https://github.com/google/angle) and presented with Compositor Services. You play in a full immersive space, with hand-tracked weapons and locomotion. It is distributed on GitHub only, as source; you build it yourself and bring your own copy of Half-Life.
+Lambda VisionPro is Half-Life running natively on Apple Vision Pro: the [Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs) engine and [hlsdk-portable](https://github.com/FWGS/hlsdk-portable), with Xash3D's `ref_gl` renderer running on Metal through [ANGLE](https://github.com/google/angle) and presented with Compositor Services. You play in a full immersive space, with hand-tracked weapons and locomotion. It is distributed on GitHub only, as source and as an unsigned `.ipa` you re-sign yourself; either way you bring your own copy of Half-Life.
+
+## Quickest route: the unsigned .ipa
+
+Every change to `main` that isn't docs-only is built into its own GitHub release (`v0.1.0-<commit>`, all kept). The newest one carries `LambdaVision-unsigned.ipa`; the stable link is `releases/latest/download/LambdaVision-unsigned.ipa`. It already contains the engine, ANGLE and the Opposing Force and Blue Shift ports, so nothing else needs building. Re-sign it with your own Apple ID or developer team (Sideloadly, AltStore, or Xcode's Devices window after re-signing) and install it on the headset, then follow Your game files below to get Half-Life onto the device. Skip What you need and Build from source unless you want to change the code.
 
 ## What you need
 
@@ -9,7 +13,7 @@ Lambda VisionPro is Half-Life running natively on Apple Vision Pro: the [Xash3D-
 - LLVM's `llvm-objcopy`, which the engine build needs (`brew install llvm`)
 - Apple Vision Pro. The app builds for the device only: Metal 4 (`CompositorServices.MTL4`) isn't available in the visionOS Simulator.
 - A Steam account that owns Half-Life. `scripts/fetch-assets.sh` downloads SteamCMD to `~/bin/steamcmd` if it isn't there yet.
-- Room for the sources and the prebuilt engine archives, or, if you build ANGLE yourself, its first ~12 GiB `gclient sync` (see Build from source)
+- Room for the sources and, if no release carries a matching ANGLE, its first ~12 GiB `gclient sync` (see Build from source)
 
 ## Your game files
 
@@ -62,14 +66,7 @@ cd -         # back into the checkout
 
 Without them, Xcode fails at package resolution, before it compiles anything.
 
-The quickest route is the prebuilt engine archives, which is what the Xcode build uses by default. From the repository root:
-
-```bash
-./scripts/prebuilt-keys.sh      # the release tags your checkout needs
-./scripts/fetch-prebuilts.sh    # download what's missing (never overwrites)
-```
-
-Prebuilt releases include the built-in game ports (Opposing Force and Blue Shift). To build the engine yourself instead, from the repository root, fetch the pinned engine sources, then build the two engine artifacts once. All three scripts are idempotent, so rerunning them later is a fast no-op:
+Building from source means building the engine yourself, unless a release already carries it. From the repository root, first try `./scripts/prebuilts.sh fetch` (seconds): it restores ANGLE, libxash and the Opposing Force / Blue Shift ports that were built from your exact sources, from the newest release that has them, and skips whatever you already have. Then fetch the pinned engine sources and build what's still missing. All the scripts are idempotent, so rerunning them later is a fast no-op. Ports not restored come from `./VisionPort/build_game.sh` (see the README):
 
 ```bash
 ./VisionPort/setup.sh                 # pinned xash3d-fwgs, hlsdk-portable and MoltenVK, with the visionOS patches

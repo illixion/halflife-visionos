@@ -301,8 +301,8 @@ are the end-to-end tests for the mod path.
   failing mod build never blocks the release — the app links whatever game
   archives exist and a generated `compiled_games` table tells the app which
   ports are inside. Local compilation stays the full-support path.
-- `scripts/fetch-prebuilts.sh`, called from `pre-build.sh`, downloads the
-  release assets when local builds are missing.
+- Superseded: CI no longer publishes the archives. `build.yml` caches them with
+  `actions/cache` and publishes one unsigned `.ipa`.
 - Push/PR: unsigned `xcodebuild` compile check, no assets, no signing.
 
 #### 7.1 — Game library + import (AirDrop / Files)

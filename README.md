@@ -102,35 +102,27 @@ continuously — the hand input this app uses was converged into `RAVEInput` out
 this app and two others — and a path reference keeps "move this into the package
 and update its callers" a single atomic edit.
 
+**Just want to run it?** Download `LambdaVision-unsigned.ipa` from the latest
+release and re-sign it with your own team (see [AVP-INSTALL.md](AVP-INSTALL.md)).
+The rest of this section is for building from source.
+
 Update `DEVELOPMENT_TEAM` in the LambdaVision target's signing settings to
-your team ID. The app links three prebuilt engine archives that aren't in
-git: `libxash.a` (engine + Half-Life game code), `libANGLE.a` (GLES → Metal)
-and ANGLE's headers. There are two ways to get them.
+your team ID. The app links three engine archives that aren't in git:
+`libxash.a` (engine + Half-Life game code), `libANGLE.a` (GLES → Metal) and
+ANGLE's headers. They are built by scripts in this repo; the pre-build hook
+(`scripts/pre-build.sh`) fetches the sources (`xash3d-fwgs`, `hlsdk-portable`,
+`MoltenVK.xcframework`) and stops with an error naming the build script when
+an archive is missing. Before that, the hook restores what it can from GitHub
+Releases (`scripts/prebuilts.sh fetch`): ANGLE, libxash and the Opposing Force /
+Blue Shift ports, each from the newest release that carries the build made from
+your exact sources. It never overwrites a local file, and with no match (sources
+edited, offline) it leaves the build-it-yourself path below.
 
-**Prebuilt (default).** Just build in Xcode. The pre-build hook
-(`scripts/pre-build.sh`) fetches the sources (`xash3d-fwgs`,
-`hlsdk-portable`, `MoltenVK.xcframework`), then `scripts/fetch-prebuilts.sh`
-downloads whichever archive is missing from this repo's GitHub Releases. The
-release tags are content keys (`scripts/prebuilt-keys.sh`: pinned upstream
-revisions plus hashes of the patches and build scripts), so you only ever get
-archives built from exactly the sources in your checkout. Run the script by
-hand to see what it does:
-
-```bash
-./scripts/prebuilt-keys.sh      # the release tags your checkout needs
-./scripts/fetch-prebuilts.sh    # download what's missing (never overwrites)
-```
-
-It never replaces a local file and never fails the build. When there's no
-matching release (you're offline, you've edited a patch, or CI hasn't built
-these sources yet), the hook stops with an error naming the build script to
-run instead. Prebuilt releases include the built-in game ports (Opposing
-Force, Blue Shift) that built successfully in CI; those are best-effort.
-
-**Build locally (full support).** Needed when you change the engine, the
-patches or ANGLE, and for compiling mods. These are the same scripts CI runs:
+**Build locally.** These are the same scripts CI runs. Try the fetch first;
+each build step below is only needed for what it doesn't restore:
 
 ```bash
+./scripts/prebuilts.sh fetch              # ANGLE, libxash, ports from a release (seconds)
 ./VisionPort/build_xash_libxash.sh        # libxash.a (needs brew llvm, Python 3)
 XR_SIM=1 ./VisionPort/build_xash_libxash.sh  # libxash-sim.a, simulator builds only
 ./VisionPort/build_angle_visionos.sh      # ANGLE at its pinned revision: ~12 GiB
@@ -139,9 +131,7 @@ XR_SIM=1 ./VisionPort/build_xash_libxash.sh  # libxash-sim.a, simulator builds o
                                           # a mod's game code → libgame-<gamedir>.a
 ```
 
-All are idempotent, and rerunning after a successful build is quick. A local
-build is never overwritten by a fetch; delete an archive to go back to the
-prebuilt one. After that, build & run on your AVP from Xcode as normal.
+All are idempotent, and rerunning after a successful build is quick. After that, build & run on your AVP from Xcode as normal.
 
 ## Half-Life assets — pre-25th anniversary build
 
@@ -413,7 +403,7 @@ uncomfortable, and the first-person body hides while a tilt is set.
 ## Build & run cheat sheet
 
 ```bash
-# One-time engine builds, only if you don't use the prebuilts
+# One-time engine builds, once per checkout
 # (see First-time setup above for details)
 ./VisionPort/build_xash_libxash.sh
 ./VisionPort/build_angle_visionos.sh
@@ -491,8 +481,8 @@ Mac, and `--serve` fakes the endpoint for testing the script.
 LambdaVision/      Xcode visionOS app (Swift + C bridge + ANGLE)
 VisionPort/        Engine cross-compile workspace (xash3d-fwgs + hlsdk-portable
                    + patches + setup)
-scripts/           Asset fetch/push scripts, prebuilt fetch and the Xcode pre-build hook
-.github/workflows/ CI compile check and the prebuilt ANGLE / libxash releases
+scripts/           Asset fetch/push scripts, CI cache keys, .ipa packaging and the Xcode pre-build hook
+.github/workflows/ one Build pipeline: cached engine, unsigned .ipa, a release per main build
 PLAN.md            Architecture, phase plan, risks
 docs/plans/        Design plans for planned work (one file per plan)
 ISSUES.md          Known problems
@@ -538,3 +528,37 @@ dependencies; both are MIT-licensed (unaffected by the GPLv3 obligation
 above, since that only reaches the combined LambdaVision distribution, not
 the packages' own repos). See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)
 for their license text.
+
+## CI and releasing
+
+`.github/workflows/build.yml` builds like the other apps here (Hypnos, Longwave):
+ANGLE → libxash → the Opposing Force / Blue Shift ports → the app →
+`LambdaVision-unsigned.ipa`.
+
+- **A release per `main` push.** Every push that isn't docs-only (`**.md`)
+  builds and publishes `v0.1.0-<commit>` with a changelog from `git log`.
+  Releases are never replaced or deleted, so history is kept. The `.ipa` has a
+  fixed name, so `releases/latest/download/LambdaVision-unsigned.ipa` is always
+  the newest. The build number is the commit count, so a sideloader offers
+  updates. All assets go up in one `gh release create`, since releases are
+  immutable. Builds queue instead of overlapping or cancelling.
+- **The compiled pieces are reused from earlier releases.** ANGLE (hours),
+  libxash and each port are keyed by `scripts/prebuilt-keys.sh` (pinned
+  revisions, patches, build scripts, the pinned Xcode). A job first asks
+  `scripts/prebuilts.sh fetch` for the newest release carrying its key and
+  compiles only if none does. A piece it did compile is attached to that
+  build's release as `<key>.tar.gz` (+ `.sha256`), so it is attached once and
+  later builds just restore it. Releases don't expire, unlike `actions/cache`
+  (7 days), which is used only to carry a fresh compile over when its release
+  never got made.
+- **Patches regenerate the right piece.** Editing an ANGLE patch or build
+  script changes only the ANGLE key; the xash and hlsdk patches, `hlsdk-vr/`,
+  `games.list`, `setup.sh` and the other `VisionPort/` scripts change only the
+  libxash and port keys. A changed key finds no release asset, so that piece
+  recompiles.
+- **Nothing large is stored off the runner.** The 12 GiB ANGLE source sync is
+  never cached or uploaded; it is re-fetched (about 5 minutes) whenever ANGLE
+  actually recompiles.
+- Bumping Xcode means editing the `xcode-select` steps in the workflow and
+  `XCODE_PIN` in `scripts/prebuilt-keys.sh` together (the workflow checks).
+  That changes the keys, so the next build recompiles everything once.

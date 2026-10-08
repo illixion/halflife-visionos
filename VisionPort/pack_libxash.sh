@@ -18,7 +18,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 lib="$LIBXASH_DIR/$ARCHIVE"
 if [ ! -f "$lib" ]; then
-    echo "No $ARCHIVE yet (build_xash_libxash.sh or fetch-prebuilts.sh makes it); the games stay in games/ until then."
+    echo "No $ARCHIVE yet (build_xash_libxash.sh makes it); the games stay in games/ until then."
     exit 0
 fi
 

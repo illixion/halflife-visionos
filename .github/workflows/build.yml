@@ -1,0 +1,501 @@
+name: Build IPA
+
+# Same shape as Hypnos and Longwave: every push to main builds and creates one
+# GitHub Release (v0.1.0-<sha>, history kept) carrying LambdaVision-unsigned.ipa
+# under a fixed name, so releases/latest/download/LambdaVision-unsigned.ipa
+# always points at the newest. Documentation-only changes don't build or
+# release. Build jobs only upload workflow artifacts; the release job at the
+# bottom creates the release with ALL assets in a single `gh release create`,
+# because releases are immutable (assets can't be added after publish).
+#
+# What those apps don't have is the native engine: ANGLE (~12 GiB of sources,
+# hours to build), libxash and the game ports. Each piece is attached to the
+# release of the build that compiled it, as <key>.tar.gz (scripts/prebuilts.sh
+# pack), and later runs restore it from the newest release carrying the key
+# (scripts/prebuilts.sh fetch) instead of recompiling. The keys
+# (scripts/prebuilt-keys.sh) move only with the pinned revisions, patches, build
+# scripts or Xcode, so most builds compile none of it, and releases don't
+# expire. actions/cache only bridges a fresh compile until its release exists
+# (its 7-day expiry is why releases are the store). The 12 GiB ANGLE sync is
+# never cached or uploaded; it lives in Vendor/angle-build, outside every
+# cached path.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+# Never cancel and never overlap: a cancelled ANGLE build is hours of lost
+# work, and two runs would each compile it.
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  keys:
+    runs-on: ubuntu-latest
+    outputs:
+      angle: ${{ steps.k.outputs.angle }}
+      xash: ${{ steps.k.outputs.xash }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: k
+        run: |
+          ./scripts/prebuilt-keys.sh | tee -a "$GITHUB_OUTPUT"
+          # The Xcode every macOS job selects must be the one the keys pin.
+          pin=$(sed -n 's/^XCODE_PIN=//p' scripts/prebuilt-keys.sh)
+          [[ "$(grep -c "Xcode_${pin}\.app" .github/workflows/build.yml)" == 4 ]] \
+            || { echo "::error::every xcode-select in build.yml must name Xcode_${pin} (XCODE_PIN in scripts/prebuilt-keys.sh)"; exit 1; }
+
+  angle:
+    needs: keys
+    runs-on: macos-26
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      # The durable store first: the newest release that carries this key.
+      - name: Restore ANGLE from a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prebuilts.sh fetch angle
+      - id: rel
+        run: |
+          if [[ -f LambdaVision/Vendor/angle/libANGLE.a && -f LambdaVision/Vendor/angle/libANGLE-sim.a && -d LambdaVision/Vendor/angle/include ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only when no release has it (its build failed after compiling): the
+      # 7-day cache that bridged it.
+      - id: cache
+        if: steps.rel.outputs.found != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: LambdaVision/Vendor/angle
+          key: ${{ needs.keys.outputs.angle }}
+      - id: have
+        env:
+          FOUND: ${{ steps.rel.outputs.found }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          if [[ "$FOUND" == true ]]; then
+            source=release
+          elif [[ "$CACHE_HIT" == true ]]; then
+            source=cache
+          else
+            source=build
+          fi
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+      # The gclient sync is ~12 GiB plus two build trees. Drop the Xcodes and
+      # simulator runtimes this job doesn't use (it builds against SDKs only).
+      - name: Free disk space
+        if: steps.have.outputs.source == 'build'
+        run: |
+          df -h /
+          sudo rm -rf /Applications/Xcode_26.0.1.app /Applications/Xcode_26.1.1.app \
+            /Applications/Xcode_26.2.app /Applications/Xcode_26.3.app \
+            /Applications/Xcode_26.4.1.app /Applications/Xcode_26.5.app \
+            "$HOME/Library/Android"
+          xcrun simctl runtime delete all || true
+          df -h /
+      - name: Build ANGLE
+        if: steps.have.outputs.source == 'build'
+        run: |
+          xcodebuild -version
+          ./VisionPort/build_angle_visionos.sh
+      # Bridges to the release of this build, which will carry it durably.
+      - name: Save cache
+        if: steps.have.outputs.source == 'build'
+        uses: actions/cache/save@v4
+        with:
+          path: LambdaVision/Vendor/angle
+          key: ${{ needs.keys.outputs.angle }}
+      - name: Upload ANGLE
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle
+          path: LambdaVision/Vendor/angle
+          if-no-files-found: error
+      # Only what this run compiled goes on the release; a piece restored from
+      # an earlier release is already there.
+      - name: Pack ANGLE for the release
+        if: steps.have.outputs.source != 'release'
+        run: ./scripts/prebuilts.sh pack angle attach
+      - name: Upload ANGLE release asset
+        if: steps.have.outputs.source != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: attach-angle
+          path: attach/*
+          if-no-files-found: error
+
+  engine:
+    needs: keys
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      # The durable store first: the newest release that carries this key.
+      - name: Restore libxash from a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prebuilts.sh fetch xash
+      - id: rel
+        run: |
+          if [[ -f LambdaVision/Vendor/libxash/libxash.a && -f LambdaVision/Vendor/libxash/libxash-sim.a ]]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only when no release has it (its build failed after compiling): the
+      # 7-day cache that bridged it.
+      - id: cache
+        if: steps.rel.outputs.found != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: LambdaVision/Vendor/libxash/*.a
+          key: ${{ needs.keys.outputs.xash }}
+      - id: have
+        env:
+          FOUND: ${{ steps.rel.outputs.found }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          if [[ "$FOUND" == true ]]; then
+            source=release
+          elif [[ "$CACHE_HIT" == true ]]; then
+            source=cache
+          else
+            source=build
+          fi
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+      - if: steps.have.outputs.source == 'build'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: llvm-objcopy
+        if: steps.have.outputs.source == 'build'
+        run: |
+          # The image ships Homebrew llvm@20 (unlinked); install llvm if not.
+          prefix=$(brew --prefix llvm@20 2>/dev/null || true)
+          if [[ ! -x "$prefix/bin/llvm-objcopy" ]]; then
+            brew install llvm
+            prefix=$(brew --prefix llvm)
+          fi
+          echo "LLVM_OBJCOPY=$prefix/bin/llvm-objcopy" >> "$GITHUB_ENV"
+      - name: Build libxash.a (device) and libxash-sim.a
+        if: steps.have.outputs.source == 'build'
+        run: |
+          ./VisionPort/setup.sh
+          ./VisionPort/build_xash_libxash.sh
+          XR_SIM=1 ./VisionPort/build_xash_libxash.sh
+      - name: Save cache
+        if: steps.have.outputs.source == 'build'
+        uses: actions/cache/save@v4
+        with:
+          path: LambdaVision/Vendor/libxash/*.a
+          key: ${{ needs.keys.outputs.xash }}
+      - name: Upload libxash
+        uses: actions/upload-artifact@v4
+        with:
+          name: libxash
+          path: LambdaVision/Vendor/libxash/*.a
+          if-no-files-found: error
+      - name: Pack libxash for the release
+        if: steps.have.outputs.source != 'release'
+        run: ./scripts/prebuilts.sh pack xash attach
+      - name: Upload libxash release asset
+        if: steps.have.outputs.source != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: attach-xash
+          path: attach/*
+          if-no-files-found: error
+
+  # Built-in game ports, via the same VisionPort/build_game.sh a user runs for
+  # their own mod. Best-effort: a failed port is simply missing from the app.
+  # The matrix name is the branch column of VisionPort/games.list.
+  games:
+    needs: [keys, engine]
+    runs-on: macos-26
+    timeout-minutes: 90
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: opfor
+            title: Opposing Force
+          - name: bshift
+            title: Blue Shift
+    name: game (${{ matrix.title }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+      # The durable store first: the newest release that carries this key.
+      - name: Restore ${{ matrix.title }} from a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prebuilts.sh fetch game:${{ matrix.name }}
+      - id: rel
+        run: |
+          if compgen -G "LambdaVision/Vendor/libxash/games/libgame-*.a" >/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only when no release has it (its build failed after compiling): the
+      # 7-day cache that bridged it.
+      - id: cache
+        if: steps.rel.outputs.found != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: LambdaVision/Vendor/libxash/games
+          key: ${{ needs.keys.outputs.xash }}-game-${{ matrix.name }}
+      - id: have
+        env:
+          FOUND: ${{ steps.rel.outputs.found }}
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          if [[ "$FOUND" == true ]]; then
+            source=release
+          elif [[ "$CACHE_HIT" == true ]]; then
+            source=cache
+          else
+            source=build
+          fi
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+      - if: steps.have.outputs.source == 'build'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: llvm-objcopy
+        if: steps.have.outputs.source == 'build'
+        run: |
+          prefix=$(brew --prefix llvm@20 2>/dev/null || true)
+          if [[ ! -x "$prefix/bin/llvm-objcopy" ]]; then
+            brew install llvm
+            prefix=$(brew --prefix llvm)
+          fi
+          # Only llvm-objcopy, never LLVM on PATH: build_game.sh compiles with
+          # CC=clang, which must stay Apple's clang from the pinned Xcode.
+          echo "LLVM_OBJCOPY=$prefix/bin/llvm-objcopy" >> "$GITHUB_ENV"
+      - name: Fetch and patch sources
+        if: steps.have.outputs.source == 'build'
+        run: ./VisionPort/setup.sh
+      # The port links against this exact engine build.
+      - if: steps.have.outputs.source == 'build'
+        uses: actions/download-artifact@v4
+        with:
+          name: libxash
+          path: LambdaVision/Vendor/libxash
+      - name: Build ${{ matrix.title }} (device, simulator)
+        if: steps.have.outputs.source == 'build'
+        env:
+          GAME_URL: https://github.com/FWGS/hlsdk-portable.git
+          GAME_BRANCH: ${{ matrix.name }}
+        run: |
+          ./VisionPort/build_game.sh "$GAME_URL" "$GAME_BRANCH"
+          XR_SIM=1 ./VisionPort/build_game.sh "$GAME_URL" "$GAME_BRANCH"
+      - name: Save cache
+        if: steps.have.outputs.source == 'build'
+        uses: actions/cache/save@v4
+        with:
+          path: LambdaVision/Vendor/libxash/games
+          key: ${{ needs.keys.outputs.xash }}-game-${{ matrix.name }}
+      - name: Upload game port
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-${{ matrix.name }}
+          path: LambdaVision/Vendor/libxash/games/libgame-*.a
+          if-no-files-found: warn
+      - name: Pack ${{ matrix.title }} for the release
+        if: steps.have.outputs.source != 'release'
+        run: ./scripts/prebuilts.sh pack game:${{ matrix.name }} attach
+      - name: Upload ${{ matrix.title }} release asset
+        if: steps.have.outputs.source != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: attach-game-${{ matrix.name }}
+          path: attach/*
+          if-no-files-found: error
+
+  build:
+    # Runs whatever the ports did; only ANGLE and the engine have to exist.
+    needs: [angle, engine, games]
+    if: ${{ !cancelled() && needs.angle.result == 'success' && needs.engine.result == 'success' }}
+    runs-on: macos-26
+    steps:
+      # Full history: the build number is the commit count (see below).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+
+      # RAVESDK, RAVEEngine and DebugTrace are local Swift package path references
+      # (../../RAVESDK etc. relative to LambdaVision.xcodeproj), so they have to
+      # land one level ABOVE $GITHUB_WORKSPACE. That is why this is a plain
+      # clone rather than actions/checkout: that action rejects any `path:`
+      # resolving outside the workspace.
+      #
+      # No credentials, and none would help: all three repos are public, while
+      # github.token is scoped to this repository alone. If any goes private
+      # again this needs a PAT or deploy key in secrets instead.
+      #
+      # Deliberately unpinned: the apps track these three at HEAD by design --
+      # that is the whole point of a path reference.
+      - name: Clone the shared packages as siblings
+        run: |
+          git clone --depth 1 https://github.com/illixion/RAVESDK.git ../RAVESDK
+          git clone --depth 1 https://github.com/illixion/RAVEEngine.git ../RAVEEngine
+          git clone --depth 1 https://github.com/illixion/DebugTrace.git ../DebugTrace
+
+      - name: Download ANGLE
+        uses: actions/download-artifact@v4
+        with:
+          name: angle
+          path: LambdaVision/Vendor/angle
+      - name: Download libxash
+        uses: actions/download-artifact@v4
+        with:
+          name: libxash
+          path: LambdaVision/Vendor/libxash
+      - name: Download game ports
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: game-*
+          merge-multiple: true
+          path: LambdaVision/Vendor/libxash/games
+
+      - name: llvm-objcopy
+        run: |
+          prefix=$(brew --prefix llvm@20 2>/dev/null || true)
+          if [[ ! -x "$prefix/bin/llvm-objcopy" ]]; then
+            brew install llvm
+            prefix=$(brew --prefix llvm)
+          fi
+          echo "LLVM_OBJCOPY=$prefix/bin/llvm-objcopy" >> "$GITHUB_ENV"
+
+      # The built libxash.a holds Half-Life only; fold the ports in and
+      # regenerate the compiled-games table the app force-loads.
+      - name: Fetch sources and fold the game ports into libxash
+        run: |
+          ./VisionPort/setup.sh
+          ./VisionPort/pack_libxash.sh
+
+      # The Vision Pro app, for anyone signing it by hand or through a
+      # sideloader (SideStore's visionOS port, Sideloadly). Released under one
+      # fixed name, so releases/latest/download/LambdaVision-unsigned.ipa always
+      # points at the newest. A sideloader offers an update only when
+      # CFBundleVersion grows; the commit count on main always grows.
+      - name: Archive for visionOS
+        run: |
+          xcodebuild -quiet archive \
+            -project LambdaVision/LambdaVision.xcodeproj \
+            -scheme LambdaVision \
+            -configuration Release \
+            -destination 'generic/platform=visionOS' \
+            -archivePath "$RUNNER_TEMP/LambdaVision.xcarchive" \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)"
+
+      # A sideloader re-signs with the user's Apple ID, and on a free account
+      # every embedded extension or Watch app costs another App ID; ship a bare app.
+      - name: Package IPA
+        run: |
+          APP=$(find "$RUNNER_TEMP/LambdaVision.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' -type d | head -1)
+          for d in PlugIns Watch Extensions; do
+            [[ ! -d "$APP/$d" ]] || { echo "::error::the app embeds $d"; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/Payload/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/Payload/"
+          cd "$RUNNER_TEMP/Payload"
+          zip -qry "$GITHUB_WORKSPACE/LambdaVision-unsigned.ipa" Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LambdaVision
+          path: LambdaVision-unsigned.ipa
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: LambdaVision
+          path: dist
+
+      # The compiled pieces this build produced (none when every one was
+      # restored from an earlier release, which then still carries them).
+      - name: Download compiled pieces
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: attach-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create a version string
+        id: version
+        run: |
+          TAG="v0.1.0-${GITHUB_SHA::8}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep '^v' | head -2 | tail -1)
+          if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ steps.version.outputs.tag }}" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+          CHANGELOG=$(git log "$RANGE" --pretty=format:'- %s' --first-parent)
+          {
+            echo "body<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Every asset in one call, so a release never exists without any of them.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ steps.changelog.outputs.body }}
+        run: |
+          {
+            printf '%s\n' "$NOTES"
+            if ls dist/*.tar.gz >/dev/null 2>&1; then
+              printf '\nCompiled in this build and attached for reuse (later builds and scripts/prebuilts.sh fetch restore them instead of recompiling):\n'
+              for f in dist/*.tar.gz; do printf -- '- %s\n' "$(basename "$f")"; done
+            fi
+          } > release-notes.md
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.version }}" \
+            --target "$GITHUB_SHA" \
+            --notes-file release-notes.md \
+            dist/*
