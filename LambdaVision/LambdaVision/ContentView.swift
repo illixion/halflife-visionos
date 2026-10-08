@@ -147,6 +147,15 @@ struct ContentView: View {
                                         dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() })
                 InputCatcher.shared.start(appModel: appModel)
                 await appModel.prepare()
+                // Slow rescan while the home screen is up, so folders copied
+                // onto the headset appear without a relaunch. Skipped in the
+                // immersive space; refreshIfChanged only rescans on a change.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    if appModel.immersiveSpaceState == .closed {
+                        await appModel.library.refreshIfChanged()
+                    }
+                }
             }
             .onChange(of: appModel.library.selectionVersion) { Task { await appModel.warmUp() } }
             .onChange(of: appModel.library.scanVersion) { Task { await appModel.warmUp() } }

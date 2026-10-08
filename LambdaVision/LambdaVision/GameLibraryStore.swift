@@ -111,6 +111,26 @@ final class GameLibraryStore {
         if let r = result.1 { log(refresh: r) }
     }
 
+    /// Cheap change check for the slow home-screen rescan: GameData's entries
+    /// and their modification dates, so a folder copied on from the Mac (or a
+    /// new file inside one) shows up without a relaunch.
+    private var lastRootSignature: String?
+
+    func refreshIfChanged() async {
+        guard !isScanning, let root = GameData.documentsRoot else { return }
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        let entries = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: keys)) ?? []
+        let sig = entries.map { url -> String in
+            let date = (try? url.resourceValues(forKeys: Set(keys)).contentModificationDate)?.timeIntervalSince1970 ?? 0
+            let inner = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)) ?? []
+            let innerSig = inner.map { "\($0.lastPathComponent)@\((try? $0.resourceValues(forKeys: Set(keys)).contentModificationDate)?.timeIntervalSince1970 ?? 0)" }.sorted().joined(separator: ",")
+            return "\(url.lastPathComponent)@\(date)[\(innerSig)]"
+        }.sorted().joined(separator: "|")
+        guard sig != lastRootSignature else { return }
+        lastRootSignature = sig
+        await refresh()
+    }
+
     /// Rescans shortly, coalescing bursts (Wi-Fi imports and deletes).
     func refreshSoon() {
         refreshSoonTask?.cancel()
