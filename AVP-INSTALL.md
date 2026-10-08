@@ -1,0 +1,90 @@
+# Installing Lambda VisionPro on Apple Vision Pro
+
+Lambda VisionPro is Half-Life running natively on Apple Vision Pro: the [Xash3D-FWGS](https://github.com/FWGS/xash3d-fwgs) engine and [hlsdk-portable](https://github.com/FWGS/hlsdk-portable), with Xash3D's `ref_gl` renderer running on Metal through [ANGLE](https://github.com/google/angle) and presented with Compositor Services. You play in a full immersive space, with hand-tracked weapons and locomotion. It is distributed on GitHub only, as source; you build it yourself and bring your own copy of Half-Life.
+
+## What you need
+
+- A Mac with Xcode 26.4 or later (visionOS 26.4 SDK), and Python 3 (for waf, the Xash3D-FWGS build system)
+- An Apple developer signing identity
+- LLVM's `llvm-objcopy`, which the engine build needs (`brew install llvm`)
+- Apple Vision Pro. The app builds for the device only: Metal 4 (`CompositorServices.MTL4`) isn't available in the visionOS Simulator.
+- A Steam account that owns Half-Life. `scripts/fetch-assets.sh` downloads SteamCMD to `~/bin/steamcmd` if it isn't there yet.
+- Room for ANGLE's first build, which starts with a ~12 GiB `gclient sync`
+
+## Your game files
+
+Nothing from Half-Life is in this repository or in the app. Xash3D-FWGS expects the **pre-25th-anniversary** game data, which Valve keeps on the `steam_legacy` beta branch of Half-Life (app 70); the README's [Half-Life assets](README.md#half-life-assets--pre-25th-anniversary-build) section explains why.
+
+1. From the repository root, fetch it with your own Steam account:
+
+   ```bash
+   ./scripts/fetch-assets.sh YOUR_STEAM_USERNAME
+   ```
+
+   SteamCMD asks for your password and any Steam Guard code; the script never takes them as arguments or stores them. About 507 MB lands in `HalfLifeAssets/` (gitignored): `valve/`, plus the official HD pack in `valve_hd/`.
+2. Build and install the app once (see below), so its data container exists on the headset.
+3. Copy `scripts/build-signing.conf.example` to `scripts/build-signing.conf` (gitignored) and set:
+   - `DEVICE_NAME`: your headset's name as `xcrun devicectl list devices` shows it (the example uses `Apple Vision Pro`)
+   - `BUILD_BUNDLE_ID`: the app's bundle identifier, `com.illixion.LambdaVision` unless you changed it
+4. Push the game files to the headset:
+
+   ```bash
+   ./scripts/push-assets.sh
+   ```
+
+   This copies every gamedir (`valve/`, `valve_hd/`, mods) into the app's `Documents/GameData` with `devicectl`, and turns the HD pack on with a `vfs.cfg`. Later pushes skip unchanged files, and the data survives reinstalling over the existing app. Deleting the app from the headset wipes it; the app then shows a warning, and you run `push-assets.sh` again.
+
+To bake the assets into the app bundle instead, build with `BUNDLE_HL_ASSETS=1` (for example `xcodebuild ... build BUNDLE_HL_ASSETS=1`).
+
+## Build from source
+
+Start from a checkout of this repository. It links three local Swift packages by relative path, so they must sit next to your checkout, in the same parent folder, named exactly `RAVESDK`, `RAVEEngine` and `DebugTrace`:
+
+```bash
+cd ..        # the folder that holds your checkout
+git clone https://github.com/illixion/RAVESDK.git
+git clone https://github.com/illixion/RAVEEngine.git
+git clone https://github.com/illixion/DebugTrace.git
+cd -         # back into the checkout
+```
+
+Without them, Xcode fails at package resolution, before it compiles anything.
+
+From the repository root, fetch the pinned engine sources, then build the two engine artifacts once. All three scripts are idempotent, so rerunning them later is a fast no-op:
+
+```bash
+./VisionPort/setup.sh                 # pinned xash3d-fwgs, hlsdk-portable and MoltenVK, with the visionOS patches
+./VisionPort/build_xash_libxash.sh    # libxash.a
+./VisionPort/build_angle_visionos.sh  # ANGLE (libEGL/libGLESv2); the first run is slow
+```
+
+Skipping the ANGLE step fails later as a linker error rather than a clear message.
+
+1. Open `LambdaVision/LambdaVision.xcodeproj`.
+2. In the LambdaVision target's signing settings, set `DEVELOPMENT_TEAM` to your own team. If Xcode reports that the bundle identifier isn't available to your team, change it to one of your own and use the same value for `BUILD_BUNDLE_ID` above.
+3. Build and run on your Vision Pro. For playing, switch the scheme's Run action to Release (Product › Scheme › Edit Scheme › Run › Build Configuration): Debug builds are unoptimized (`-Onone`) and noticeably slower. Xcode's pre-build step (`scripts/pre-build.sh`) fetches the pinned xash3d-fwgs and hlsdk-portable sources and MoltenVK, applies the visionOS patches, and checks that `libxash.a` exists.
+
+From the command line instead (find the UDID with `xcrun xctrace list devices`):
+
+```bash
+xcodebuild -project LambdaVision/LambdaVision.xcodeproj \
+  -scheme LambdaVision \
+  -destination 'id=YOUR_AVP_UDID' \
+  -configuration Release build
+
+xcrun devicectl device install app \
+  --device YOUR_AVP_UDID \
+  ~/Library/Developer/Xcode/DerivedData/LambdaVision-*/Build/Products/Release-xros/LambdaVision.app
+
+# Optional: launch it and stream its log
+xcrun devicectl device process launch \
+  --device YOUR_AVP_UDID --console com.illixion.LambdaVision
+```
+
+Then push your game files as described above.
+
+## Notes
+
+- The main input is hand tracking: hand-tracked aim, an off-hand locomotion joystick, gaze-and-pinch menus, a radial weapon menu and finger-gun fire. The README describes the VR input as proof-of-concept quality, functional but rough; [ISSUES.md](ISSUES.md) lists the specifics. The app also reads an extended gamepad and a hardware keyboard (`GamepadInput.swift`, `KeyboardInput.swift`).
+- The settings window covers render scale, gamma and brightness, snap-turn angle, audio volumes, dominant hand, gesture toggles, and the stock Half-Life menu and console.
+- Half-Life is a trademark of Valve Corporation. This is a fan-made, non-commercial port, not affiliated with or endorsed by Valve.
