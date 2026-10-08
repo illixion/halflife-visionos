@@ -1592,14 +1592,26 @@ actor Renderer {
         }
     }
 
-    /// The game the engine starts with, picked on the main actor as the
-    /// immersive space opens (GameLibraryStore.selectedGame). Read once, at
-    /// engine init; a game already running keeps running.
-    nonisolated(unsafe) static var launchGame: GameEntry?
+    /// The game requested by the library picker or Xash's game menu. Read by
+    /// the render loop; changes reload the engine on its GL worker.
+    private static let launchGameLock = NSLock()
+    nonisolated(unsafe) private static var launchGameStorage: GameEntry?
+
+    nonisolated static func setLaunchGame(_ game: GameEntry?) {
+        launchGameLock.lock()
+        launchGameStorage = game
+        launchGameLock.unlock()
+    }
+
+    nonisolated private static var launchGame: GameEntry? {
+        launchGameLock.lock()
+        defer { launchGameLock.unlock() }
+        return launchGameStorage
+    }
 
     @MainActor
     static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, arSession: ARKitSession) {
-        launchGame = appModel.library.selectedGame
+        setLaunchGame(appModel.library.selectedGame)
         Task(executorPreference: RendererTaskExecutor.shared) {
             // Per-source spatial audio. PHASE (PhaseAudioEngine) is the live
             // renderer; the older AVAudioEnvironmentNode path
@@ -2052,6 +2064,20 @@ actor Renderer {
     }
 
     private func ensureEngineInitialized() {
+        let requestedGame = Renderer.launchGame ?? GameData.halfLife
+        if engineInited,
+           let running = GameData.runningGame,
+           running.gamedir.lowercased() != requestedGame.gamedir.lowercased() {
+            AppLog.render.log("[LambdaVision] reloading Xash for game \(requestedGame.gamedir, privacy: .private)")
+            _ = lambda_gl_worker_engine_shutdown()
+            engineInited = false
+            GameData.runningGame = requestedGame
+            weaponPass = nil
+            Renderer.avatarAvailable = false
+            Task { @MainActor [appModel] in
+                appModel.gameSettings.engineWillStop()
+            }
+        }
         guard !engineInited else { return }
         engineInited = true
         let appSupport = (try? FileManager.default.url(
@@ -2077,7 +2103,7 @@ actor Renderer {
         AppLog.render.log("[LambdaVision] rodir: \(rodir, privacy: .private)")
         // The game: what's already running (a reopened immersive space), else
         // the library's pick, else Half-Life.
-        let game = GameData.runningGame ?? Renderer.launchGame ?? GameData.halfLife
+        let game = requestedGame
         GameData.runningGame = game
         var gameArgs = ["-game", game.gamedir]
         if let fallback = game.info.fallbackDir, !fallback.isEmpty,
@@ -2128,7 +2154,10 @@ actor Renderer {
         if rc == 0 {
             // Engine + GL worker are now up, so cvar commands are safe to post.
             // Flush the archived Graphics/Audio/Input cvars and enable live pushes.
-            Task { @MainActor [appModel] in appModel.gameSettings.engineDidStart() }
+            Task { @MainActor [appModel] in
+                appModel.gameSettings.engineDidStart()
+                appModel.library.engineDidSwitchGame()
+            }
         } else {
             let detail = String(cString: buf)
             Task { @MainActor [appModel] in

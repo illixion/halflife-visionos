@@ -231,6 +231,7 @@ int lambda_gl_worker_setup(char *status_out, int status_cap);
 int lambda_gl_worker_engine_init(const char *writable_dir,
                                  int extra_argc, const char *const *extra_argv,
                                  char *status_out, int status_cap);
+int lambda_gl_worker_engine_shutdown(void);
 int lambda_gl_worker_render_frame(void *mtl_texture, int width, int height,
                                   float r, float g, float b);
 

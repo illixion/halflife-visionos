@@ -644,6 +644,10 @@ final class GameSettings {
         cvar("r_vrwater", waterReflections ? 1 : 0)
     }
 
+    func engineWillStop() {
+        isEngineReady = false
+    }
+
     /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
     /// the console field, map/restart). No-op until the engine is up so the
     /// UI can't deadlock the worker post.

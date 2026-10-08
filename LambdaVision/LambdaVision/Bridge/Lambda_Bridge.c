@@ -3684,6 +3684,7 @@ typedef enum {
     WORK_NONE = 0,
     WORK_SETUP,
     WORK_INIT,
+    WORK_SHUTDOWN,
     WORK_FRAME,
     WORK_FRAME_EYE2,
     WORK_TICK,       // a frame nobody waits for (level loads), see lambda_gl_worker_tick_async
@@ -4188,6 +4189,10 @@ static void *gl_worker_main(void *arg) {
                                             g_w_init_argv,
                                             g_w_status, g_w_status_cap);
             break;
+        case WORK_SHUTDOWN:
+            lambda_engine_shutdown();
+            g_w_result = 0;
+            break;
         case WORK_TICK: {
             // Nobody waits on these frames and nobody displays them: the app
             // shows its snapshot while the engine loads. No GPU fence — the
@@ -4360,6 +4365,13 @@ int lambda_gl_worker_engine_init(const char *basedir,
     int rc = worker_post_and_wait(WORK_INIT);
     if (status_out && status_cap > 0)
         snprintf(status_out, status_cap, "%s", g_w_status);
+    pthread_mutex_unlock(&g_w_api_mtx);
+    return rc;
+}
+
+int lambda_gl_worker_engine_shutdown(void) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    int rc = worker_post_and_wait(WORK_SHUTDOWN);
     pthread_mutex_unlock(&g_w_api_mtx);
     return rc;
 }

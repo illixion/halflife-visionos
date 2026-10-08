@@ -29,7 +29,7 @@ struct GameLibraryList: View {
                 .hoverEffect()
             }
             if let title = library.pendingSwitchTitle {
-                Label("Reopen LambdaVision to switch to \(title).", systemImage: "arrow.clockwise")
+                Label("Reloading Xash to switch to \(title)…", systemImage: "arrow.clockwise")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

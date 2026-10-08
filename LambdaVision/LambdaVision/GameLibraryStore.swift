@@ -36,9 +36,7 @@ final class GameLibraryStore {
     /// Bumped on selection so views re-read `selectedGame`.
     private(set) var selectionVersion = 0
 
-    /// "Reopen LambdaVision to switch to X": a game chosen (in the picker or
-    /// the engine's own menu) after the engine started, which can only take
-    /// effect on the next launch.
+    /// The game Xash is currently reloading after a selection change.
     private(set) var pendingSwitchTitle: String?
 
     // Import state.
@@ -65,12 +63,13 @@ final class GameLibraryStore {
         }
     }
 
-    /// Whether the engine is running, so the game can't change until reopen.
+    /// Whether the engine has started at least once in this app session.
     var engineRunning: Bool { GameData.runningGame != nil }
 
-    /// Persists a choice; once the engine runs it applies on the next launch.
+    /// Persists a choice and asks the running renderer to reload Xash.
     func select(_ game: GameEntry) {
         AppSettingsStore.selectedGame = game.gamedir
+        Renderer.setLaunchGame(game)
         selectionVersion += 1
         AppLog.app.log("[Library] selected \(game.gamedir, privacy: .private) kind=\(game.kind.rawValue, privacy: .public)")
         if let running = GameData.runningGame, running.gamedir.lowercased() != game.gamedir.lowercased() {
@@ -80,13 +79,22 @@ final class GameLibraryStore {
         }
     }
 
-    /// The engine's change-game path (contract 1): from its own Custom Game
-    /// menu. It stays in the current game; the choice applies on reopen.
+    /// The engine's change-game path: from its own Custom Game menu.
     func engineRequestedGame(_ gamedir: String) {
         AppLog.app.log("[Library] engine requested game change to \(gamedir, privacy: .private)")
         AppSettingsStore.selectedGame = gamedir
         selectionVersion += 1
-        pendingSwitchTitle = games.first { $0.gamedir.lowercased() == gamedir.lowercased() }?.title ?? gamedir
+        Renderer.setLaunchGame(games.first { $0.gamedir.lowercased() == gamedir.lowercased() })
+        if let running = GameData.runningGame,
+           running.gamedir.lowercased() == gamedir.lowercased() {
+            pendingSwitchTitle = nil
+        } else {
+            pendingSwitchTitle = games.first { $0.gamedir.lowercased() == gamedir.lowercased() }?.title ?? gamedir
+        }
+    }
+
+    func engineDidSwitchGame() {
+        pendingSwitchTitle = nil
     }
 
     /// Rescans GameData and normalizes gamedirs that changed since last time.
