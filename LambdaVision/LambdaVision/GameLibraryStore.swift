@@ -47,6 +47,8 @@ final class GameLibraryStore {
     /// An import started over Wi-Fi is running (GameLibraryServer).
     var externalImportRunning = false
     private var refreshSoonTask: Task<Void, Never>?
+    private var assetDirectoryWatcher: DispatchSourceFileSystemObject?
+    private var assetDirectoryPresenter: GameDataDirectoryPresenter?
 
     struct ImportLogLine: Identifiable, Hashable {
         let id = UUID()
@@ -119,26 +121,6 @@ final class GameLibraryStore {
         if let r = result.1 { log(refresh: r) }
     }
 
-    /// Cheap change check for the slow home-screen rescan: GameData's entries
-    /// and their modification dates, so a folder copied on from the Mac (or a
-    /// new file inside one) shows up without a relaunch.
-    private var lastRootSignature: String?
-
-    func refreshIfChanged() async {
-        guard !isScanning, let root = GameData.documentsRoot else { return }
-        let keys: [URLResourceKey] = [.contentModificationDateKey]
-        let entries = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: keys)) ?? []
-        let sig = entries.map { url -> String in
-            let date = (try? url.resourceValues(forKeys: Set(keys)).contentModificationDate)?.timeIntervalSince1970 ?? 0
-            let inner = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)) ?? []
-            let innerSig = inner.map { "\($0.lastPathComponent)@\((try? $0.resourceValues(forKeys: Set(keys)).contentModificationDate)?.timeIntervalSince1970 ?? 0)" }.sorted().joined(separator: ",")
-            return "\(url.lastPathComponent)@\(date)[\(innerSig)]"
-        }.sorted().joined(separator: "|")
-        guard sig != lastRootSignature else { return }
-        lastRootSignature = sig
-        await refresh()
-    }
-
     /// Rescans shortly, coalescing bursts (Wi-Fi imports and deletes).
     func refreshSoon() {
         refreshSoonTask?.cancel()
@@ -148,6 +130,36 @@ final class GameLibraryStore {
             PathResolver.shared.invalidate()
             await refresh()
         }
+    }
+
+    /// Watches Documents/GameData for the completion marker written by
+    /// push-assets.sh. Wi-Fi imports already notify us through the server.
+    func watchForAssetUploads() {
+        guard assetDirectoryWatcher == nil, let root = GameData.documentsRoot else { return }
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let presenter = GameDataDirectoryPresenter(url: root) { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshSoon() }
+        }
+        NSFileCoordinator.addFilePresenter(presenter)
+        assetDirectoryPresenter = presenter
+
+        // devicectl writes directly into the app container without file
+        // coordination, so push-assets.sh drops a marker as a second signal.
+        let fd = Darwin.open(root.path, O_EVTONLY)
+        guard fd >= 0 else {
+            AppLog.app.error("[Library] couldn't watch GameData for uploads")
+            return
+        }
+        let watcher = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .delete, .rename, .link],
+            queue: .global(qos: .utility))
+        watcher.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshSoon() }
+        }
+        watcher.setCancelHandler { Darwin.close(fd) }
+        watcher.resume()
+        assetDirectoryWatcher = watcher
     }
 
     private func log(refresh r: LibraryRefresh) {
@@ -292,6 +304,33 @@ final class GameLibraryStore {
         case .postAnniversaryValve: "This Half-Life is the 25th Anniversary build. Use the steam_legacy branch for the best results."
         case .customGameCode(let g): "\(g) ships its own game code, which can't run here. Its maps run on Half-Life's code, so some of its own features will be missing."
         }
+    }
+}
+
+/// A directory presenter receives coordinated Files changes for nested items
+/// too, unlike a vnode source attached only to the GameData root.
+private final class GameDataDirectoryPresenter: NSObject, NSFilePresenter {
+    let presentedItemURL: URL?
+    let presentedItemOperationQueue = OperationQueue()
+    private let onChange: @Sendable () -> Void
+
+    init(url: URL, onChange: @escaping @Sendable () -> Void) {
+        presentedItemURL = url
+        self.onChange = onChange
+        super.init()
+        presentedItemOperationQueue.name = "LambdaVision.GameDataPresenter"
+        presentedItemOperationQueue.maxConcurrentOperationCount = 1
+    }
+
+    func presentedItemDidChange() { onChange() }
+    func presentedSubitemDidAppear(at url: URL) { onChange() }
+    func presentedSubitemDidChange(at url: URL) { onChange() }
+    func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) { onChange() }
+
+    func accommodatePresentedSubitemDeletion(at url: URL,
+                                             completionHandler: @escaping (Error?) -> Void) {
+        onChange()
+        completionHandler(nil)
     }
 }
 

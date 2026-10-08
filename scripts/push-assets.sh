@@ -255,5 +255,15 @@ if [[ -d "$SRC/valve_hd" && ! -f "$SRC/valve/vfs.cfg" ]]; then
     echo "Pushed valve/vfs.cfg (fs_mount_hd 1)"
 fi
 
+# Tell the running app that the upload is complete. It watches Documents/GameData
+# and rescans as soon as this marker lands; the Wi-Fi path notifies it at commit.
+touch "$SCRIPT_DIR/assets-upload-marker"
+xcrun devicectl device copy to \
+    --device "$DEVICE_ID" \
+    --domain-type appDataContainer \
+    --domain-identifier "$BUILD_BUNDLE_ID" \
+    --destination "Documents/GameData/.lambda-assets-upload" \
+    --source "$SCRIPT_DIR/assets-upload-marker"
+
 echo ""
 echo "Done. The engine will use Documents/GameData on next launch."
