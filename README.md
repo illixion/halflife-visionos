@@ -60,6 +60,8 @@ specifics, and [PLAN.md](PLAN.md) for the full phase history.
 git clone https://github.com/illixion/halflife-visionos.git
 git clone https://github.com/illixion/RAVESDK.git
 git clone https://github.com/illixion/RAVEEngine.git
+# DebugTrace is only needed when building from source; it is not needed to
+# install the released IPA.
 git clone https://github.com/illixion/DebugTrace.git
 
 cd halflife-visionos
@@ -70,7 +72,7 @@ open LambdaVision/LambdaVision.xcodeproj
 
 ### RAVE packages
 
-LambdaVision links three shared packages:
+LambdaVision uses three shared packages when built from source:
 
 | Package | Products used |
 |---|---|
@@ -78,10 +80,16 @@ LambdaVision links three shared packages:
 | [`RAVEEngine`](https://github.com/illixion/RAVEEngine) | `RAVEInput`, `RAVEDiagnostics`, `RAVERig`, `RAVEHolo` |
 | [`DebugTrace`](https://github.com/illixion/DebugTrace) | `DebugTrace`, `DebugTraceServer` |
 
-All are referenced as **local** Swift packages by relative path —
+RAVESDK and RAVEEngine are required for source builds. DebugTrace is optional
+if you only install the released IPA; source builds need it because RAVEConsole
+and RAVEInput depend on it. Local Debug and Release configurations both keep
+the remote server available for headset development. The CI IPA build compiles
+LambdaVision's server routes out, but DebugTrace remains linked through the
+shared packages, so the package is not yet fully removed from the IPA. The
+Xcode project resolves packages by local relative path —
 `../../RAVESDK`, `../../RAVEEngine` and `../../DebugTrace`, resolved against the directory holding
 `LambdaVision.xcodeproj` — not as versioned remote dependencies. A clone
-therefore does not fetch them, which is why the commands above clone all four
+therefore does not fetch them. For a source build, clone the three packages
 side by side:
 
 ```
@@ -92,10 +100,10 @@ some-parent/
 └── halflife-visionos/
 ```
 
-The requirement is only that this repo's parent directory also contains
-directories named exactly `RAVESDK`, `RAVEEngine` and `DebugTrace`; this repo's own directory
-name does not matter. Get it wrong and Xcode fails at package resolution, before
-compiling anything — and before the build phase that fetches xash3d-fwgs runs.
+The parent directory must contain directories named exactly `RAVESDK`,
+`RAVEEngine` and `DebugTrace` for a source build; this repo's own directory
+name does not matter. Xcode resolves the package references before compiling
+or running the build phase that fetches xash3d-fwgs.
 
 Why path references and not versions: the packages and the apps co-evolve
 continuously — the hand input this app uses was converged into `RAVEInput` out of
@@ -437,13 +445,16 @@ Find your AVP's UDID with `xcrun xctrace list devices`.
 
 ### Debug server (screenshots and remote control)
 
-Development builds serve a debug API over the local network or tailnet
+Local builds serve a debug API over the local network or tailnet
 through [DebugTrace](https://github.com/illixion/DebugTrace)
 (`LambdaVision/LambdaVision/DebugEndpoints.swift`). It runs when the build was
 signed by `build-and-sign` or launched with `DEBUGTRACE_SERVER=1`
 (`build-and-sign --mcp` does both); Settings → Advanced → Debug server
-switches it On (an Xcode run too) or Off. App Store and TestFlight builds
-never serve it. The port is the first free one in 8651–8691 (the app logs
+switches it On (an Xcode run too) or Off. Local Debug and Release builds keep
+the server available for headset development. The CI IPA build compiles the
+app's endpoints and approval window out, but the shared RAVE packages still
+link DebugTrace into the release build. The port
+is the first free one in 8651–8691 (the app logs
 `listening on port N`); every request needs the build's bearer token, and the
 first request from each client opens DebugTrace's "Allow debug access?" window
 (a window of its own, since the immersive space has no UIKit alert) with a

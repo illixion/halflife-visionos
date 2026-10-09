@@ -397,6 +397,8 @@ jobs:
       # CFBundleVersion grows; the commit count on main always grows.
       - name: Archive for visionOS
         run: |
+          # Strip the app's debug routes from the public IPA build only. Local
+          # Release builds keep them for on-headset profiling.
           xcodebuild -quiet archive \
             -project LambdaVision/LambdaVision.xcodeproj \
             -scheme LambdaVision \
@@ -409,6 +411,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=LAMBDA_NO_DEBUG_SERVER \
             CURRENT_PROJECT_VERSION="$(git rev-list --count HEAD)"
 
       # A sideloader re-signs with the user's Apple ID, and on a free account

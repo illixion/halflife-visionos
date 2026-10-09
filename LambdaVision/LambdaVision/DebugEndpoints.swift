@@ -19,13 +19,14 @@
 //  (~/Projects/DebugTrace); this file is the endpoint table and the server's
 //  lifecycle.
 //
-//  When it serves (LambdaDebugServer): DebugTrace's rule — a development
-//  build that build-and-sign signed, or a launch with DEBUGTRACE_SERVER=1
+//  When it serves (LambdaDebugServer): local builds use DebugTrace's rule — a
+//  build signed by build-and-sign, or a launch with DEBUGTRACE_SERVER=1
 //  (`build-and-sign --mcp`) — unless Settings › Advanced › Debug server says
 //  On (also an Xcode run) or Off (not even a signed build; an explicit
-//  DEBUGTRACE_SERVER=1 launch still wins). Never in an App Store or
-//  TestFlight build. Build with LAMBDA_NO_DEBUG_SERVER to compile the server
-//  out (the endpoints stay, for traces).
+//  DEBUGTRACE_SERVER=1 launch still wins). The CI IPA build defines
+//  LAMBDA_NO_DEBUG_SERVER, which removes the app's endpoint table and listener.
+//  Shared RAVE products still depend on DebugTrace for logging and the in-app
+//  console.
 //
 //  Ports: 8651–8691, the top of DebugTrace's range. The Wi-Fi manager takes
 //  8642 and falls back through 8650 (GameLibraryServer), so the two never
@@ -33,6 +34,32 @@
 //  on port N" and `bas --mcp` records it.
 //
 
+#if LAMBDA_NO_DEBUG_SERVER
+import SwiftUI
+
+nonisolated enum DebugServerMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic, on, off
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
+}
+
+@MainActor
+enum LambdaDebugServer {
+    static var available: Bool { false }
+    static var isRunning: Bool { false }
+    static var port: Int? { nil }
+    static func wanted(_ mode: DebugServerMode) -> Bool { false }
+    static func apply(_ mode: DebugServerMode) {}
+    static func scenePhaseChanged(_ phase: ScenePhase) {}
+}
+
+@MainActor
+enum DebugEndpoints {
+    static func register(appModel: AppModel,
+                         openImmersive: @escaping @MainActor () async -> Bool,
+                         dismissImmersive: @escaping @MainActor () async -> Void) {}
+}
+#else
 import DebugTrace
 import Foundation
 import GameLibrary
@@ -882,3 +909,4 @@ enum DebugEndpoints {
         ]
     }
 }
+#endif

@@ -3735,11 +3735,13 @@ actor Renderer {
         // Debug server screenshot (FrameCapture): a copy of this frame when
         // one is asked for, read back once this frame's endFrameEvent value
         // (committedFrameIndex + 1, see renderFrame) signals.
+        #if !LAMBDA_NO_DEBUG_SERVER
         if encodeUpscale {
             FrameCapture.shared.encode(commandBuffer: commandBuffer, drawable: drawable, colorMap: colorMap,
                                        residencySet: residencySets[uniformBufferIndex],
                                        completion: endFrameEvent, value: committedFrameIndex + 1)
         }
+        #endif
 
         commandBuffer.endCommandBuffer()
 

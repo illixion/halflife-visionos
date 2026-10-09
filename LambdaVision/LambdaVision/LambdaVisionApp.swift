@@ -13,7 +13,9 @@ import CompositorServices
 import GameController
 import SwiftUI
 import DebugTrace
+#if !LAMBDA_NO_DEBUG_SERVER
 import DebugTraceUI
+#endif
 
 // Audio-session interruption recovery. visionOS interrupts the session on
 // events as mundane as closing the app's 2D window, and the matching
@@ -323,7 +325,9 @@ struct LambdaVisionApp: App {
         Window("Lambda VisionPro", id: "main") {
             ContentView()
                 .environment(appModel)
+                #if !LAMBDA_NO_DEBUG_SERVER
                 .debugApprovalPrompts()
+                #endif
                 // Route gamepad input to the app instead of system focus
                 // navigation — without this, polled GCController values
                 // freeze after a stick release (a known GCController quirk).
@@ -342,7 +346,9 @@ struct LambdaVisionApp: App {
         Window("Console", id: "console") {
             RAVEConsoleScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
+                #if !LAMBDA_NO_DEBUG_SERVER
                 .debugApprovalPrompts()
+                #endif
         }
         .defaultLaunchBehavior(.suppressed)
 
@@ -351,14 +357,18 @@ struct LambdaVisionApp: App {
         Window("Performance", id: "performance") {
             PerformanceHUDScreen()
                 .handlesGameControllerEvents(matching: .gamepad)
+                #if !LAMBDA_NO_DEBUG_SERVER
                 .debugApprovalPrompts()
+                #endif
         }
         .defaultLaunchBehavior(.suppressed)
 
         // DebugTrace's "Allow debug access?" prompt, which the server opens
         // itself: over the immersive space there is no UIKit window for a
         // system alert.
+        #if !LAMBDA_NO_DEBUG_SERVER
         DebugApprovalWindow()
+        #endif
 
         // The invisible mouse-capture window (InputCatcher): over the
         // immersive space the system only sends GCMouse events to the app
