@@ -10,6 +10,10 @@ Lambda1VR code is reused.
 
 GitHub-only distribution. No App Store target. Bring your own Half-Life copy.
 
+**[Download the latest unsigned .ipa](https://github.com/illixion/halflife-visionos/releases/latest/download/LambdaVision-unsigned.ipa)** (about 15 MB)
+and re-sign it with your own team; see [AVP-INSTALL.md](AVP-INSTALL.md).
+All releases: [Releases](https://github.com/illixion/halflife-visionos/releases).
+
 See [PLAN.md](PLAN.md) for architecture, phase plan, and risks.
 
 ![In-game screenshot](images/ingame.jpg)
@@ -110,7 +114,7 @@ continuously — the hand input this app uses was converged into `RAVEInput` out
 this app and two others — and a path reference keeps "move this into the package
 and update its callers" a single atomic edit.
 
-**Just want to run it?** Download `LambdaVision-unsigned.ipa` from the latest
+**Just want to run it?** Download [`LambdaVision-unsigned.ipa`](https://github.com/illixion/halflife-visionos/releases/latest/download/LambdaVision-unsigned.ipa) from the latest
 release and re-sign it with your own team (see [AVP-INSTALL.md](AVP-INSTALL.md)).
 The rest of this section is for building from source.
 
