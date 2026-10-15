@@ -547,6 +547,47 @@ void lambda_gl_worker_set_mirror_targets(void *mtl_color0, void *mtl_depth0,
 // Whether the last frame drew this eye's mirror, and in which water (z,
 // xash units): the plane SharpWater.planes picks from the same eye's table.
 int  lambda_gl_mirror_eye(int eye, float *water_z);
+// ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced) ----
+// The engine's world triangles (gl_vrscene.c R_VRScene), snapshotted by the
+// GL worker once per map while the method is on, for the app's acceleration
+// structures (RTWaterScene.swift); layouts = gl_vrscene.c's vr_scene_*.
+typedef struct { float pos[3], uv[2], lm[2]; } lambda_scene_vertex_t;
+typedef struct { int first_tri, num_tris, num_opaque; } lambda_scene_model_t;
+typedef struct { unsigned int texnum, width, height, index; } lambda_scene_texture_t;
+typedef struct { int model, flags; float matrix[3][4]; } lambda_scene_instance_t;
+typedef struct {
+    int   generation;
+    int   num_verts, num_tris, num_models, num_textures, num_lightmaps;
+    int   block_size;
+    float lightmap_scale;
+    const lambda_scene_vertex_t  *verts;
+    const unsigned int           *indices;       // 3 per triangle
+    const unsigned int           *materials;     // texture slot | lightmap page << 16 | flags << 24
+    const float                  *texel_density; // log2 texels per world unit
+    const lambda_scene_model_t   *models;
+    const lambda_scene_texture_t *textures;
+} lambda_scene_t;
+#define LAMBDA_SCENE_MAX_INSTANCES 256
+// The worker snapshots the scene, the brush instances and copies textures
+// only while this is on.
+void lambda_gl_worker_set_rt(int on);
+// Locks the newest snapshot and fills out with it (pointers valid until
+// lambda_scene_release); returns its generation, 0 for none (still locked:
+// always release).
+int  lambda_scene_acquire(lambda_scene_t *out);
+void lambda_scene_release(void);
+// The last frame's brush instances (the world first); returns the count.
+int  lambda_scene_instances(lambda_scene_instance_t *out, int max);
+// Where the worker copies the engine's textures (2D views of rgba8 level 0,
+// one per scene texture, in order) and lightmap pages (2D slice views) for
+// this generation: a few textures a frame after the eyes, then the changed
+// lightmap pages every frame. The arrays are copied; the textures must
+// outlive the next call.
+void lambda_gl_worker_set_scene_targets(int generation, void *const *texture_views, int texture_count,
+                                        void *const *lightmap_views, int lightmap_count);
+// The generation whose textures and lightmap pages are all copied (0 none).
+int  lambda_scene_copied(void);
+
 // The water mirror's cost on the frames that draw one: [0] / [1] each eye's
 // GPU time (with GPU timing on), [2] the GL worker's CPU time for both.
 // Bits 1, 2, 4 = a fresh [0], [1], [2].

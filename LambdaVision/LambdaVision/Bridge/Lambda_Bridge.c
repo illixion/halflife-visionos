@@ -4130,6 +4130,204 @@ static void worker_render_mirror(int eye) {
     if (eye == 1) atomic_store(&g_mirror_cpu_fresh, 1);
 }
 
+// ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced) -------
+// The engine's world triangles (gl_vrscene.c) for the app's acceleration
+// structures (RTWaterScene.swift, RTWater.swift): a snapshot, taken on the
+// worker once per map (the engine's arrays live until the next load, the
+// app reads the copy on the render thread), each frame's brush instances,
+// and the engine's textures and lightmap pages copied into the app's Metal
+// textures on ANGLE's queue (glBlitFramebuffer between an FBO on the GL
+// texture and one on an EGLImage of the app's view, as the frame's own
+// targets are made), before the second eye's fence.
+typedef struct {
+    int   generation;
+    int   num_verts, num_tris, num_models, num_textures, num_lightmaps;
+    int   block_size;
+    float lightmap_scale;
+    lambda_scene_vertex_t  *verts;
+    unsigned int           *indices;
+    unsigned int           *materials;
+    float                  *texel_density;
+    lambda_scene_model_t   *models;
+    lambda_scene_texture_t *textures;
+    unsigned int            lightmaps[256];
+    unsigned int            lightmap_dirty[8];
+} engine_scene_t;   // = gl_vrscene.c vr_scene_t
+extern const engine_scene_t *R_VRScene(void);
+extern int  R_VRSceneInstances(lambda_scene_instance_t *out, int max);
+extern void R_VRSceneTakeDirty(unsigned int *out_bits);
+
+static _Atomic int     g_rt_on = 0;
+static pthread_mutex_t g_scene_mtx = PTHREAD_MUTEX_INITIALIZER;
+static lambda_scene_t  g_scene_snap;          // the app's view (const pointers)
+static void           *g_scene_blocks[6];     // the snapshot's own copies
+static unsigned int    g_scene_lightmaps[256];
+static int             g_scene_seen_gen = 0;  // the engine's generation snapshotted
+static lambda_scene_instance_t g_scene_inst[LAMBDA_SCENE_MAX_INSTANCES];
+static int             g_scene_inst_count = 0;
+// copy targets (worker-only state but for the setter)
+static int             g_scene_target_gen = 0;
+static void          **g_scene_tex_views = NULL;
+static int             g_scene_tex_count = 0;
+static void          **g_scene_lm_views = NULL;
+static int             g_scene_lm_count = 0;
+static int             g_scene_tex_next = 0;  // the next texture to copy
+static int             g_scene_lm_done = 0;   // all pages copied once
+static _Atomic int     g_scene_copied_gen = 0;
+
+void lambda_gl_worker_set_rt(int on) { atomic_store(&g_rt_on, on ? 1 : 0); }
+
+int lambda_scene_acquire(lambda_scene_t *out) {
+    pthread_mutex_lock(&g_scene_mtx);
+    if (out) *out = g_scene_snap;
+    return g_scene_snap.generation;
+}
+
+void lambda_scene_release(void) { pthread_mutex_unlock(&g_scene_mtx); }
+
+int lambda_scene_instances(lambda_scene_instance_t *out, int max) {
+    pthread_mutex_lock(&g_scene_mtx);
+    int n = g_scene_inst_count < max ? g_scene_inst_count : max;
+    if (out && n > 0) memcpy(out, g_scene_inst, sizeof(*out) * (size_t)n);
+    pthread_mutex_unlock(&g_scene_mtx);
+    return n;
+}
+
+int lambda_scene_copied(void) { return atomic_load(&g_scene_copied_gen); }
+
+void lambda_gl_worker_set_scene_targets(int generation, void *const *texture_views, int texture_count,
+                                        void *const *lightmap_views, int lightmap_count) {
+    pthread_mutex_lock(&g_scene_mtx);
+    free(g_scene_tex_views); free(g_scene_lm_views);
+    g_scene_tex_views = NULL; g_scene_lm_views = NULL;
+    g_scene_tex_count = g_scene_lm_count = 0;
+    if (texture_count > 0 && texture_views) {
+        g_scene_tex_views = malloc(sizeof(void *) * (size_t)texture_count);
+        memcpy(g_scene_tex_views, texture_views, sizeof(void *) * (size_t)texture_count);
+        g_scene_tex_count = texture_count;
+    }
+    if (lightmap_count > 0 && lightmap_views) {
+        g_scene_lm_views = malloc(sizeof(void *) * (size_t)lightmap_count);
+        memcpy(g_scene_lm_views, lightmap_views, sizeof(void *) * (size_t)lightmap_count);
+        g_scene_lm_count = lightmap_count;
+    }
+    g_scene_target_gen = generation;
+    g_scene_tex_next = 0;
+    g_scene_lm_done = 0;
+    atomic_store(&g_scene_copied_gen, 0);
+    pthread_mutex_unlock(&g_scene_mtx);
+}
+
+static void *scene_dup(const void *src, size_t bytes) {
+    void *p = malloc(bytes ? bytes : 1);
+    if (p && src && bytes) memcpy(p, src, bytes);
+    return p;
+}
+
+// A new world in the engine: replace the snapshot (under the app's lock).
+static void scene_snapshot(const engine_scene_t *e) {
+    pthread_mutex_lock(&g_scene_mtx);
+    for (int i = 0; i < 6; i++) { free(g_scene_blocks[i]); g_scene_blocks[i] = NULL; }
+    memset(&g_scene_snap, 0, sizeof(g_scene_snap));
+    if (e->num_tris > 0) {
+        g_scene_blocks[0] = scene_dup(e->verts, sizeof(lambda_scene_vertex_t) * (size_t)e->num_verts);
+        g_scene_blocks[1] = scene_dup(e->indices, sizeof(unsigned int) * 3 * (size_t)e->num_tris);
+        g_scene_blocks[2] = scene_dup(e->materials, sizeof(unsigned int) * (size_t)e->num_tris);
+        g_scene_blocks[3] = scene_dup(e->texel_density, sizeof(float) * (size_t)e->num_tris);
+        g_scene_blocks[4] = scene_dup(e->models, sizeof(lambda_scene_model_t) * (size_t)e->num_models);
+        g_scene_blocks[5] = scene_dup(e->textures, sizeof(lambda_scene_texture_t) * (size_t)e->num_textures);
+        g_scene_snap.generation = e->generation;
+        g_scene_snap.num_verts = e->num_verts;
+        g_scene_snap.num_tris = e->num_tris;
+        g_scene_snap.num_models = e->num_models;
+        g_scene_snap.num_textures = e->num_textures;
+        g_scene_snap.num_lightmaps = e->num_lightmaps;
+        g_scene_snap.block_size = e->block_size;
+        g_scene_snap.lightmap_scale = e->lightmap_scale;
+        g_scene_snap.verts = g_scene_blocks[0];
+        g_scene_snap.indices = g_scene_blocks[1];
+        g_scene_snap.materials = g_scene_blocks[2];
+        g_scene_snap.texel_density = g_scene_blocks[3];
+        g_scene_snap.models = g_scene_blocks[4];
+        g_scene_snap.textures = g_scene_blocks[5];
+        memcpy(g_scene_lightmaps, e->lightmaps, sizeof(g_scene_lightmaps));
+    }
+    pthread_mutex_unlock(&g_scene_mtx);
+}
+
+// GL texture (level 0) → the app's Metal texture view, on ANGLE's queue.
+static int scene_copy_texture(GLuint src, int w, int h, void *mtl_view) {
+    typedef void (*egl_rb_fn)(GLenum, void *);
+    static egl_rb_fn egl_rb = NULL;
+    if (!egl_rb) egl_rb = (egl_rb_fn)eglGetProcAddress("glEGLImageTargetRenderbufferStorageOES");
+    if (!egl_rb || !src || !mtl_view || w <= 0 || h <= 0) return 0;
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    EGLImage img = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)mtl_view, img_attribs);
+    if (img == EGL_NO_IMAGE) return 0;
+    GLuint rb = 0, fbo[2] = { 0, 0 };
+    int ok = 0;
+    glGenRenderbuffers(1, &rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    egl_rb(GL_RENDERBUFFER, img);
+    glGenFramebuffers(2, fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+    glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE
+        && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        ok = 1;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    glDeleteFramebuffers(2, fbo);
+    glDeleteRenderbuffers(1, &rb);
+    eglDestroyImage(g_gl_disp, img);
+    while (glGetError() != GL_NO_ERROR) {}   // a texture ANGLE cannot attach stays black
+    return ok;
+}
+
+#define SCENE_TEXTURES_PER_FRAME 32
+
+// After the second eye, while the method is on.
+static void worker_scene_frame(void) {
+    if (!atomic_load(&g_rt_on)) return;
+    const engine_scene_t *e = R_VRScene();
+    if (!e) return;
+    if (e->generation != g_scene_seen_gen) {
+        g_scene_seen_gen = e->generation;
+        scene_snapshot(e);
+    }
+    lambda_scene_instance_t inst[LAMBDA_SCENE_MAX_INSTANCES];
+    int n = R_VRSceneInstances(inst, LAMBDA_SCENE_MAX_INSTANCES);
+    unsigned int dirty[8];
+    R_VRSceneTakeDirty(dirty);
+
+    pthread_mutex_lock(&g_scene_mtx);
+    memcpy(g_scene_inst, inst, sizeof(inst[0]) * (size_t)(n > 0 ? n : 0));
+    g_scene_inst_count = n > 0 ? n : 0;
+    if (g_scene_target_gen != 0 && g_scene_target_gen == g_scene_snap.generation) {
+        GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        int budget = SCENE_TEXTURES_PER_FRAME;
+        while (g_scene_tex_next < g_scene_tex_count && g_scene_tex_next < g_scene_snap.num_textures && budget-- > 0) {
+            const lambda_scene_texture_t *t = &g_scene_snap.textures[g_scene_tex_next];
+            scene_copy_texture(t->texnum, (int)t->width, (int)t->height, g_scene_tex_views[g_scene_tex_next]);
+            g_scene_tex_next++;
+        }
+        int pages = g_scene_lm_count < g_scene_snap.num_lightmaps ? g_scene_lm_count : g_scene_snap.num_lightmaps;
+        for (int i = 0; i < pages; i++) {
+            if (g_scene_lm_done && !(dirty[i >> 5] & (1u << (i & 31)))) continue;
+            scene_copy_texture(g_scene_lightmaps[i], g_scene_snap.block_size, g_scene_snap.block_size, g_scene_lm_views[i]);
+        }
+        g_scene_lm_done = 1;
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+        if (g_scene_tex_next >= g_scene_tex_count)
+            atomic_store(&g_scene_copied_gen, g_scene_target_gen);
+    }
+    pthread_mutex_unlock(&g_scene_mtx);
+}
+
 // ---- Engine console commands ----------------------------------------------
 // Queued from any thread and handed to the engine (Cbuf_AddText, which is
 // not thread-safe) on the worker at the start of the next frame — the same
@@ -4358,6 +4556,7 @@ static void *gl_worker_main(void *arg) {
                 gt_end();
                 worker_render_mirror(1);
                 worker_render_probe_face();
+                worker_scene_frame();
                 er = lambda_gl_end_frame();
                 g_ft_cur[2] = t1 - t0;
                 g_ft_cur[3] = ft_now_ms() - t1;

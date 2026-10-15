@@ -180,6 +180,8 @@ actor Renderer {
     var sharpWater: SharpWater?
     // The engine-rendered water mirror (PlanarWater), made on first use.
     var planarWater: PlanarWater?
+    // The ray-traced water mirror (RTWater), made on first use.
+    var rtWater: RTWater?
     var glassEyes: [lambda_glass_eye_t] = []
     // Holds the last frame of a level still in the room while the next loads.
     var loadSnapshot: LoadSnapshot!
@@ -442,6 +444,8 @@ actor Renderer {
     nonisolated(unsafe) static var waterMirrorMethod: WaterMirrorMethod = .screenSpace
     /// The engine-rendered mirror's size, as a divisor of the colour map's.
     static let planarWaterDivisor = 2
+    /// The ray-traced mirror's size, as a divisor of the colour map's.
+    static let rtWaterDivisor = 2
     /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
     /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
     nonisolated(unsafe) static var waterMirrorView: Int = 0
@@ -2921,6 +2925,12 @@ actor Renderer {
             }
         }
         planarWater?.stage(planarOn)
+        // The ray-traced mirror: the worker snapshots the scene, the brush
+        // instances and copies textures only while it is on.
+        let rtOn = Renderer.waterReflections && Renderer.sharpWaterReflections
+            && Renderer.waterMirrorMethod == .rayTraced && glassProbe != nil && !engineHeld
+            && Renderer.hdrTestMode == 0 && device.supportsRaytracing
+        lambda_gl_worker_set_rt(rtOn ? 1 : 0)
         var secondEyeRan = false
 
         for eye in 0..<2 where !engineHeld {
@@ -3007,6 +3017,23 @@ actor Renderer {
             }
             glassProbe?.eyesDone(now: ftEyesStart, secondEyeRan: secondEyeRan)
             if planarOn { PlanarWater.recordTiming() }
+            if rtOn, let colorMap {
+                if rtWater == nil, let library = device.makeDefaultLibrary() {
+                    rtWater = RTWater(device: device, library: library)
+                }
+                if let rtWater {
+                    var fresh = rtWater.ensureTarget(colorMap: colorMap, divisor: Renderer.rtWaterDivisor)
+                    let change = rtWater.prepare(frame: committedFrameIndex + 1, completedFrame: endFrameEvent.signaledValue)
+                    fresh += change.add
+                    #if !targetEnvironment(simulator)
+                    if !fresh.isEmpty || !change.remove.isEmpty {
+                        if !fresh.isEmpty { commandQueueResidencySet.addAllocations(fresh) }
+                        if !change.remove.isEmpty { commandQueueResidencySet.removeAllocations(change.remove) }
+                        commandQueueResidencySet.commit()
+                    }
+                    #endif
+                }
+            }
         }
 
         // Order our queue after ANGLE's colorMap writes for both eyes. The
@@ -3350,6 +3377,18 @@ actor Renderer {
             if Renderer.waterMirrorMethod == .rendered {
                 // the engine drew the mirror with each eye (PlanarWater)
                 ssprPlanes = planarWater != nil ? PlanarWater.planes(ssprPlanes) : (.zero, .zero)
+            } else if Renderer.waterMirrorMethod == .rayTraced {
+                ssprPlanes.0.w = Float(Renderer.rtWaterDivisor)
+                ssprPlanes.1.w = Float(Renderer.rtWaterDivisor)
+                var traced = false
+                if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0, encodeUpscale, let rtWater {
+                    let timer = timed ? gpuTimer : nil
+                    traced = rtWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineStencil: engineStencil!,
+                                            paramsAddress: displayParamsBuffer.gpuAddress
+                                                + UInt64(Self.displayParamsStride * uniformBufferIndex),
+                                            frame: committedFrameIndex + 1, mark: { timer?.mark($0, $1) })
+                }
+                if !traced { ssprPlanes = (.zero, .zero) }
             } else if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                 if sharpWater == nil, let library = device.makeDefaultLibrary() {
                     sharpWater = SharpWater(device: device, library: library)
@@ -3482,7 +3521,17 @@ actor Renderer {
                 Self.setGlassEyes(&params, glassEyes)
                 params.sspr = ssprPlanes
                 params.waterDebug = SIMD4(Float(Renderer.waterMirrorView), Renderer.waterUnderside, 0, 0)
-                let mirror = Renderer.waterMirrorMethod == .rendered ? planarWater?.color : sharpWater?.color
+                let mirror = switch Renderer.waterMirrorMethod {
+                case .rendered: planarWater?.color
+                case .rayTraced: rtWater?.color
+                case .screenSpace: sharpWater?.color
+                }
+                if Renderer.waterMirrorMethod == .rayTraced, let scene = rtWater?.scene {
+                    // the lightmap factor, one mirror texel's angle, the longest ray
+                    let t = params.eyeTangents.0
+                    let rows = Float(max(rtWater?.color?.height ?? 1, 1))
+                    params.rtWater = SIMD4(scene.lightmapScale, (t.z + t.w) / rows, max(Renderer.engineZFar, 4096), 0)
+                }
                 if let color = mirror, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                     self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
                 }

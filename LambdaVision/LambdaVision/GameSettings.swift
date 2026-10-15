@@ -704,11 +704,16 @@ enum WaterMirrorMethod: String, CaseIterable, Identifiable {
     /// The engine draws each eye's view again from the mirrored eye
     /// (PlanarWater, gl_rmain.c R_VRMirrorView): exact above the water.
     case rendered
+    /// Each water pixel's reflected ray traced through the world's brush
+    /// geometry (RTWater): exact for the world and brush entities, leaves
+    /// out models and sprites; fast with ray-tracing hardware (M5).
+    case rayTraced
     var id: String { rawValue }
     var label: String {
         switch self {
         case .screenSpace: "Screen space"
         case .rendered: "Rendered by the engine"
+        case .rayTraced: "Ray traced"
         }
     }
 }
