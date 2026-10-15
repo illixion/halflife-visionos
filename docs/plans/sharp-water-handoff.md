@@ -126,7 +126,7 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Round 13: saw teeth on the sink's vertical falling sheet | **round 14 untested**: same stale-probe walk (the sheet is glass kind, probe-lit) |
 | Round 13: faint diagonal stripes on the flood | **round 14 untested**: the same walk where the mirror hands over to the probe |
 | Round 13: staircase (one texel) at the counter's mirrored edge, light strip along it | **round 14 untested**: candidates moved onto the texel's centre ray; view 101 wrong-surface sub-rays at the lip 53 → 8 |
-| Crouched by a table: underside not mirrored, room shows through | screen-space: **open** (round 15, no on-screen source); **round 16 untested on device**: "Sharp water method" → Rendered by the engine; matches the mirrored-eye truth on the Mac |
+| Crouched by a table: underside not mirrored, room shows through | screen-space: **open** (round 15, no on-screen source); **rounds 16 and 17 untested on device**: "Sharp water method" → Rendered by the engine, or Ray traced; both match the engine's own views on the Mac |
 
 ### Cases the mirror must handle (each has a harness view)
 - A table or counter top seen from above (a back face to the reflected
@@ -342,8 +342,8 @@ shader change kept):
   engine re-render from the mirrored eye (tier 2: a clip plane at the
   water, no underwater fog, roughly the engine's cost again on frames that
   show water), or ray tracing (tier 5, M5 only). Decided 2026-10-15: both,
-  as choices beside the screen-space mirror. Tier 2 is round 16; ray
-  tracing comes after it.
+  as choices beside the screen-space mirror. Tier 2 is round 16, ray
+  tracing round 17.
 
 How to make a mirrored-eye pair, in the cfg after the scene setup below:
 `ent_fire 1 set view_ofs "0 0 <eye.z − origin.z>"` puts the eye at any
@@ -394,6 +394,64 @@ the bench counter's overhang, the sink sheet (glass kind, so probe-lit in
 both modes), NPCs and sprites reflected upright-mirrored, and the waterline
 where walls meet the flood. Then `gPlanar*` against `gMirror` at the bench
 view below.
+
+### Round 17: the ray-traced mirror (tier 5)
+
+"Sharp water method" → **Ray traced** (`rayTraced`). Each water texel of
+the mirror target (half the colour map's size, `Renderer.rtWaterDivisor`)
+traces its reflected ray through the world's brush geometry and shades the
+hit the way the engine does; the composite reads it like the screen-space
+mirror's (premultiplied, `sspr.z = 1`), the probe filling misses and the
+sky.
+
+- **Engine** (`gl_vrscene.c`): `R_VRScene` turns the world model's
+  polygons (the drawn `glpoly2_t`, not water, not sky) into triangles with
+  texture and lightmap coordinates, a material word (texture slot,
+  lightmap page, alpha-test and fullbright flags) and a texel density (for
+  the mip level), per submodel with the alpha-tested ones last. Rebuilt
+  after `GL_BuildLightmaps` (a map load, a gamma rebuild). Lightstyle
+  updates mark their page dirty. `R_VRSceneInstances`: the world plus the
+  brush entities of the last view's draw list (normal and alpha-tested
+  render modes; glass, additive and colour brushes let the room through)
+  with their transforms. `lightmap_scale` is what the draw path multiplies
+  a page's texels by: **2** on the VBO path (`gl_vbo 1`, the headset:
+  pages stored at 171/256, RGB_SCALE 2), **4/3** without VBO (pages whole,
+  tinted 128/192, doubled in the blend), 1 without overbright.
+- **Bridge** (`worker_scene_frame`, after the second eye, only while the
+  method is on): snapshots the scene once per generation; publishes the
+  instances; copies the engine's textures (32 a frame) and the changed
+  lightmap pages into the app's textures with `glBlitFramebuffer` between an
+  FBO on the GL texture and one on an EGLImage of the app's level-0 view.
+- **App**: `RTWaterScene` (also compiled into DepthProbe) holds the buffers,
+  the textures, one BLAS per brush model (an opaque geometry and a
+  non-opaque one for `{` textures) and a ring of three indirect TLASes,
+  rebuilt when the instances change. As in Oneiros, builds go on a plain
+  Metal 3 queue: Metal 4's builds are Apple9+ only. `RTWater` takes the
+  snapshot, hands the worker its copy targets, generates the mipmaps once
+  the copies land and traces both eyes (`rtWaterTrace`).
+- **Shading**: the texture at a mip level from the ray's footprint (eye to
+  water to hit, times one mirror texel's angle, widened on edge-on
+  surfaces), times the bilinear lightmap times `lightmap_scale`, clamped.
+  Alpha test as the engine's (alpha above 0.25 is solid), in the
+  intersection query's candidate loop.
+- **Not in it yet**: studio models (NPCs, items), sprites, particles,
+  dynamic lights, other water surfaces, glass.
+
+Mac check: `r_vrscenedump N` beside `r_vrdump N` and `r_vrmirrordump N`.
+DepthProbe builds the scene from the dump, uploads its pixels and traces
+it, then compares the result with the rendered mirror (round 16) on the
+water texels and writes `rt-<dump>.png` (engine mirror | trace | difference ×4).
+At the c1a2 table (19,981 triangles, 216 models, 22 instances), with
+the eye above, inside and under the slab: hits on all water texels, a mean
+difference of 2–3/255 on both draw paths, 0.5% of hits off by more than 40
+(edges), and 0.4–0.5 ms on the M2 Max GPU.
+
+To check on the headset: that the scene appears a few frames into the map
+(the log's `[RTWater] map scene` line), and that the textures arrive. Black
+surfaces would mean the blit copy failed: ANGLE could not attach that
+format. Check the brightness against Rendered by the engine (the VBO
+path's ×2), and that doors move in the mirror. Then the cost (`gMirror`)
+on the M2, which has no ray-tracing hardware (Apple8), and on the M5.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror

@@ -844,6 +844,16 @@ effect can still be changed individually, PC-style.
   depth), never Half-Life's map or texture lists without a fallback, and
   shows nothing where its data is missing.
 
+### Tiers 2 and 5 for water (2026-10-15)
+
+Sharp water now has three methods (Settings → Graphics → "Sharp water
+method"): the screen-space mirror (3e onwards), the engine re-rendering
+each eye from the mirrored eye (tier 2, `PlanarWater`, `R_VRMirrorView`),
+and ray tracing through the world's brush geometry (tier 5, `RTWater`,
+`gl_vrscene.c`). Both new ones are checked on the Mac and untested on the
+headset; `docs/plans/sharp-water-handoff.md` rounds 16 and 17 have the
+details and the device checklist.
+
 ### What the next tier needs
 
 - **Tier 2 (planar reflections):** a second engine render per reflective
