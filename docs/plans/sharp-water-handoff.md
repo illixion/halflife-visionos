@@ -126,6 +126,7 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Round 13: saw teeth on the sink's vertical falling sheet | **round 14 untested**: same stale-probe walk (the sheet is glass kind, probe-lit) |
 | Round 13: faint diagonal stripes on the flood | **round 14 untested**: the same walk where the mirror hands over to the probe |
 | Round 13: staircase (one texel) at the counter's mirrored edge, light strip along it | **round 14 untested**: candidates moved onto the texel's centre ray; view 101 wrong-surface sub-rays at the lip 53 → 8 |
+| Crouched by a table: underside not mirrored, room shows through | **open** (round 15): eye inside the top's height band, no on-screen source; needs tier 2 or RT |
 
 ### Cases the mirror must handle (each has a harness view)
 - A table or counter top seen from above (a back face to the reflected
@@ -308,6 +309,48 @@ Residuals offline: a stale probe from 90+ units still adds some edges
 (0.05%; out of range now); one-texel steps remain where the mirror runs off
 the frame's bottom edge (to the probe, as before); view 97's comb +1.84
 (limit 2.0, was +1.49) and hatching 1× at its limit (1.33).
+
+### Round 15: the room through a table at low eye heights (not fixed)
+Device report: crouched by a c1a2 steel table, the water doesn't mirror the
+table's underside and shows the room through it. Offline (2026-10-14/15, no
+shader change kept):
+- *Not vis.* The engine draws the underside from the eye. A render from the
+  mirrored eye (under the water, even under the floor) draws it too, with
+  `r_novis` 0 or 1 identical. So vis stops neither the mirror nor a future
+  engine re-render from the mirrored eye (tier 2 in `modern-lighting.md`).
+- *Which case it is depends on eye height.* The table's top runs from z −553
+  to −545, over water at −568; c1a2 at 1100 −410, yaw 347, pitch 0:
+  - eye above the top (−541): handled by the round 11/12 occluders;
+  - **eye inside that height band (−549):** the eye sees only the edge face,
+    neither the top nor the underside, so the mirror has neither a source
+    nor an occluder there, and the room shows through. A headset crouch
+    passes through this band. That's the report.
+  - eye just under the underside (−556): the underside is on screen but
+    edge-on and magnified about 10× in the mirror, so its sources cover
+    about a quarter of its image, as rows with the room between them.
+- *Ground truth now exists* (DepthProbe `mirrorTruth`, reported, not yet a
+  failure). Against the mirrored-eye render, the share of rays showing
+  something farther than the truth is 4.9% / **16.2%** / 5.3% for those
+  three eye heights. The 16% is the table's whole mirrored underside. The
+  bench counter's overhang shows red in all three.
+- *Tried and dropped:* treating level faces just above the eye as occluders
+  that keep their own colour (`hz > E.z`). It barely moved the numbers and
+  striped the counter's corner.
+- *What could fix the band case:* the mirror can only guess there, for
+  example by taking a vertical face's bottom edge as a slab occluder. The
+  real fixes are the ones that have the geometry whatever the eye sees: an
+  engine re-render from the mirrored eye (tier 2: a clip plane at the
+  water, no underwater fog, roughly the engine's cost again on frames that
+  show water), or ray tracing (tier 5, M5 only). Undecided.
+
+How to make a mirrored-eye pair, in the cfg after the scene setup below:
+`ent_fire 1 set view_ofs "0 0 <eye.z − origin.z>"` puts the eye at any
+height, even under the floor (the game's KeyValue sets entvars). Dump with
+`r_vrdump N` and `r_vrprobedump N`. Then set `view_ofs` so that eye.z
+becomes `2·(−568) − eye.z`, turn on `r_novis 1`, run `r_vrdump M`, and save
+M as `vrmirrorN.bin` beside `vrdumpN.bin`. Keep the pitch at 0, which the
+mirrored eye shares; DepthProbe looks it up by ray direction, so a degree
+or two of drift doesn't matter.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror

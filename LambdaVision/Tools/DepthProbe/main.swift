@@ -24,6 +24,8 @@
 //   reflection at the same glass point;
 // - stereo: dumps from origins an eye apart are compared the same way, and
 //   both must take every glass pixel's reflection from the probe.
+// A vrmirrorN.bin beside vrdumpN.bin (the mirrored eye's render) adds a
+// ground-truth check of the sharp-water mirror (mirrorTruth).
 // With --png DIR it writes glass-<dump>.png (plain | glass over the
 // reflection alone | the mask) for a look.
 //
@@ -668,6 +670,78 @@ func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg
             leakNear / Float(max(occNear, 1)), past / Float(max(visibleN, 1)), image)
 }
 
+/// Ground truth from the engine itself: `vrmirrorN.bin` next to `vrdumpN.bin`
+/// is the same frame rendered from the mirrored eye (same yaw, pitch
+/// negated; in the cfg, `ent_fire 1 set view_ofs` puts the eye at
+/// 2·water − eye.z, with `r_novis 1`). Along every sub-ray's mirrored ray
+/// its depth is the distance the reflection really shows, whatever the eye
+/// can see, so a table's underside counts even where no pixel of the eye's
+/// frame holds it. The engine draws that view underwater (fogged, the
+/// surface seen from below), so only depth is used, and rays whose truth
+/// lies on or under the water plane are skipped. Against the resolve's
+/// SSPR_DEBUG record, weighted by its confidence: `farther` shows something
+/// clearly past the truth (the room through a table), `nearer` something
+/// clearly in front of it, `missing` nothing at all where the truth is
+/// within 120 units (left to the probe).
+func mirrorTruth(_ dump: Dump, _ mirror: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int,
+                 _ dbg: MTLBuffer) -> (rays: Int, farther: Float, nearer: Float, missing: Float, image: [UInt8]) {
+    guard let stencil = dump.stencil else { return (0, 0, 0, 0, []) }
+    let w = dump.width, h = dump.height
+    func tangents(_ p: float4x4) -> SIMD4<Float> {
+        SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
+              (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
+    }
+    let (f, r, u) = dump.axes, t = tangents(dump.projection)
+    let (f2, r2, u2) = mirror.axes, t2 = tangents(mirror.projection)
+    let p22 = mirror.projection.columns.2.z, p32 = mirror.projection.columns.3.z
+    let near = p32 / (p22 - 1), far = p32 / (p22 + 1)
+    let E = dump.origin, height = plane.y, waterCode = UInt8(Int(plane.x) + 16)
+    let mirroredEye = SIMD3(E.x, E.y, 2 * height - E.z)
+    let rec = dbg.contents().bindMemory(to: SIMD2<Float>.self, capacity: mw * mh * 4)
+    var rays = 0, nearN = 0
+    var farther: Float = 0, nearer: Float = 0, missing: Float = 0
+    var image = [UInt8](repeating: 0, count: mw * mh * 4)
+    for gy in 0..<mh {
+        for gx in 0..<mw {
+            var bad = SIMD3<Float>(0, 0, 0)
+            for sj in 0..<2 { for si in 0..<2 {
+                let uv = SIMD2((Float(gx) + (Float(si) + 0.5) / 2) / Float(mw), (Float(gy) + (Float(sj) + 0.5) / 2) / Float(mh))
+                guard stencil[min(Int(uv.y * Float(h)), h - 1) * w + min(Int(uv.x * Float(w)), w - 1)] == waterCode else { continue }
+                var d = simd_normalize(f + (-t.x + (t.x + t.y) * uv.x) * r + (-t.w + (t.z + t.w) * uv.y) * u)
+                if d.z > -1e-4 { d.z = -1e-4 }
+                let toWater = (height - E.z) / d.z                     // the same length from the mirrored eye
+                let dm = SIMD3(d.x, d.y, -d.z)
+                let fz = simd_dot(dm, f2)
+                guard fz > 1e-3 else { continue }
+                let mu = SIMD2((simd_dot(dm, r2) / fz + t2.x) / (t2.x + t2.y), (simd_dot(dm, u2) / fz + t2.w) / (t2.z + t2.w))
+                guard mu.x >= 0, mu.x < 1, mu.y >= 0, mu.y < 1 else { continue }
+                let i = min(Int(mu.y * Float(h)), h - 1) * w + min(Int(mu.x * Float(w)), w - 1)
+                guard mirror.depth[i] < 1 else { continue }
+                let ndc = mirror.depth[i] * 2 - 1
+                let z = 2 * near * far / ((far + near) - ndc * (far - near))
+                // from the mirror camera's own origin (within a fraction of a unit of mirroredEye)
+                let truth = z / fz + simd_length(mirror.origin - mirroredEye)
+                guard truth > toWater + 2 else { continue }              // the surface from below, or under water
+                rays += 1
+                let shown = rec[(gy * mw + gx) * 4 + sj * 2 + si]
+                let tol = 0.05 * truth + 8
+                if shown.y > 0 && shown.x > truth + tol { farther += shown.y; bad.x += 1 }
+                if shown.y > 0 && shown.x < truth - tol { nearer += shown.y; bad.y += 1 }
+                if truth - toWater < 120 {
+                    nearN += 1
+                    if shown.y <= 0 { missing += 1; bad.z += 1 }
+                }
+            } }
+            // top-down: red = farther than the truth, green = nearer, blue = nothing shown
+            let o = ((mh - 1 - gy) * mw + gx) * 4
+            image[o] = UInt8(min(bad.x / 4 * 255, 255)); image[o + 1] = UInt8(min(bad.y / 4 * 255, 255))
+            image[o + 2] = UInt8(min(bad.z / 4 * 255, 255)); image[o + 3] = 255
+        }
+    }
+    let n = Float(max(rays, 1))
+    return (rays, farther / n, nearer / n, missing / Float(max(nearN, 1)), image)
+}
+
 /// Mac GPU time of the two mirror dispatches (SSPR_TIMING=1): per dispatch,
 /// the fastest of 10 command buffers of 50 dispatches each. Only the ratio between two
 /// versions carries over to the headset.
@@ -849,6 +923,19 @@ for path in args {
                 // b2e7e18 at the c1a2 table (dumps 81–88): 6–18% (fails)
                 if r.occluded > 500 && r.leak > 0.03 { failures += 1 }
                 if let dir = pngDir { writePNG(r.image, t.width, t.height, "\(dir)/seethrough-\(name).png") }
+                let mirrorPath = (path.split(separator: "@").first.map(String.init) ?? path)
+                    .replacingOccurrences(of: "vrdump", with: "vrmirror")
+                if !path.contains("@"), mirrorPath != path, FileManager.default.fileExists(atPath: mirrorPath),
+                   let mirror = try? Dump(path: mirrorPath) {
+                    // Reported, not yet a failure: the mirror fails it wherever a
+                    // table's top or underside is off screen (2026-10-15, c1a2 at
+                    // 1100 −410, eye in the steel table's height band −553…−545:
+                    // farther 16%, the table's whole mirrored underside).
+                    let m = mirrorTruth(dump, mirror, plane, t.width, t.height, dbg)
+                    print(String(format: "%@ against the mirrored-eye render: %d sub-rays; farther than the truth %.2f%%, nearer %.2f%% (confidence-weighted); nothing shown %.2f%% where the truth is within 120 units",
+                                 name, m.rays, m.farther * 100, m.nearer * 100, m.missing * 100))
+                    if let dir = pngDir { writePNG(m.image, t.width, t.height, "\(dir)/truth-\(name).png") }
+                }
             }
         }
     }
