@@ -3517,10 +3517,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..6f9ba8d 100644
+index e6e7712..5c0d79e 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,25 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,35 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3528,6 +3528,8 @@ index e6e7712..6f9ba8d 100644
 +extern convar_t	r_vrdump;
 +extern convar_t	r_vrprobedump;
 +extern convar_t	r_vrmirrordump;
++extern convar_t	r_vrscenedump;
++void R_DumpSceneForVR( void );
 +#endif
 +extern convar_t	r_vrglass;
 +extern convar_t	r_vrwater;
@@ -3543,14 +3545,22 @@ index e6e7712..6f9ba8d 100644
 +extern qboolean	r_vrmirror_pass;
 +extern vec3_t	r_vrmirror_eye_origin;
 +int R_VRMirrorView( float waterZ, int width, int height );
++// visionOS ray-traced water mirror (gl_vrscene.c)
++void R_VRSceneNewMap( void );
++void R_VRSceneLightmapChanged( int page );
++struct vr_scene_s;
++struct vr_scene_instance_s;
++const struct vr_scene_s *R_VRScene( void );
++int R_VRSceneInstances( struct vr_scene_instance_s *out, int max );
++void R_VRSceneTakeDirty( unsigned int *out_bits );
  extern convar_t	r_nocull;
  extern convar_t	r_lockpvs;
  extern convar_t	r_lockfrustum;
 diff --git a/ref/gl/gl_opengl.c b/ref/gl/gl_opengl.c
-index 05a130f..47c4a5e 100644
+index 05a130f..842e422 100644
 --- a/ref/gl/gl_opengl.c
 +++ b/ref/gl/gl_opengl.c
-@@ -26,6 +26,13 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
+@@ -26,6 +26,14 @@ CVAR_DEFINE_AUTO( gl_litwater_force, "0", FCVAR_GLCONFIG, "force enable lightmap
  CVAR_DEFINE_AUTO( r_lighting_ambient, "0.3", FCVAR_GLCONFIG, "map ambient lighting scale" );
  CVAR_DEFINE_AUTO( r_detailtextures, "1", FCVAR_GLCONFIG, "enable detail textures support" );
  CVAR_DEFINE_AUTO( r_novis, "0", 0, "ignore vis information (perfomance test)" );
@@ -3558,13 +3568,14 @@ index 05a130f..47c4a5e 100644
 +CVAR_DEFINE_AUTO( r_vrdump, "0", 0, "dump the next 3D view's colour, depth and matrices to vrdump.bin (visionOS snapshot tuning)" );
 +CVAR_DEFINE_AUTO( r_vrprobedump, "0", 0, "dump the glass environment probe (six faces) from the next 3D view's origin to vrprobe.bin (visionOS glass tuning)" );
 +CVAR_DEFINE_AUTO( r_vrmirrordump, "0", 0, "dump the rendered water mirror (R_VRMirrorView) of the next 3D view, in the water below the eye at this view's first water row, to vrplanar.bin (visionOS water tuning)" );
++CVAR_DEFINE_AUTO( r_vrscenedump, "0", 0, "dump the world's brush triangles, the next 3D view's brush instances, and their textures and lightmaps to vrscene.bin (visionOS ray-traced water tuning)" );
 +#endif
 +CVAR_DEFINE_AUTO( r_vrglass, "0", 0, "mark glass brush surfaces in the stencil buffer with their plane's row in the glass plane table (visionOS glass pass)" );
 +CVAR_DEFINE_AUTO( r_vrwater, "0", 0, "mark water (warp) surfaces in the stencil buffer like r_vrglass, as water rows of the plane table (visionOS water pass)" );
  CVAR_DEFINE_AUTO( r_nocull, "0", 0, "ignore frustrum culling (perfomance test)" );
  CVAR_DEFINE_AUTO( r_lockpvs, "0", FCVAR_CHEAT, "lockpvs area at current point (pvs test)" );
  CVAR_DEFINE_AUTO( r_lockfrustum, "0", FCVAR_CHEAT, "lock frustrum area at current point (cull test)" );
-@@ -1151,6 +1158,13 @@ static void GL_InitCommands( void )
+@@ -1151,6 +1159,14 @@ static void GL_InitCommands( void )
  {
  	gEngfuncs.Cvar_RegisterVariable( &r_lighting_ambient );
  	gEngfuncs.Cvar_RegisterVariable( &r_novis );
@@ -3572,6 +3583,7 @@ index 05a130f..47c4a5e 100644
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrdump );
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrprobedump );
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrmirrordump );
++	gEngfuncs.Cvar_RegisterVariable( &r_vrscenedump );
 +#endif
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrglass );
 +	gEngfuncs.Cvar_RegisterVariable( &r_vrwater );
@@ -3579,7 +3591,7 @@ index 05a130f..47c4a5e 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..19619c9 100644
+index 0568486..d166cfc 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3889,7 +3901,7 @@ index 0568486..19619c9 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1113,11 +1297,30 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1113,11 +1297,32 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	}
  
  	tr.fCustomRendering = false;
@@ -3917,11 +3929,13 @@ index 0568486..19619c9 100644
 +		R_DumpProbeForVR();
 +	if( r_vrmirrordump.value && !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) && !r_vrmirror_pass )
 +		R_DumpMirrorForVR();
++	if( r_vrscenedump.value && !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) && !r_vrmirror_pass )
++		R_DumpSceneForVR();
 +#endif
  
  	return;
  }
-@@ -1167,6 +1370,265 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1372,265 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4188,7 +4202,7 @@ index 0568486..19619c9 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..38c6706 100644
+index df6f012..9b083ce 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4324,7 +4338,15 @@ index df6f012..38c6706 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
-@@ -1529,6 +1638,9 @@ static void R_RenderLightmapForSurface( msurface_t *fa )
+@@ -1497,6 +1606,7 @@ static qboolean R_CheckLightMap( msurface_t *fa )
+ 		GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
+ #endif
+ 		pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
++		R_VRSceneLightmapChanged( fa->lightmaptexturenum );
+ 
+ #if XASH_WES
+ 		GL_SelectTexture( XASH_TEXTURE0 );
+@@ -1529,6 +1639,9 @@ static void R_RenderLightmapForSurface( msurface_t *fa )
  R_RenderBrushPoly
  ================
  */
@@ -4334,7 +4356,7 @@ index df6f012..38c6706 100644
  static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  {
  	texture_t	*t;
-@@ -1542,6 +1654,12 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+@@ -1542,6 +1655,12 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  
  	if( FBitSet( fa->flags, SURF_DRAWTURB ))
  	{
@@ -4347,7 +4369,7 @@ index df6f012..38c6706 100644
  		// warp texture
  		EmitWaterPolys( fa, cull_type == CULL_BACKSIDE, R_UploadRipples( t ));
  
-@@ -1549,6 +1667,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+@@ -1549,6 +1668,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  		if( Mod_HaveLightmappedWater( ))
  			R_RenderLightmapForSurface( fa );
  
@@ -4356,7 +4378,7 @@ index df6f012..38c6706 100644
  		return;
  	}
  	else GL_Bind( XASH_TEXTURE0, t->gl_texturenum );
-@@ -1696,7 +1816,7 @@ void R_DrawWaterSurfaces( void )
+@@ -1696,7 +1817,7 @@ void R_DrawWaterSurfaces( void )
  	msurface_t	*s;
  	texture_t		*t;
  
@@ -4365,7 +4387,7 @@ index df6f012..38c6706 100644
  		return;
  
  	// non-transparent water is already drawed
-@@ -1730,7 +1850,11 @@ void R_DrawWaterSurfaces( void )
+@@ -1730,7 +1851,11 @@ void R_DrawWaterSurfaces( void )
  
  		for( ; s; s = s->texturechain )
  		{
@@ -4377,7 +4399,7 @@ index df6f012..38c6706 100644
  
  			if( Mod_HaveLightmappedWater( ))
  				R_RenderLightmapForSurface( s );
-@@ -1830,6 +1954,123 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1830,6 +1955,123 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -4501,7 +4523,7 @@ index df6f012..38c6706 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1946,7 +2187,8 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1946,7 +2188,8 @@ void R_DrawBrushModel( cl_entity_t *e )
  	e->visframe = tr.realframecount; // visible
  
  	// calculate dynamic lighting for bmodel
@@ -4511,7 +4533,7 @@ index df6f012..38c6706 100644
  
  	// setup the rendermode
  	R_SetRenderMode( e );
-@@ -1959,6 +2201,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2202,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
@@ -4524,7 +4546,7 @@ index df6f012..38c6706 100644
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2220,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2221,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
@@ -4543,7 +4565,7 @@ index df6f012..38c6706 100644
  	}
  
  	R_DrawVBO( R_HasLightmap(), true );
-@@ -3855,6 +4111,10 @@ void R_MarkLeaves( void )
+@@ -3855,6 +4112,10 @@ void R_MarkLeaves( void )
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		return;
  
@@ -4554,6 +4576,22 @@ index df6f012..38c6706 100644
  	if( FBitSet( r_novis.flags, FCVAR_CHANGED ) || tr.fResetVis )
  	{
  		// force recalc viewleaf
+@@ -3982,6 +4243,7 @@ void GL_RebuildLightmaps( void )
+ 	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
+ 
+ 	LM_InitBlock();
++	R_VRSceneNewMap();	// new lightmap pages (and maybe a new world)
+ 
+ 	for( i = 0; i < gp_cl->nummodels; i++ )
+ 	{
+@@ -4045,6 +4307,7 @@ void GL_BuildLightmaps( void )
+ 	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
+ 
+ 	LM_InitBlock();
++	R_VRSceneNewMap();	// new lightmap pages (and maybe a new world)
+ 
+ 	for( i = 0; i < gp_cl->nummodels; i++ )
+ 	{
 diff --git a/ref/gl/gl_sprite.c b/ref/gl/gl_sprite.c
 index 03f794b..5c2cacb 100644
 --- a/ref/gl/gl_sprite.c
@@ -4569,6 +4607,434 @@ index 03f794b..5c2cacb 100644
  
  		if(( 1.0f - tr->fraction ) * dist > 8.0f )
  			return 0.0f;
+diff --git a/ref/gl/gl_vrscene.c b/ref/gl/gl_vrscene.c
+new file mode 100644
+index 0000000..e9fe3bb
+--- /dev/null
++++ b/ref/gl/gl_vrscene.c
+@@ -0,0 +1,422 @@
++/*
++gl_vrscene.c - the world's brush geometry for the visionOS ray-traced water
++mirror (the app's "Ray traced" sharp water method, RTWater.swift)
++
++The app builds acceleration structures from the world model's polygons (the
++same glpoly2_t the renderer draws: position, texture and lightmap
++coordinates) and traces each water pixel's reflected ray against them,
++shading a hit from copies of the engine's own textures and lightmap pages.
++R_VRScene hands out the triangles, once per map; R_VRSceneInstances, each
++frame, which brush models are drawn where (doors, lifts, func_walls). Studio
++models, sprites and particles are not part of it.
++*/
++
++#include "gl_local.h"
++
++// Layouts shared with the app (Lambda_Bridge.h lambda_scene_*).
++typedef struct
++{
++	float	pos[3];
++	float	uv[2];		// texture, in texture widths (tiling)
++	float	lm[2];		// lightmap page, 0-1
++} vr_scene_vertex_t;
++
++typedef struct
++{
++	int	first_tri;
++	int	num_tris;
++	int	num_opaque;	// the first num_opaque need no alpha test
++} vr_scene_model_t;
++
++typedef struct
++{
++	unsigned int	texnum;	// GL texture name
++	unsigned int	width, height;
++	unsigned int	index;	// engine texture index (R_GetTexture)
++} vr_scene_texture_t;
++
++typedef struct vr_scene_instance_s
++{
++	int	model;		// submodel: 0 the world, N for "*N"
++	int	flags;
++	float	matrix[3][4];	// model to world, row-major
++} vr_scene_instance_t;
++
++// material flags (bits 24-31 of a triangle's material)
++#define VR_SCENE_ALPHATEST	1	// '{' texture or a kRenderTransAlpha entity: alpha below 0.25 is a hole
++#define VR_SCENE_NOLIGHTMAP	2	// fullbright
++#define VR_SCENE_MAX_INSTANCES	256
++
++typedef struct vr_scene_s
++{
++	int			generation;	// new per map
++	int			num_verts;
++	int			num_tris;
++	int			num_models;
++	int			num_textures;
++	int			num_lightmaps;
++	int			block_size;	// lightmap page size (square)
++	float			lightmap_scale;	// what the renderer multiplies a lightmap page's texels by
++	vr_scene_vertex_t	*verts;
++	unsigned int		*indices;	// 3 per triangle
++	unsigned int		*materials;	// texture slot | lightmap page << 16 | flags << 24
++	float			*texel_density;	// per triangle: log2 texels per world unit
++	vr_scene_model_t	*models;
++	vr_scene_texture_t	*textures;
++	unsigned int		lightmaps[MAX_LIGHTMAPS];	// GL texture names
++	unsigned int		lightmap_dirty[MAX_LIGHTMAPS / 32];	// pages rewritten since R_VRSceneTakeDirty
++} vr_scene_t;
++
++static vr_scene_t vr_scene;
++static model_t *vr_scene_world = NULL;
++static int vr_scene_generation = 0;
++static qboolean vr_scene_stale = true;
++
++/*
++=================
++R_VRSceneNewMap
++
++GL_BuildLightmaps: the next R_VRScene rebuilds from the new world, and
++every lightmap page is new.
++=================
++*/
++void R_VRSceneNewMap( void )
++{
++	vr_scene_stale = true;
++	memset( vr_scene.lightmap_dirty, 0xFF, sizeof( vr_scene.lightmap_dirty ));
++}
++
++/*
++=================
++R_VRSceneLightmapChanged
++
++A lightstyle rewrote part of this lightmap page (R_CheckLightMap).
++=================
++*/
++void R_VRSceneLightmapChanged( int page )
++{
++	if( page >= 0 && page < MAX_LIGHTMAPS )
++		vr_scene.lightmap_dirty[page >> 5] |= 1u << ( page & 31 );
++}
++
++__attribute__((visibility("default"))) void R_VRSceneTakeDirty( unsigned int *out_bits )
++{
++	memcpy( out_bits, vr_scene.lightmap_dirty, sizeof( vr_scene.lightmap_dirty ));
++	memset( vr_scene.lightmap_dirty, 0, sizeof( vr_scene.lightmap_dirty ));
++}
++
++static void R_VRSceneFree( void )
++{
++	if( vr_scene.verts ) Mem_Free( vr_scene.verts );
++	if( vr_scene.indices ) Mem_Free( vr_scene.indices );
++	if( vr_scene.materials ) Mem_Free( vr_scene.materials );
++	if( vr_scene.texel_density ) Mem_Free( vr_scene.texel_density );
++	if( vr_scene.models ) Mem_Free( vr_scene.models );
++	if( vr_scene.textures ) Mem_Free( vr_scene.textures );
++	vr_scene.verts = NULL;
++	vr_scene.indices = NULL;
++	vr_scene.materials = NULL;
++	vr_scene.texel_density = NULL;
++	vr_scene.models = NULL;
++	vr_scene.textures = NULL;
++	vr_scene.num_verts = vr_scene.num_tris = vr_scene.num_models = vr_scene.num_textures = 0;
++}
++
++// the surfaces the mirror sees: drawn polygons, not water, not sky
++static qboolean R_VRSceneSurface( const msurface_t *s )
++{
++	if( FBitSet( s->flags, SURF_DRAWTURB|SURF_DRAWSKY ) || !s->polys || s->polys->numverts < 3 )
++		return false;
++	return s->texinfo && s->texinfo->texture && s->texinfo->texture->gl_texturenum > 0;
++}
++
++static int R_VRSceneTextureSlot( int texnum, int *map, int *count )
++{
++	gl_texture_t *t;
++
++	if( map[texnum] >= 0 )
++		return map[texnum];
++	t = R_GetTexture( texnum );
++	vr_scene.textures[*count].texnum = t->texnum;
++	vr_scene.textures[*count].width = t->width;
++	vr_scene.textures[*count].height = t->height;
++	vr_scene.textures[*count].index = texnum;
++	map[texnum] = *count;
++	return (*count)++;
++}
++
++static void R_VRSceneAddSurface( const msurface_t *s, qboolean alpha, int *map, int *nverts, int *ntris )
++{
++	const glpoly2_t *p = s->polys;
++	const int first = *nverts;
++	const int slot = R_VRSceneTextureSlot( s->texinfo->texture->gl_texturenum, map, &vr_scene.num_textures );
++	const int page = s->lightmaptexturenum;
++	unsigned int flags = alpha ? VR_SCENE_ALPHATEST : 0;
++	int i;
++
++	if( FBitSet( s->flags, SURF_DRAWTILED ) || page < 0 || page >= MAX_LIGHTMAPS || !tr.lightmapTextures[page] )
++		flags |= VR_SCENE_NOLIGHTMAP;
++
++	for( i = 0; i < p->numverts; i++ )
++	{
++		vr_scene_vertex_t *v = &vr_scene.verts[*nverts + i];
++
++		VectorCopy( p->verts[i], v->pos );
++		v->uv[0] = p->verts[i][3];
++		v->uv[1] = p->verts[i][4];
++		v->lm[0] = p->verts[i][5];
++		v->lm[1] = p->verts[i][6];
++	}
++
++	for( i = 2; i < p->numverts; i++ )
++	{
++		const int t = *ntris;
++		const vr_scene_vertex_t *a = &vr_scene.verts[first], *b = &vr_scene.verts[first + i - 1], *c = &vr_scene.verts[first + i];
++		vec3_t e1, e2, n;
++		float area, uvArea;
++
++		vr_scene.indices[t * 3 + 0] = first;
++		vr_scene.indices[t * 3 + 1] = first + i - 1;
++		vr_scene.indices[t * 3 + 2] = first + i;
++		vr_scene.materials[t] = (unsigned int)slot | ((unsigned int)( page & 0xFF ) << 16 ) | ( flags << 24 );
++
++		// texels per world unit, for the trace's mip level
++		VectorSubtract( b->pos, a->pos, e1 );
++		VectorSubtract( c->pos, a->pos, e2 );
++		CrossProduct( e1, e2, n );
++		area = VectorLength( n );
++		uvArea = fabs(( b->uv[0] - a->uv[0] ) * ( c->uv[1] - a->uv[1] ) - ( c->uv[0] - a->uv[0] ) * ( b->uv[1] - a->uv[1] ))
++			* vr_scene.textures[slot].width * vr_scene.textures[slot].height;
++		vr_scene.texel_density[t] = ( area > 1e-6f && uvArea > 1e-9f ) ? 0.5f * log2f( uvArea / area ) : 0.0f;
++		(*ntris)++;
++	}
++	*nverts += p->numverts;
++}
++
++static void R_VRSceneBuild( void )
++{
++	model_t *world = WORLDMODEL;
++	int i, j, pass, nverts = 0, ntris = 0, maxverts = 0, maxtris = 0;
++	int *map;
++
++	R_VRSceneFree();
++	vr_scene_world = world;
++	vr_scene_stale = false;
++	vr_scene.generation = ++vr_scene_generation;
++	if( !world || !world->submodels || world->numsubmodels <= 0 )
++		return;
++
++	for( i = 0; i < world->numsurfaces; i++ )
++	{
++		const msurface_t *s = &world->surfaces[i];
++
++		if( !R_VRSceneSurface( s ))
++			continue;
++		maxverts += s->polys->numverts;
++		maxtris += s->polys->numverts - 2;
++	}
++
++	vr_scene.verts = Mem_Calloc( r_temppool, sizeof( *vr_scene.verts ) * Q_max( maxverts, 1 ));
++	vr_scene.indices = Mem_Calloc( r_temppool, sizeof( unsigned int ) * 3 * Q_max( maxtris, 1 ));
++	vr_scene.materials = Mem_Calloc( r_temppool, sizeof( unsigned int ) * Q_max( maxtris, 1 ));
++	vr_scene.texel_density = Mem_Calloc( r_temppool, sizeof( float ) * Q_max( maxtris, 1 ));
++	vr_scene.models = Mem_Calloc( r_temppool, sizeof( *vr_scene.models ) * world->numsubmodels );
++	vr_scene.textures = Mem_Calloc( r_temppool, sizeof( *vr_scene.textures ) * MAX_TEXTURES );
++	map = Mem_Malloc( r_temppool, sizeof( int ) * MAX_TEXTURES );
++	for( i = 0; i < MAX_TEXTURES; i++ )
++		map[i] = -1;
++
++	// each submodel's surfaces, opaque ones first, then the alpha-tested
++	// ('{' textures: grates, fences, foliage)
++	for( i = 0; i < world->numsubmodels; i++ )
++	{
++		const dmodel_t *sm = &world->submodels[i];
++		vr_scene_model_t *m = &vr_scene.models[i];
++
++		m->first_tri = ntris;
++		for( pass = 0; pass < 2; pass++ )
++		{
++			for( j = 0; j < sm->numfaces; j++ )
++			{
++				const int index = sm->firstface + j;
++				const msurface_t *s;
++				qboolean alpha;
++
++				if( index < 0 || index >= world->numsurfaces )
++					continue;
++				s = &world->surfaces[index];
++				if( !R_VRSceneSurface( s ))
++					continue;
++				alpha = FBitSet( s->flags, SURF_TRANSPARENT ) ? true : false;
++				if( alpha != ( pass == 1 ))
++					continue;
++				R_VRSceneAddSurface( s, alpha, map, &nverts, &ntris );
++			}
++			if( pass == 0 )
++				m->num_opaque = ntris - m->first_tri;
++		}
++		m->num_tris = ntris - m->first_tri;
++	}
++	Mem_Free( map );
++
++	vr_scene.num_verts = nverts;
++	vr_scene.num_tris = ntris;
++	vr_scene.num_models = world->numsubmodels;
++	vr_scene.block_size = BLOCK_SIZE;
++	// overbright: the VBO path stores pages at 171/256 and doubles them
++	// (R_SetLightmap's RGB_SCALE 2); the others store them whole, tint them
++	// 128/192 and double them in the blend (R_BlendLightmaps)
++	if( gl_overbright.value )
++		vr_scene.lightmap_scale = ( R_HasEnabledVBO() && !r_vbo_overbrightmode.value ) ? 2.0f : 4.0f / 3.0f;
++	else vr_scene.lightmap_scale = 1.0f;
++	for( i = 0; i < MAX_LIGHTMAPS && tr.lightmapTextures[i]; i++ )
++		vr_scene.lightmaps[i] = R_GetTexture( tr.lightmapTextures[i] )->texnum;
++	vr_scene.num_lightmaps = i;
++	for( ; i < MAX_LIGHTMAPS; i++ )
++		vr_scene.lightmaps[i] = 0;
++}
++
++/*
++=================
++R_VRScene
++
++The current world's triangles (built on the first call after a map load),
++or NULL without a world. Valid until the next map load; call on the
++render thread.
++=================
++*/
++__attribute__((visibility("default"))) const vr_scene_t *R_VRScene( void )
++{
++	if( !WORLDMODEL )
++		return NULL;
++	if( vr_scene_stale || vr_scene_world != WORLDMODEL )
++		R_VRSceneBuild();
++	return &vr_scene;
++}
++
++static int R_VRSceneModelIndex( const model_t *mod )
++{
++	int n;
++
++	if( !mod || mod->type != mod_brush || mod->name[0] != '*' )
++		return -1;
++	n = Q_atoi( mod->name + 1 );
++	return ( n > 0 && n < vr_scene.num_models ) ? n : -1;
++}
++
++static int R_VRSceneAddInstances( cl_entity_t **list, int count, vr_scene_instance_t *out, int n, int max )
++{
++	int i;
++
++	for( i = 0; i < count && n < max; i++ )
++	{
++		cl_entity_t *e = list[i];
++		matrix4x4 m;
++		int model, mode;
++
++		if( !e || !e->model )
++			continue;
++		model = R_VRSceneModelIndex( e->model );
++		if( model < 0 || vr_scene.models[model].num_tris == 0 )
++			continue;
++		// solid and alpha-tested brushes; glass, additive and colour
++		// brushes let the room through
++		mode = e->curstate.rendermode;
++		if( mode != kRenderNormal && mode != kRenderTransAlpha )
++			continue;
++		Matrix4x4_CreateFromEntity( m, e->angles, e->origin, 1.0f );
++		out[n].model = model;
++		out[n].flags = mode == kRenderTransAlpha ? VR_SCENE_ALPHATEST : 0;
++		memcpy( out[n].matrix, m, sizeof( out[n].matrix ));	// the top three rows
++		n++;
++	}
++	return n;
++}
++
++/*
++=================
++R_VRSceneInstances
++
++The world and the brush entities of the last view's draw list, with their
++model-to-world matrices. Returns the count.
++=================
++*/
++__attribute__((visibility("default"))) int R_VRSceneInstances( vr_scene_instance_t *out, int max )
++{
++	int n = 0;
++
++	if( !R_VRScene() || max <= 0 || vr_scene.num_models <= 0 )
++		return 0;
++	memset( &out[0], 0, sizeof( out[0] ));
++	out[0].matrix[0][0] = out[0].matrix[1][1] = out[0].matrix[2][2] = 1.0f;
++	n = 1;
++	n = R_VRSceneAddInstances( tr.draw_list->solid_entities, tr.draw_list->num_solid_entities, out, n, max );
++	n = R_VRSceneAddInstances( tr.draw_list->trans_entities, tr.draw_list->num_trans_entities, out, n, max );
++	return n;
++}
++
++#if !XASH_VISIONOS
++/*
++=================
++R_DumpSceneForVR
++
++Desktop-only (r_vrscenedump N): the scene, this view's instances, and the
++pixels of every texture and lightmap page it names, to vrscene<N>.bin, for
++DepthProbe's ray-traced mirror (beside vrdump<N>.bin and vrplanar<N>.bin of
++the same view).
++=================
++*/
++void R_DumpSceneForVR( void )
++{
++	const vr_scene_t *s;
++	vr_scene_instance_t inst[VR_SCENE_MAX_INSTANCES];
++	int n = (int)r_vrscenedump.value, ninst, i;
++	char name[64];
++	byte *pixels;
++	FILE *f;
++
++	gEngfuncs.Cvar_SetValue( "r_vrscenedump", 0 );
++	s = R_VRScene();
++	if( !s )
++		return;
++	ninst = R_VRSceneInstances( inst, VR_SCENE_MAX_INSTANCES );
++
++	Q_snprintf( name, sizeof( name ), "vrscene%d.bin", n );
++	f = fopen( name, "wb" );
++	if( !f )
++		return;
++	{
++		int header[12] = { 0x43535656 /* VVSC */, 1, s->num_verts, s->num_tris, s->num_models,
++			s->num_textures, s->num_lightmaps, s->block_size, (int)( s->lightmap_scale * 1024.0f + 0.5f ), ninst, 0, 0 };
++		fwrite( header, sizeof( header ), 1, f );
++	}
++	fwrite( s->verts, sizeof( *s->verts ), s->num_verts, f );
++	fwrite( s->indices, sizeof( unsigned int ) * 3, s->num_tris, f );
++	fwrite( s->materials, sizeof( unsigned int ), s->num_tris, f );
++	fwrite( s->texel_density, sizeof( float ), s->num_tris, f );
++	fwrite( s->models, sizeof( *s->models ), s->num_models, f );
++	fwrite( inst, sizeof( inst[0] ), ninst, f );
++
++	pixels = malloc( (size_t)Q_max( 1024 * 1024, s->block_size * s->block_size ) * 4 * 4 );
++	for( i = 0; i < s->num_textures; i++ )
++	{
++		const vr_scene_texture_t *t = &s->textures[i];
++		unsigned int wh[2] = { t->width, t->height };
++
++		fwrite( wh, sizeof( wh ), 1, f );
++		GL_Bind( XASH_TEXTURE0, t->index );
++		pglGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
++		fwrite( pixels, (size_t)t->width * t->height * 4, 1, f );
++	}
++	for( i = 0; i < s->num_lightmaps; i++ )
++	{
++		GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[i] );
++		pglGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
++		fwrite( pixels, (size_t)s->block_size * s->block_size * 4, 1, f );
++	}
++	free( pixels );
++	fclose( f );
++	gEngfuncs.Con_Printf( "wrote %s (%d tris, %d models, %d textures, %d lightmaps, %d instances)\n",
++		name, s->num_tris, s->num_models, s->num_textures, s->num_lightmaps, ninst );
++}
++#endif
 diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c
 index cfa7835..32bcb26 100644
 --- a/ref/gl/gl_warp.c

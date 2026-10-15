@@ -824,6 +824,169 @@ func eyeSlices(_ params: DisplayParams, _ dump: Dump) -> Int {
     return differ
 }
 
+/// The ray-traced mirror (Shaders.metal rtWaterTrace, RTWaterScene): a
+/// `vrsceneN.bin` beside `vrdumpN.bin` (r_vrscenedump N, the same frame)
+/// holds the world's brush triangles, this view's brush instances and the
+/// pixels of their textures and lightmaps. The trace runs at divisor RTDIV
+/// (default 2) and is compared, on the water texels, with the engine's own
+/// mirror of the same view (`vrplanarN.bin`, r_vrmirrordump N, R_VRMirrorView),
+/// which round 16 checked against the mirrored eye. Reports the mean colour
+/// difference where the trace hits, and the water the trace leaves empty
+/// although the engine mirror shows something there (not the sky). Writes
+/// rt-<dump>.png with --png: engine mirror | trace | difference ×4.
+let rtTrace = library.makeFunction(name: "rtWaterTrace").flatMap { try? device.makeComputePipelineState(function: $0) }
+
+func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams,
+             _ color: MTLTexture, _ stencilTex: MTLTexture) {
+    let scenePath = path.replacingOccurrences(of: "vrdump", with: "vrscene")
+    guard let rtTrace, scenePath != path, let d = try? Data(contentsOf: URL(fileURLWithPath: scenePath)) else { return }
+    let ints = d.withUnsafeBytes { Array($0.bindMemory(to: Int32.self).prefix(12)) }
+    guard ints[0] == 0x4353_5656 else { print("\(scenePath): not a vrscene"); failures += 1; return }
+    let nv = Int(ints[2]), nt = Int(ints[3]), nm = Int(ints[4]), ntex = Int(ints[5]), nlm = Int(ints[6])
+    let block = Int(ints[7]), lmScale = Float(ints[8]) / 1024, ninst = Int(ints[9])
+    var at = 48
+    func take(_ n: Int) -> Data { defer { at += n }; return d.subdata(in: at..<at + n) }
+    let verts = take(nv * 28), idx = take(nt * 12), mats = take(nt * 4), dens = take(nt * 4)
+    let modelInts = take(nm * 12).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
+    let models = (0..<nm).map { RTWaterScene.Model(firstTri: Int(modelInts[$0 * 3]), numTris: Int(modelInts[$0 * 3 + 1]),
+                                                   numOpaque: Int(modelInts[$0 * 3 + 2])) }
+    let instData = take(ninst * 56)
+    let instances: [RTWaterScene.Instance] = (0..<ninst).map { i in
+        instData.withUnsafeBytes { raw in
+            let model = Int(raw.load(fromByteOffset: i * 56, as: Int32.self))
+            let m = (0..<12).map { raw.load(fromByteOffset: i * 56 + 8 + $0 * 4, as: Float.self) }
+            return RTWaterScene.Instance(model: model, matrix: m)
+        }
+    }
+    var sizes: [(Int, Int)] = [], pixels: [Data] = []
+    for _ in 0..<ntex {
+        let wh = take(8).withUnsafeBytes { Array($0.bindMemory(to: UInt32.self)) }
+        sizes.append((Int(wh[0]), Int(wh[1])))
+        pixels.append(take(Int(wh[0]) * Int(wh[1]) * 4))
+    }
+    let lmPixels = (0..<nlm).map { _ in take(block * block * 4) }
+    let made = verts.withUnsafeBytes { v in idx.withUnsafeBytes { i in mats.withUnsafeBytes { m in dens.withUnsafeBytes { dn in
+        RTWaterScene(device: device, generation: 1, vertices: v.baseAddress!, vertexCount: nv, indices: i.baseAddress!,
+                     materials: m.baseAddress!, density: dn.baseAddress!, triangleCount: nt, models: models,
+                     textureSizes: sizes, lightmapPages: nlm, blockSize: block, lightmapScale: lmScale, storage: .shared)
+    } } } }
+    guard let scene = made else { print("\(name) ray-traced mirror: the scene did not build"); failures += 1; return }
+    for (i, px) in pixels.enumerated() {
+        let (w, h) = sizes[i]
+        px.withUnsafeBytes { scene.textures[i].replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                                                       withBytes: $0.baseAddress!, bytesPerRow: w * 4) }
+    }
+    for (i, px) in lmPixels.enumerated() {
+        px.withUnsafeBytes { scene.lightmaps.replace(region: MTLRegionMake2D(0, 0, block, block), mipmapLevel: 0, slice: i,
+                                                     withBytes: $0.baseAddress!, bytesPerRow: block * 4, bytesPerImage: block * block * 4) }
+    }
+    do {
+        let cb = queue.makeCommandBuffer()!, blit = cb.makeBlitCommandEncoder()!
+        for t in scene.textures { blit.generateMipmaps(for: t) }
+        blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    }
+    scene.waitUntilBuilt()
+    scene.update(instances: instances, frame: 1, completedFrame: 0)
+    scene.waitUntilBuilt()
+    guard let (tlas, info) = scene.structure(for: 1) else { print("\(name) ray-traced mirror: no TLAS"); failures += 1; return }
+
+    var params = base
+    let div = Int(ProcessInfo.processInfo.environment["RTDIV"] ?? "") ?? 2
+    var plane = sharpPlane(dump)
+    guard plane.z > 0 else { return }
+    plane.w = Float(div)
+    params.sspr = (plane, plane)
+    let w = dump.width, h = dump.height
+    let mw = (w + div - 1) / div, mh = (h + div - 1) / div
+    let t = params.eyeTangents.0
+    params.rtWater = SIMD4(Float(ProcessInfo.processInfo.environment["RTLMSCALE"] ?? "") ?? scene.lightmapScale, (t.z + t.w) / Float(mh), 8192, 0)
+    let od = MTLTextureDescriptor()
+    od.textureType = .type2DArray; od.pixelFormat = .rgba16Float; od.width = mw; od.height = mh
+    od.usage = [.shaderRead, .shaderWrite]; od.storageMode = .shared
+    let out = device.makeTexture(descriptor: od)!
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(rtTrace)
+    enc.setBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setAccelerationStructure(tlas, bufferIndex: 0)
+    enc.setBuffer(scene.vertices, offset: 0, index: 1)
+    enc.setBuffer(scene.indices, offset: 0, index: 3)
+    enc.setBuffer(scene.materials, offset: 0, index: 4)
+    enc.setBuffer(scene.density, offset: 0, index: 5)
+    enc.setBuffer(info, offset: 0, index: 6)
+    enc.setBuffer(scene.textureTable, offset: 0, index: 7)
+    enc.setTexture(color, index: 0); enc.setTexture(out, index: 2)
+    enc.setTexture(stencilTex, index: 3); enc.setTexture(scene.lightmaps, index: 4)
+    enc.useResources(scene.textures, usage: .read)
+    enc.useResources(scene.allocations.compactMap { $0 as? MTLAccelerationStructure }, usage: .read)
+    enc.dispatchThreads(MTLSize(width: mw, height: mh, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 8, depth: 1))
+    enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let e = cb.error { print("\(name) ray-traced mirror: \(e)"); failures += 1; return }
+    let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+    var px = [Float16](repeating: 0, count: mw * mh * 4)
+    out.getBytes(&px, bytesPerRow: mw * 8, from: MTLRegionMake2D(0, 0, mw, mh), mipmapLevel: 0)
+
+    // the engine's own mirror of the view, for comparison
+    let planarPath = path.replacingOccurrences(of: "vrdump", with: "vrplanar")
+    let pd = try? Data(contentsOf: URL(fileURLWithPath: planarPath))
+    var hits = 0, water = 0, empty = 0, sumDiff = 0, far = 0
+    var image = [UInt8](repeating: 0, count: mw * 3 * mh * 4)
+    let waterCode = UInt8(Int(plane.x) + 16)
+    let stencil = dump.stencil!
+    for gy in 0..<mh {
+        for gx in 0..<mw {
+            let sx = min((gx * div) + div / 2, w - 1), sy = min((gy * div) + div / 2, h - 1)
+            guard stencil[sy * w + sx] == waterCode else { continue }
+            water += 1
+            let k = (gy * mw + gx) * 4
+            let a = Float(px[k + 3])
+            let rt = (0..<3).map { UInt8(min(max(Float(px[k + $0]) * 255, 0), 255)) }
+            var ref: [UInt8]? = nil
+            if let pd, pd.count >= 20 + w * h * 4 {
+                let o = 20 + (sy * w + sx) * 4
+                ref = [pd[o], pd[o + 1], pd[o + 2]]
+            }
+            let row = mh - 1 - gy
+            func put(_ panel: Int, _ c: [UInt8]) {
+                let o = (row * mw * 3 + panel * mw + gx) * 4
+                image[o] = c[0]; image[o + 1] = c[1]; image[o + 2] = c[2]; image[o + 3] = 255
+            }
+            if let ref { put(0, ref) }
+            if a > 0.5 {
+                hits += 1
+                put(1, rt)
+                if let ref {
+                    let diff = (0..<3).map { abs(Int(rt[$0]) - Int(ref[$0])) }.max()!
+                    sumDiff += diff
+                    if diff > 40 { far += 1 }
+                    put(2, [UInt8(min(diff * 4, 255)), 0, 0])
+                }
+            } else {
+                put(1, [90, 0, 90])
+                // the engine mirror shows something (not the black of its clear, not the sky)
+                if let ref, Int(ref[0]) + Int(ref[1]) + Int(ref[2]) > 30 { empty += 1 }
+            }
+        }
+    }
+    if let dumpPath = ProcessInfo.processInfo.environment["RT_PAIRS"], let pd {
+        // (trace, engine mirror) colour pairs on the hits, for calibration
+        var pairs = [UInt8]()
+        for gy in stride(from: 0, to: mh, by: 2) {
+            for gx in stride(from: 0, to: mw, by: 2) {
+                let sx = min((gx * div) + div / 2, w - 1), sy = min((gy * div) + div / 2, h - 1)
+                let k = (gy * mw + gx) * 4
+                guard stencil[sy * w + sx] == waterCode, Float(px[k + 3]) > 0.5 else { continue }
+                let o = 20 + (sy * w + sx) * 4
+                for c in 0..<3 { pairs.append(UInt8(min(max(Float(px[k + c]) * 255, 0), 255))); pairs.append(pd[o + c]) }
+            }
+        }
+        try? Data(pairs).write(to: URL(fileURLWithPath: dumpPath))
+    }
+    print(String(format: "%@ ray-traced mirror (div %d, %d tris, %d instances, %.2f ms Mac GPU): hits on %.1f%% of %d water texels; against the engine's mirror: mean difference %.1f/255, %.1f%% of hits off by >40, %.1f%% of water empty where the engine's mirror is not",
+                 name, div, nt, instances.count, gpuMs, 100 * Float(hits) / Float(max(water, 1)), water,
+                 Float(sumDiff) / Float(max(hits, 1)), 100 * Float(far) / Float(max(hits, 1)), 100 * Float(empty) / Float(max(water, 1))))
+    if let dir = pngDir { writePNG(image, mw * 3, mh, "\(dir)/rt-\(name).png") }
+}
+
 struct GlassView {
     let name: String, dump: Dump, glass: [UInt8], env: [UInt8], envFlat: [UInt8]
     var sharp: (w: Int, h: Int, rgba: [Float16], plane: SIMD4<Float>)?
@@ -939,6 +1102,7 @@ for path in args {
             }
         }
     }
+    if !path.contains("@") { rtCheck(path, name, dump, params, color, stencilTex) }
     let plain = render(plainPipeline, w, h, params, textures)
     let glass = render(glassOnPipeline, w, h, params, textures)
 

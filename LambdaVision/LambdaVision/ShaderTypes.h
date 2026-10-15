@@ -200,7 +200,34 @@ typedef struct
     // y = sharp water's underside brightness ("waterUnderside", a share of
     // the occluder's top; 0 = leave those rays to the probe).
     simd_float4 waterDebug;
+    // The ray-traced water mirror (rtWaterTrace): x = the lightmap's scale
+    // when drawn (2 with the engine's overbright lightmaps, else 1), y = one
+    // mirror texel's angular size (tangent units, for the mip level), z = the
+    // longest ray (xash units), w unused.
+    simd_float4 rtWater;
 } DisplayParams;
+
+// The ray-traced water mirror's scene (RTWaterScene.swift, Shaders.metal
+// rtWaterTrace), from the engine's world model (gl_vrscene.c).
+// = vr_scene_vertex_t: position, texture coordinates (in texture widths,
+// tiling), lightmap page coordinates (0-1). 28 bytes.
+typedef struct
+{
+    float pos[3];
+    float uv[2];
+    float lm[2];
+} RTVertex;
+
+// Per TLAS instance: where its model's triangles start in the scene, how
+// many of them are opaque (the alpha-tested ones follow), and which of the
+// BLAS's geometries is the alpha-tested one (0 or 1; ~0 for none).
+typedef struct
+{
+    uint32_t firstTri;
+    uint32_t numOpaque;
+    uint32_t alphaGeometry;
+    uint32_t pad;
+} RTInstanceInfo;
 
 #ifdef __METAL_VERSION__
 // The drawable is linear light (rgba16Float, extended range), but the

@@ -16,6 +16,6 @@ trap 'rm -rf "$work"' EXIT
 # see-through check reads (the app never defines it).
 xcrun -sdk macosx metal -std=metal3.1 -DSSPR_DEBUG=1 ${SSPR_DEFINES:-} -I "$app" -c "${SHADERS:-$app/Shaders.metal}" -o "$work/s.air"
 xcrun -sdk macosx metallib "$work/s.air" -o "$work/shaders.metallib"
-swiftc -O -import-objc-header "$app/ShaderTypes.h" "$here/main.swift" -o "$work/probe" \
+swiftc -O -import-objc-header "$app/ShaderTypes.h" "$here/main.swift" "$app/RTWaterScene.swift" -o "$work/probe" \
     -framework Metal -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 GLASS_PROBE_SWIFT="${GLASS_PROBE_SWIFT:-$app/GlassProbe.swift}" "$work/probe" "$work/shaders.metallib" "$@"

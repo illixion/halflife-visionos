@@ -8,6 +8,7 @@
 // File for Metal kernel and shader functions
 
 #include <metal_stdlib>
+#include <metal_raytracing>
 #include <simd/simd.h>
 
 // Including header shared between this Metal shader code and Swift/C code executing Metal API commands
@@ -1307,4 +1308,101 @@ fragment DepthOnlyOut reprojectionDepthMerge(ColorInOut in [[stage_in]],
     DepthOnlyOut out;
     out.depth = d;
     return out;
+}
+
+// ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced, RTWaterScene)
+// For each mirror texel on the water row DisplayParams.sspr names (the same
+// plane and target layout as the screen-space mirror, divisor sspr.w), the
+// eye's ray meets the water at P and the reflected ray is traced through the
+// world's brush triangles (the engine's own polygons, gl_vrscene.c: the
+// world and its brush entities, with their current transforms). A hit is
+// shaded the way the engine draws it: the texture (a copy of the engine's,
+// mipmapped, the level from the ray's footprint) times its lightmap page
+// (doubled with overbright lightmaps). '{' textures are alpha-tested like
+// the engine's (alpha above 0.25 is solid). A miss, or the sky, leaves the
+// texel empty, so the composite falls back to the probe there, as for the
+// screen-space mirror's gaps. Studio models, sprites and particles are not
+// in the scene, and dynamic lights not in the lightmaps.
+struct RTTexture
+{
+    texture2d<half> t;
+};
+
+static inline uint rtTriangle(constant RTInstanceInfo &inst, uint geometry, uint primitive)
+{
+    return inst.firstTri + (geometry == inst.alphaGeometry ? inst.numOpaque : 0) + primitive;
+}
+
+kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
+                         constant DisplayParams &p [[ buffer(BufferIndexUniforms) ]],
+                         raytracing::instance_acceleration_structure tlas [[ buffer(0) ]],
+                         const device RTVertex *verts [[ buffer(1) ]],
+                         const device uint *indices [[ buffer(3) ]],
+                         const device uint *materials [[ buffer(4) ]],
+                         const device float *density [[ buffer(5) ]],
+                         constant RTInstanceInfo *instances [[ buffer(6) ]],
+                         const device RTTexture *textures [[ buffer(7) ]],
+                         texture2d_array<half> colorMap [[ texture(0) ]],
+                         texture2d_array<half, access::write> mirror [[ texture(2) ]],
+                         texture2d_array<uint> engineStencil [[ texture(3) ]],
+                         texture2d_array<half> lightmaps [[ texture(4) ]])
+{
+    const ushort eye = gid.z;
+    const uint3 size = ssprSize(colorMap, p, eye);
+    if (gid.x >= size.x || gid.y >= size.y)
+        return;
+    half4 out = 0.0h;
+    const float2 uv = (float2(gid.xy) + 0.5) / float2(size.xy);
+    const float3 E = p.glassEye[eye][0].xyz;
+    const float3 d = ssprRay(uv, eye, p);
+    const float height = p.sspr[eye].y;
+    if (p.sspr[eye].z > 0.5 && d.z < -1e-5 && E.z > height && ssprIsWater(engineStencil, uv, eye, p)) {
+        constexpr sampler tex(filter::linear, mip_filter::linear, address::repeat);
+        constexpr sampler lm(filter::linear, address::clamp_to_edge);
+        const float s = (height - E.z) / d.z;
+        const float3 P = E + d * s;
+        const float3 r = normalize(float3(d.x, d.y, -d.z));
+        const float spread = p.rtWater.y, base = s * length(d);
+        raytracing::ray ray(P + r * 0.05, r, 0.0, p.rtWater.z);
+        raytracing::intersection_params params;
+        params.assume_geometry_type(raytracing::geometry_type::triangle);
+        raytracing::intersection_query<raytracing::triangle_data, raytracing::instancing> q(ray, tlas, params);
+        // alpha-tested triangles (the BLAS's non-opaque geometry)
+        while (q.next()) {
+            if (q.get_candidate_intersection_type() != raytracing::intersection_type::triangle)
+                continue;
+            constant RTInstanceInfo &inst = instances[q.get_candidate_instance_id()];
+            const uint tri = inst.firstTri + inst.numOpaque + q.get_candidate_primitive_id();
+            const float2 bc = q.get_candidate_triangle_barycentric_coord();
+            const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
+            const float2 tuv = float2(v0.uv[0], v0.uv[1]) * (1.0 - bc.x - bc.y)
+                + float2(v1.uv[0], v1.uv[1]) * bc.x + float2(v2.uv[0], v2.uv[1]) * bc.y;
+            const float lod = log2(max((base + q.get_candidate_triangle_distance()) * spread, 1e-4)) + density[tri];
+            if (textures[materials[tri] & 0xFFFF].t.sample(tex, tuv, level(lod)).a > 0.25h)
+                q.commit_triangle_intersection();
+        }
+        if (q.get_committed_intersection_type() == raytracing::intersection_type::triangle) {
+            constant RTInstanceInfo &inst = instances[q.get_committed_instance_id()];
+            const uint tri = rtTriangle(inst, q.get_committed_geometry_id(), q.get_committed_primitive_id());
+            const float2 bc = q.get_committed_triangle_barycentric_coord();
+            const float t = q.get_committed_distance();
+            const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
+            const float w0 = 1.0 - bc.x - bc.y;
+            const float2 tuv = float2(v0.uv[0], v0.uv[1]) * w0 + float2(v1.uv[0], v1.uv[1]) * bc.x + float2(v2.uv[0], v2.uv[1]) * bc.y;
+            const float2 luv = float2(v0.lm[0], v0.lm[1]) * w0 + float2(v1.lm[0], v1.lm[1]) * bc.x + float2(v2.lm[0], v2.lm[1]) * bc.y;
+            // the footprint widens on a surface seen edge-on
+            const float3 p0 = float3(v0.pos[0], v0.pos[1], v0.pos[2]);
+            const float3 n = normalize(cross(float3(v1.pos[0], v1.pos[1], v1.pos[2]) - p0,
+                                             float3(v2.pos[0], v2.pos[1], v2.pos[2]) - p0));
+            const float3 ro = q.get_committed_world_to_object_transform() * float4(r, 0.0);
+            const float cosI = abs(dot(normalize(ro), n));
+            const float lod = log2(max((base + t) * spread, 1e-4)) + density[tri] - 0.5 * log2(max(cosI, 0.1));
+            const uint m = materials[tri];
+            float3 c = float3(textures[m & 0xFFFF].t.sample(tex, tuv, level(lod)).rgb);
+            if (((m >> 24) & 2) == 0)
+                c *= float3(lightmaps.sample(lm, luv, (m >> 16) & 0xFF).rgb) * p.rtWater.x;
+            out = half4(half3(saturate(c)), 1.0h);
+        }
+    }
+    mirror.write(out, gid.xy, eye);
 }
