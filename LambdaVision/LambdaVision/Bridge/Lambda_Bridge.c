@@ -3836,12 +3836,14 @@ static gt_getuiv_fn   gt_getuiv;
 static gt_getui64v_fn gt_getui64v;
 static _Atomic int    g_gt_enabled = 0;
 static int            g_gt_state = 0;        // 0 untried, 1 ready, -1 unavailable
-// slots 0 and 1 are the eyes, 2 the glass probe face (lambda_gl_probe_ms)
-static GLuint         g_gt_q[3][GT_RING];
-static int            g_gt_issued[3][GT_RING];
-static int            g_gt_head[3];
+// slots 0 and 1 are the eyes, 2 the glass probe face (lambda_gl_probe_ms),
+// 3 and 4 each eye's water mirror (lambda_gl_mirror_ms)
+#define GT_SLOTS 5
+static GLuint         g_gt_q[GT_SLOTS][GT_RING];
+static int            g_gt_issued[GT_SLOTS][GT_RING];
+static int            g_gt_head[GT_SLOTS];
 static int            g_gt_active = -1;      // slot whose query is open
-static _Atomic float  g_gt_ms[3];
+static _Atomic float  g_gt_ms[GT_SLOTS];
 static _Atomic int    g_gt_fresh = 0;        // bit per slot: a result not yet taken
 
 void lambda_gl_set_gpu_timing(int enabled) { atomic_store(&g_gt_enabled, enabled ? 1 : 0); }
@@ -3865,7 +3867,7 @@ static int gt_ready(void) {
             gt_getuiv   = (gt_getuiv_fn)eglGetProcAddress("glGetQueryObjectuivEXT");
             gt_getui64v = (gt_getui64v_fn)eglGetProcAddress("glGetQueryObjectui64vEXT");
             if (gt_gen && gt_begin_q && gt_end_q && gt_getuiv && gt_getui64v) {
-                gt_gen(3 * GT_RING, &g_gt_q[0][0]);
+                gt_gen(GT_SLOTS * GT_RING, &g_gt_q[0][0]);
                 g_gt_state = 1;
             }
         }
@@ -3965,7 +3967,7 @@ int lambda_gl_probe_ms(float out_ms[2]) {
 // GlassProbe, so each slice's EGLImages, renderbuffers and FBO are made once
 // and kept (keyed by the slice views), not rebuilt per face: a fresh render
 // target per draw is the expensive part on ANGLE, more than the small view.
-#define PROBE_FBO_CACHE 24
+#define PROBE_FBO_CACHE 32   // the probe's 18 faces and the water mirror's 2 eyes
 typedef struct {
     void    *color, *depth;     // the app's slice views, borrowed
     EGLImage ci, di;
@@ -4051,6 +4053,81 @@ static void worker_render_probe_face(void) {
     }
     atomic_store(&g_probe_cpu_ms, (float)(ft_now_ms() - t0));
     atomic_store(&g_probe_cpu_fresh, 1);
+}
+
+// ---- Rendered water mirror (Renderer.waterMirrorMethod .rendered) --------
+// Each eye's view mirrored in the water below it, drawn by the engine
+// (gl_rmain.c R_VRMirrorView) right after that eye, before its fence, into
+// the app's target (PlanarWater.swift); the composite reads it where the
+// screen-space mirror would be. The plane is the one SharpWater.planes picks
+// from the same eye's table: the highest horizontal water row below the eye.
+extern int R_VRMirrorView(float waterZ, int width, int height);
+static void  *g_mirror_color[2], *g_mirror_depth[2];
+static int    g_mirror_w = 0, g_mirror_h = 0;
+static _Atomic float g_mirror_z[2];
+static _Atomic int   g_mirror_drawn = 0;     // bit per eye, this frame
+static _Atomic float g_mirror_cpu_ms = 0.0f;
+static _Atomic int   g_mirror_cpu_fresh = 0;
+
+void lambda_gl_worker_set_mirror_targets(void *color0, void *depth0, void *color1, void *depth1,
+                                         int width, int height) {
+    g_mirror_color[0] = color0; g_mirror_depth[0] = depth0;
+    g_mirror_color[1] = color1; g_mirror_depth[1] = depth1;
+    g_mirror_w = width; g_mirror_h = height;
+}
+
+int lambda_gl_mirror_eye(int eye, float *water_z) {
+    if (eye < 0 || eye > 1) return 0;
+    if (water_z) *water_z = atomic_load(&g_mirror_z[eye]);
+    return (atomic_load(&g_mirror_drawn) >> eye) & 1;
+}
+
+int lambda_gl_mirror_ms(float out_ms[3]) {
+    int fresh = (atomic_fetch_and(&g_gt_fresh, ~(8 | 16)) >> 3) & 3;
+    out_ms[0] = atomic_load(&g_gt_ms[3]);
+    out_ms[1] = atomic_load(&g_gt_ms[4]);
+    out_ms[2] = atomic_load(&g_mirror_cpu_ms);
+    if (atomic_exchange(&g_mirror_cpu_fresh, 0)) fresh |= 4;
+    return fresh;
+}
+
+static void worker_render_mirror(int eye) {
+    if (eye == 0) atomic_store(&g_mirror_drawn, 0);
+    void *color = g_mirror_color[eye], *depth = g_mirror_depth[eye];
+    if (!color || !depth || g_mirror_w <= 0 || g_mirror_h <= 0) return;
+    const lambda_glass_eye_t *e = &g_glass_eye[eye];
+    float z = -1e30f;
+    for (int i = 0; i < e->count; i++) {
+        const float *pl = e->planes[i];
+        if (e->kind[i] != 1 || pl[2] <= 0.99f) continue;
+        float h = pl[3] / pl[2];
+        if (h < e->origin[2] - 1.0f && h > z) z = h;
+    }
+    if (z < -1e29f) return;
+
+    double t0 = ft_now_ms();
+    GLuint fbo = probe_fbo_for(color, depth);
+    if (!fbo) return;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glViewport(0, 0, g_mirror_w, g_mirror_h);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClearDepthf(1.0f);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    gt_begin(3 + eye);
+    int drawn = R_VRMirrorView(z, g_mirror_w, g_mirror_h);
+    gt_end();
+    if (scissor) glEnable(GL_SCISSOR_TEST);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    if (drawn) {
+        atomic_store(&g_mirror_z[eye], z);
+        atomic_fetch_or(&g_mirror_drawn, 1 << eye);
+    }
+    float ms = (float)(ft_now_ms() - t0);
+    atomic_store(&g_mirror_cpu_ms, eye == 0 ? ms : atomic_load(&g_mirror_cpu_ms) + ms);
+    if (eye == 1) atomic_store(&g_mirror_cpu_fresh, 1);
 }
 
 // ---- Engine console commands ----------------------------------------------
@@ -4157,6 +4234,7 @@ static int worker_engine_frame(void) {
             lambda_engine_clear_projection_override();
         lambda_engine_set_stereo_offset(0.0f);
         gt_end();
+        worker_render_mirror(0);
         er = lambda_gl_end_frame();
         g_ft_cur[0] = t1 - t0;
         g_ft_cur[1] = ft_now_ms() - t1;
@@ -4278,6 +4356,7 @@ static void *gl_worker_main(void *arg) {
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 gt_end();
+                worker_render_mirror(1);
                 worker_render_probe_face();
                 er = lambda_gl_end_frame();
                 g_ft_cur[2] = t1 - t0;

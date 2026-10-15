@@ -613,6 +613,7 @@ enum DebugEndpoints {
         .flag("glassReflections", \.glassReflections),
         .flag("waterReflections", \.waterReflections),
         .flag("sharpWaterReflections", \.sharpWaterReflections),
+        .choice("waterMirrorMethod", \.waterMirrorMethod, note: "how sharp water mirrors: screenSpace or rendered (a second engine view per eye)"),
         .number("waterRipples", \.waterRipples, 0...3),
         .number("reflectionStrength", \.reflectionStrength, 0.5...4),
         .choice("waterMirrorView", \.waterMirrorView, note: "not stored; needs waterReflections + sharpWaterReflections"),

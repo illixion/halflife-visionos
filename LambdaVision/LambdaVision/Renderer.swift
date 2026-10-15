@@ -72,7 +72,8 @@ enum FrameTimingStats {
     private static let order = ["wait0", "wait1", "eyes", "angleGPU", "frameGPU", "total"]
     /// The GPU-execution columns (GPUPassTimer), logged on their own line.
     static let gpuOrder = ["gEngine0", "gEngine1", "gpuQueue", "gMirrorFill", "gMirrorProject", "gMirror", "gComposite", "gArms", "gWeapon", "gHUD", "gDepth",
-                           "gProbe", "probeCPU"]   // glass probe face (GlassProbe), on frames that draw one
+                           "gProbe", "probeCPU",   // glass probe face (GlassProbe), on frames that draw one
+                           "gPlanar0", "gPlanar1", "planarCPU"]   // engine-rendered water mirror (PlanarWater)
 
     static let shared: RAVEFrameProfiler = {
         let profiler = RAVEFrameProfiler(
@@ -177,6 +178,8 @@ actor Renderer {
     var glassProbe: GlassProbe?
     // Sharp water reflections (SharpWater), made on first use.
     var sharpWater: SharpWater?
+    // The engine-rendered water mirror (PlanarWater), made on first use.
+    var planarWater: PlanarWater?
     var glassEyes: [lambda_glass_eye_t] = []
     // Holds the last frame of a level still in the room while the next loads.
     var loadSnapshot: LoadSnapshot!
@@ -434,6 +437,11 @@ actor Renderer {
     /// a quarter of each side (one texel per 16 engine pixels). gMirror at 3
     /// measured 1.24 ms p50 on the headset; 4 has 56% of the threads.
     static let sharpWaterDivisor = 4
+    /// Sharp water's mirror: the screen-space one or the engine's
+    /// (PlanarWater). Set by GameSettings.
+    nonisolated(unsafe) static var waterMirrorMethod: WaterMirrorMethod = .screenSpace
+    /// The engine-rendered mirror's size, as a divisor of the colour map's.
+    static let planarWaterDivisor = 2
     /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
     /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
     nonisolated(unsafe) static var waterMirrorView: Int = 0
@@ -2894,6 +2902,25 @@ actor Renderer {
             #endif
         }
         if engineHeld || !Renderer.probeReflections { glassProbe?.reset() }
+        // The engine-rendered water mirror: its targets ride on every eye
+        // while the method is on; the engine draws one only where an eye
+        // has water below it.
+        let planarOn = Renderer.waterReflections && Renderer.sharpWaterReflections
+            && Renderer.waterMirrorMethod == .rendered && glassProbe != nil && !engineHeld
+            && Renderer.hdrTestMode == 0
+        if planarOn, let colorMap {
+            if planarWater == nil { planarWater = PlanarWater(device: device) }
+            if let planarWater {
+                let fresh = planarWater.ensureTargets(colorMap: colorMap, divisor: Renderer.planarWaterDivisor)
+                #if !targetEnvironment(simulator)
+                if !fresh.isEmpty {
+                    commandQueueResidencySet.addAllocations(fresh)
+                    commandQueueResidencySet.commit()
+                }
+                #endif
+            }
+        }
+        planarWater?.stage(planarOn)
         var secondEyeRan = false
 
         for eye in 0..<2 where !engineHeld {
@@ -2979,6 +3006,7 @@ actor Renderer {
                 return e
             }
             glassProbe?.eyesDone(now: ftEyesStart, secondEyeRan: secondEyeRan)
+            if planarOn { PlanarWater.recordTiming() }
         }
 
         // Order our queue after ANGLE's colorMap writes for both eyes. The
@@ -3319,7 +3347,10 @@ actor Renderer {
             ssprPlanes = SharpWater.planes(glassEyes)
             ssprPlanes.0.w = Float(Renderer.sharpWaterDivisor)
             ssprPlanes.1.w = Float(Renderer.sharpWaterDivisor)
-            if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+            if Renderer.waterMirrorMethod == .rendered {
+                // the engine drew the mirror with each eye (PlanarWater)
+                ssprPlanes = planarWater != nil ? PlanarWater.planes(ssprPlanes) : (.zero, .zero)
+            } else if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                 if sharpWater == nil, let library = device.makeDefaultLibrary() {
                     sharpWater = SharpWater(device: device, library: library)
                 }
@@ -3451,7 +3482,8 @@ actor Renderer {
                 Self.setGlassEyes(&params, glassEyes)
                 params.sspr = ssprPlanes
                 params.waterDebug = SIMD4(Float(Renderer.waterMirrorView), Renderer.waterUnderside, 0, 0)
-                if let color = sharpWater?.color, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+                let mirror = Renderer.waterMirrorMethod == .rendered ? planarWater?.color : sharpWater?.color
+                if let color = mirror, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                     self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
                 }
             }

@@ -483,9 +483,15 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         // the ripple must never decide whether the mirror is there, or a
         // coverage edge strobes in ripple-shaped bands.
         const half4 c = sharpWater.sample(s, suv, eye);
-        const half4 c0 = sharpWater.sample(s, uv, eye);
-        sharpWeight = saturate(float(c0.a));
-        sharp = c.a > 0.02h ? float3(c.rgb) / float(c.a) : float3(c0.rgb) / max(float(c0.a), 1e-3);
+        if (p.sspr[eye].z > 1.5) {
+            // the engine-rendered mirror (PlanarWater): whole, opaque colour
+            sharpWeight = 1.0;
+            sharp = float3(c.rgb);
+        } else {
+            const half4 c0 = sharpWater.sample(s, uv, eye);
+            sharpWeight = saturate(float(c0.a));
+            sharp = c.a > 0.02h ? float3(c.rgb) / float(c.a) : float3(c0.rgb) / max(float(c0.a), 1e-3);
+        }
     }
     if (sharpWeight < 0.98 && p.probe[1].w >= 0.0) {
         const float w = p.probeMix.x;

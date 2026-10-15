@@ -188,6 +188,13 @@ final class GameSettings {
         didSet { AppSettingsStore.sharpWaterReflections = sharpWaterReflections
                  Renderer.sharpWaterReflections = sharpWaterReflections }
     }
+    /// How sharp water makes its mirror: from the screen, or rendered by the
+    /// engine from the mirrored eye (sees under tables, costs a second
+    /// engine view per eye on frames with water). Live.
+    var waterMirrorMethod: WaterMirrorMethod = AppSettingsStore.waterMirrorMethod {
+        didSet { AppSettingsStore.waterMirrorMethod = waterMirrorMethod
+                 Renderer.waterMirrorMethod = waterMirrorMethod }
+    }
     /// Water ripple strength, 0–3× (0 = a still mirror). Live.
     var waterRipples: Double = AppSettingsStore.waterRipples {
         didSet { AppSettingsStore.waterRipples = waterRipples
@@ -548,6 +555,7 @@ final class GameSettings {
         Renderer.waterReflections = waterReflections
         Renderer.reflectionStrength = Float(reflectionStrength)
         Renderer.sharpWaterReflections = sharpWaterReflections
+        Renderer.waterMirrorMethod = waterMirrorMethod
         Renderer.waterRipples = Float(waterRipples)
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
         Renderer.dominantHandIsLeft = (dominantHand == .left)
@@ -683,6 +691,24 @@ enum WaterMirrorView: Int, CaseIterable, Identifiable {
         case .onWater: "Mirror on water"
         case .confidence: "Mirror confidence"
         case .whole: "Whole mirror"
+        }
+    }
+}
+
+/// Settings → Graphics: how sharp water makes its mirror
+/// (Renderer.waterMirrorMethod).
+enum WaterMirrorMethod: String, CaseIterable, Identifiable {
+    /// Each eye's own image mirrored on the GPU (SharpWater): cheap, but
+    /// blind to what no pixel on screen holds, like a table's underside.
+    case screenSpace
+    /// The engine draws each eye's view again from the mirrored eye
+    /// (PlanarWater, gl_rmain.c R_VRMirrorView): exact above the water.
+    case rendered
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .screenSpace: "Screen space"
+        case .rendered: "Rendered by the engine"
         }
     }
 }

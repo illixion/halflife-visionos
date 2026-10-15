@@ -63,6 +63,10 @@ struct SettingsView: View {
                     Toggle("Water reflections (prototype)", isOn: $settings.waterReflections)
                     Toggle("Sharp water reflections", isOn: $settings.sharpWaterReflections)
                         .disabled(!settings.waterReflections)
+                    Picker("Sharp water method", selection: $settings.waterMirrorMethod) {
+                        ForEach(WaterMirrorMethod.allCases) { Text($0.label).tag($0) }
+                    }
+                    .disabled(!settings.waterReflections || !settings.sharpWaterReflections)
                     slider("Water ripples", $settings.waterRipples, 0.0...3.0, 0.25) {
                         String(format: "%.2g×", $0)
                     }

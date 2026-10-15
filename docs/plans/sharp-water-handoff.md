@@ -126,7 +126,7 @@ knob; Modern/Original presets come later (`docs/plans/modern-lighting.md`
 | Round 13: saw teeth on the sink's vertical falling sheet | **round 14 untested**: same stale-probe walk (the sheet is glass kind, probe-lit) |
 | Round 13: faint diagonal stripes on the flood | **round 14 untested**: the same walk where the mirror hands over to the probe |
 | Round 13: staircase (one texel) at the counter's mirrored edge, light strip along it | **round 14 untested**: candidates moved onto the texel's centre ray; view 101 wrong-surface sub-rays at the lip 53 → 8 |
-| Crouched by a table: underside not mirrored, room shows through | **open** (round 15): eye inside the top's height band, no on-screen source; needs tier 2 or RT |
+| Crouched by a table: underside not mirrored, room shows through | screen-space: **open** (round 15, no on-screen source); **round 16 untested on device**: "Sharp water method" → Rendered by the engine; matches the mirrored-eye truth on the Mac |
 
 ### Cases the mirror must handle (each has a harness view)
 - A table or counter top seen from above (a back face to the reflected
@@ -341,7 +341,9 @@ shader change kept):
   real fixes are the ones that have the geometry whatever the eye sees: an
   engine re-render from the mirrored eye (tier 2: a clip plane at the
   water, no underwater fog, roughly the engine's cost again on frames that
-  show water), or ray tracing (tier 5, M5 only). Undecided.
+  show water), or ray tracing (tier 5, M5 only). Decided 2026-10-15: both,
+  as choices beside the screen-space mirror. Tier 2 is round 16; ray
+  tracing comes after it.
 
 How to make a mirrored-eye pair, in the cfg after the scene setup below:
 `ent_fire 1 set view_ofs "0 0 <eye.z − origin.z>"` puts the eye at any
@@ -351,6 +353,47 @@ becomes `2·(−568) − eye.z`, turn on `r_novis 1`, run `r_vrdump M`, and save
 M as `vrmirrorN.bin` beside `vrdumpN.bin`. Keep the pitch at 0, which the
 mirrored eye shares; DepthProbe looks it up by ray direction, so a degree
 or two of drift doesn't matter.
+
+### Round 16: the engine-rendered mirror (tier 2)
+
+Settings → Graphics → "Sharp water method" (`waterMirrorMethod` on the
+debug API): **Screen space** (SharpWater, rounds 1–15) or **Rendered by
+the engine** (PlanarWater). In the second mode:
+
+- After each eye, the GL worker has the engine draw that eye's view again
+  from the eye mirrored in the water below it (`gl_rmain.c R_VRMirrorView`,
+  bridge `worker_render_mirror`) into `PlanarWater`'s slice, half the
+  colour map's size on each side. The plane is the one `SharpWater.planes`
+  picks (the highest horizontal water row below the eye), chosen by the
+  bridge from the same eye's table, so the composite and the engine agree.
+- The composite reads it at the same uv as the screen-space mirror, ripple
+  nudge included, with `sspr.z = 2`: full weight, no coverage alpha. No
+  SSPR dispatches run.
+- The camera: mirrored origin, pitch and roll negated, the eye's
+  projection times diag(1, −1, 1, 1) (front faces turn clockwise), and an
+  oblique near plane half a unit under the water. The eye's vis, glass
+  table and eye are kept; the viewmodel, water surfaces, dynamic lights,
+  viewmodel events and particle movement are left out.
+- Cost: `gPlanar0` / `gPlanar1` (each eye's GPU time, with GPU pass timing
+  on) and `planarCPU` (the worker, both eyes) in `/perf`. Not measured
+  yet. If it is too slow on the M2, try a smaller target
+  (`Renderer.planarWaterDivisor`) before anything else.
+
+Mac check, `r_vrmirrordump N` (writes `vrplanarN.bin`, the mirror at the
+view's size, for the highest water row below the eye; needs `r_vrwater 1`).
+With the round 15 recipe at the c1a2 table (eye 17, 9 and 2 units above
+the floor, so above, inside and just under the slab), the rendered mirror
+matches the engine's own render from the mirrored eye: the underside, the
+legs and the lockers are in place, with no room showing through. The colour
+difference is uniform, because the truth camera is underwater and still
+sees the water surface from below (`sv_wateralpha 0` and `gl_fog 0` don't
+remove it). A per-pixel number needs the truth without that surface.
+
+To check on the headset: the table at 1100 −410 crouched (the band case),
+the bench counter's overhang, the sink sheet (glass kind, so probe-lit in
+both modes), NPCs and sprites reflected upright-mirrored, and the waterline
+where walls meet the flood. Then `gPlanar*` against `gMirror` at the bench
+view below.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror

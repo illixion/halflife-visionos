@@ -42,6 +42,7 @@ enum AppSettingsStore {
     private static let waterReflectionsKey = "lambdavision.settings.waterReflections"
     private static let reflectionStrengthKey = "lambdavision.settings.reflectionStrength"
     private static let sharpWaterKey = "lambdavision.settings.sharpWaterReflections"
+    private static let waterMirrorMethodKey = "lambdavision.settings.waterMirrorMethod"
     private static let waterRipplesKey = "lambdavision.settings.waterRipples"
 
     static var renderScale: Double {
@@ -97,6 +98,15 @@ enum AppSettingsStore {
     static var sharpWaterReflections: Bool {
         get { bool(sharpWaterKey, false) }   // off until it measures well on device
         set { defaults.set(newValue, forKey: sharpWaterKey) }
+    }
+    /// How sharp water makes its mirror (Renderer.waterMirrorMethod).
+    static var waterMirrorMethod: WaterMirrorMethod {
+        get {
+            guard let raw = defaults.string(forKey: waterMirrorMethodKey),
+                  let value = WaterMirrorMethod(rawValue: raw) else { return .screenSpace }
+            return value
+        }
+        set { defaults.set(newValue.rawValue, forKey: waterMirrorMethodKey) }
     }
     /// Ripple slope multiplier (Renderer.waterRipples), 0–3×.
     static var waterRipples: Double {

@@ -535,6 +535,23 @@ void lambda_gl_worker_set_probe_face(void *mtl_color_view, void *mtl_depth_view,
 // targets it keeps per slice before the next face.
 void lambda_gl_worker_forget_probe_targets(void);
 
+// ---- Rendered water mirror (Renderer.waterMirrorMethod .rendered) ----
+// Each eye's targets for the engine's mirror of that eye in the water below
+// it (gl_rmain.c R_VRMirrorView), drawn right after the eye, before its
+// fence: 2D views (one slice) of a colour texture in the colorMap's format
+// and a depth32Float_stencil8 texture, width x height. NULL = off. Kept
+// until changed.
+void lambda_gl_worker_set_mirror_targets(void *mtl_color0, void *mtl_depth0,
+                                         void *mtl_color1, void *mtl_depth1,
+                                         int width, int height);
+// Whether the last frame drew this eye's mirror, and in which water (z,
+// xash units): the plane SharpWater.planes picks from the same eye's table.
+int  lambda_gl_mirror_eye(int eye, float *water_z);
+// The water mirror's cost on the frames that draw one: [0] / [1] each eye's
+// GPU time (with GPU timing on), [2] the GL worker's CPU time for both.
+// Bits 1, 2, 4 = a fresh [0], [1], [2].
+int  lambda_gl_mirror_ms(float out_ms[3]);
+
 // ---- ANGLE / EGL smoke test ----
 // Initializes EGL via ANGLE's Metal backend, makes a context current on a
 // 1x1 pbuffer, reads GL_VERSION/GL_RENDERER/GL_VENDOR into status_out,
