@@ -8,10 +8,11 @@
 # dumping views for the snapshot probe (r_vrdump N → vrdumpN.bin).
 #
 #   ./build_xash_macos.sh                 build and lay out
-#   cd ../build/mac-run && ./xash3d -game valve -dev 1 -windowed +map c1a0
-#   cd ../build/mac-run && ./xash3d -game gearbox -dev 1 -windowed +map of1a1
-#   cd ../build/mac-run-ro && XASH_FS_RAMCACHE=1 ./xash3d -game valve \
-#       -rodir ../../HalfLifeAssets -dev 1 -windowed +map c1a0   (device layout)
+#   ./run_xash_macos.sh -game valve +map c1a0        (behind your apps, muted)
+#   LAMBDA_MAC_BACKGROUND=0 LAMBDA_MAC_SOUND=1 ./run_xash_macos.sh -game gearbox +map of1a1
+#   LAMBDA_MAC_RO=1 ./run_xash_macos.sh -game valve +map c1a0   (device layout)
+# Run through run_xash_macos.sh: started directly, the engine takes focus,
+# the mouse and the speakers.
 #
 # Builds out of tree (build-mac/), so the device builds are untouched.
 # Needs Homebrew SDL2 and the game files in HalfLifeAssets/.

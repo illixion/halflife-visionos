@@ -60,7 +60,7 @@ xash_key() {
     printf 'xash-%s-%s-%s\n' "$(printf '%s' "$xash" | cut -c1-8)" \
         "$(printf '%s' "$hlsdk" | cut -c1-8)" "$(
         { { git ls-files -- VisionPort \
-            | grep -vxE 'VisionPort/(angle-visionos\.patch|build_angle_visionos\.sh|build_xash_macos\.sh|build_xash_xrsim\.sh)'
+            | grep -vxE 'VisionPort/(angle-visionos\.patch|build_angle_visionos\.sh|build_xash_macos\.sh|run_xash_macos\.sh|build_xash_xrsim\.sh)'
         } | hash_files
         echo "xcode-$XCODE_PIN"; } | shasum -a 256 | cut -c1-12)"
 }

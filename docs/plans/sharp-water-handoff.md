@@ -413,12 +413,12 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
 Each dump needs its own probe (`r_vrprobedump`) from the same origin.
 
-### Scene setup (Mac engine, background-safe — never omit these flags)
+### Scene setup (Mac engine, background-safe)
 ```
-cd build/mac-run
-SDL_MAC_BACKGROUND_APP=1 timeout 150 ./xash3d -game valve -dev 1 -window -nomsgbox \
-  -noenginemouse -width 960 -height 540 +m_ignore 1 +exec <cfg>
+LAMBDA_MAC_TIMEOUT=150 VisionPort/run_xash_macos.sh -game valve -width 960 -height 540 +exec <cfg>
 ```
+(behind the active app, muted, no mouse grab or dialogs; `<cfg>` and the
+dumps live in `build/mac-run/`).
 Keep `valve/video.cfg` at `fullscreen "0"` (else dumps are 5120×2880).
 `default_fov` persists in `valve/config.cfg`: after a `default_fov 40` run
 (view 97) set it back to `"90"` there, or every later dump is narrow.
