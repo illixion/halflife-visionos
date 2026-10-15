@@ -865,6 +865,20 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
         pixels.append(take(Int(wh[0]) * Int(wh[1]) * 4))
     }
     let lmPixels = (0..<nlm).map { _ in take(block * block * 4) }
+    // version 2: the frame's studio triangles and their skins
+    var dynTris = Data(), dynCount = 0, dynOpaque = 0
+    var skins: [(index: Int, w: Int, h: Int, pixels: Data)] = []
+    if ints[1] >= 2 {
+        let c = take(8).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
+        dynCount = Int(c[0]); dynOpaque = Int(c[1])
+        dynTris = take(dynCount * RTWaterScene.Dynamic.stride)
+        let nskins = take(4).withUnsafeBytes { Int($0.load(as: Int32.self)) }
+        for _ in 0..<nskins {
+            let h3 = take(12).withUnsafeBytes { Array($0.bindMemory(to: Int32.self)) }
+            let w = Int(h3[1]), h = Int(h3[2])
+            skins.append((Int(h3[0]), w, h, w > 0 ? take(w * h * 4) : Data()))
+        }
+    }
     let made = verts.withUnsafeBytes { v in idx.withUnsafeBytes { i in mats.withUnsafeBytes { m in dens.withUnsafeBytes { dn in
         RTWaterScene(device: device, generation: 1, vertices: v.baseAddress!, vertexCount: nv, indices: i.baseAddress!,
                      materials: m.baseAddress!, density: dn.baseAddress!, triangleCount: nt, models: models,
@@ -880,15 +894,30 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
         px.withUnsafeBytes { scene.lightmaps.replace(region: MTLRegionMake2D(0, 0, block, block), mipmapLevel: 0, slice: i,
                                                      withBytes: $0.baseAddress!, bytesPerRow: block * 4, bytesPerImage: block * block * 4) }
     }
+    var skinTextures: [MTLTexture] = []
+    for skin in skins where skin.w > 0 {
+        let (slot, created) = scene.dynamicTexture(engineIndex: skin.index, width: skin.w, height: skin.h)
+        guard let t = created else { continue }
+        skin.pixels.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, skin.w, skin.h), mipmapLevel: 0,
+                                                withBytes: $0.baseAddress!, bytesPerRow: skin.w * 4) }
+        skinTextures.append(t)
+        scene.markDynamicTextureReady(slot)
+    }
     do {
         let cb = queue.makeCommandBuffer()!, blit = cb.makeBlitCommandEncoder()!
-        for t in scene.textures { blit.generateMipmaps(for: t) }
+        for t in scene.textures + skinTextures { blit.generateMipmaps(for: t) }
         blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
     }
     scene.waitUntilBuilt()
-    scene.update(instances: instances, frame: 1, completedFrame: 0)
+    // STUDIO=0 leaves the studio models out, to see what they add
+    let withStudio = ProcessInfo.processInfo.environment["STUDIO"] != "0" && dynCount > 0
+    dynTris.withUnsafeBytes { raw in
+        let dyn = withStudio ? RTWaterScene.Dynamic(triangles: raw.baseAddress!, count: dynCount, numOpaque: dynOpaque) : nil
+        scene.update(instances: instances, dynamic: dyn, frame: 1, completedFrame: 0)
+    }
     scene.waitUntilBuilt()
-    guard let (tlas, info) = scene.structure(for: 1) else { print("\(name) ray-traced mirror: no TLAS"); failures += 1; return }
+    guard let bound = scene.structure(for: 1) else { print("\(name) ray-traced mirror: no TLAS"); failures += 1; return }
+    let tlas = bound.tlas, info = bound.info
 
     var params = base
     let div = Int(ProcessInfo.processInfo.environment["RTDIV"] ?? "") ?? 2
@@ -914,6 +943,10 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
     enc.setBuffer(scene.density, offset: 0, index: 5)
     enc.setBuffer(info, offset: 0, index: 6)
     enc.setBuffer(scene.textureTable, offset: 0, index: 7)
+    enc.setBuffer(bound.dynVertices, offset: 0, index: 8)
+    enc.setBuffer(bound.dynMaterials, offset: 0, index: 9)
+    enc.setBuffer(scene.dynamicTextures.table, offset: 0, index: 10)
+    enc.useResources(scene.dynamicTextures.textures, usage: .read)
     enc.setTexture(color, index: 0); enc.setTexture(out, index: 2)
     enc.setTexture(stencilTex, index: 3); enc.setTexture(scene.lightmaps, index: 4)
     enc.useResources(scene.textures, usage: .read)
@@ -981,8 +1014,8 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
         }
         try? Data(pairs).write(to: URL(fileURLWithPath: dumpPath))
     }
-    print(String(format: "%@ ray-traced mirror (div %d, %d tris, %d instances, %.2f ms Mac GPU): hits on %.1f%% of %d water texels; against the engine's mirror: mean difference %.1f/255, %.1f%% of hits off by >40, %.1f%% of water empty where the engine's mirror is not",
-                 name, div, nt, instances.count, gpuMs, 100 * Float(hits) / Float(max(water, 1)), water,
+    print(String(format: "%@ ray-traced mirror (div %d, %d tris + %d studio, %d instances, %.2f ms Mac GPU): hits on %.1f%% of %d water texels; against the engine's mirror: mean difference %.1f/255, %.1f%% of hits off by >40, %.1f%% of water empty where the engine's mirror is not",
+                 name, div, nt, withStudio ? dynCount : 0, instances.count, gpuMs, 100 * Float(hits) / Float(max(water, 1)), water,
                  Float(sumDiff) / Float(max(hits, 1)), 100 * Float(far) / Float(max(hits, 1)), 100 * Float(empty) / Float(max(water, 1))))
     if let dir = pngDir { writePNG(image, mw * 3, mh, "\(dir)/rt-\(name).png") }
 }

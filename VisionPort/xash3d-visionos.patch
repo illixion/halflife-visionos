@@ -3517,10 +3517,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..5c0d79e 100644
+index e6e7712..4faf5ab 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,35 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,45 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3548,6 +3548,16 @@ index e6e7712..5c0d79e 100644
 +// visionOS ray-traced water mirror (gl_vrscene.c)
 +void R_VRSceneNewMap( void );
 +void R_VRSceneLightmapChanged( int page );
++typedef struct
++{
++	float		pos[3];
++	float		uv[2];
++	unsigned int	color;	// rgba8, the vertex's light
++} vr_scene_dynvert_t;
++extern qboolean	vr_scene_capturing;
++void R_VRSceneAddStudioTriangle( const vr_scene_dynvert_t *a, const vr_scene_dynvert_t *b, const vr_scene_dynvert_t *c, int texture, qboolean masked );
++void R_VRSceneBeginCapture( void );
++void R_VRSceneEndCapture( void );
 +struct vr_scene_s;
 +struct vr_scene_instance_s;
 +const struct vr_scene_s *R_VRScene( void );
@@ -3591,7 +3601,7 @@ index 05a130f..842e422 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..d166cfc 100644
+index 0568486..32b7016 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3901,7 +3911,7 @@ index 0568486..d166cfc 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1113,11 +1297,32 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1113,11 +1297,42 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	}
  
  	tr.fCustomRendering = false;
@@ -3910,7 +3920,17 @@ index 0568486..d166cfc 100644
  		R_RunViewmodelEvents();
  
  	tr.realframecount++; // right called after viewmodel events
++#if !XASH_VISIONOS
++	// the scene dump's studio triangles are this view's (the device's
++	// bridge captures eye 0 itself)
++	if( r_vrscenedump.value && !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) && !r_vrmirror_pass )
++		R_VRSceneBeginCapture();
++#endif
  	R_RenderScene();
++#if !XASH_VISIONOS
++	if( vr_scene_capturing && !r_vrmirror_pass )
++		R_VRSceneEndCapture();
++#endif
 +	if( !FBitSet( RI.rvp.flags, RF_DRAW_CUBEMAP ) && !r_vrmirror_pass )
 +	{
 +		VectorCopy( RI.rvp.vieworigin, vr_glass_view );
@@ -3935,7 +3955,7 @@ index 0568486..d166cfc 100644
  
  	return;
  }
-@@ -1167,6 +1372,265 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1382,265 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4607,12 +4627,101 @@ index 03f794b..5c2cacb 100644
  
  		if(( 1.0f - tr->fraction ) * dist > 8.0f )
  			return 0.0f;
+diff --git a/ref/gl/gl_studio.c b/ref/gl/gl_studio.c
+index 8ca2613..93d2228 100644
+--- a/ref/gl/gl_studio.c
++++ b/ref/gl/gl_studio.c
+@@ -1984,6 +1984,62 @@ R_StudioDrawPoints
+ 
+ ===============
+ */
++/*
++===============
++R_StudioCaptureMesh
++
++visionOS ray-traced water (gl_vrscene.c): one mesh of the model being
++drawn, as world-space triangles with its skin's texture coordinates and
++the per-vertex colour the engine draws it with (R_StudioSetColorArray),
++the strips and fans walked as R_StudioDrawNormalMesh draws them.
++===============
++*/
++static void R_StudioCaptureMesh( short *ptricmds, vec3_t *pstudionorms, float s, float t, int texture, qboolean uvcoords, qboolean masked )
++{
++	vr_scene_dynvert_t v[3];
++	int i, n;
++
++	while(( i = *( ptricmds++ )))
++	{
++		const qboolean fan = i < 0;
++
++		if( i < 0 )
++			i = -i;
++		for( n = 0; i > 0; i--, n++, ptricmds += 4 )
++		{
++			vr_scene_dynvert_t c;
++			byte color[4];
++
++			R_StudioSetColorArray( ptricmds, pstudionorms, color );
++			VectorCopy( g_studio.verts[ptricmds[0]], c.pos );
++			if( uvcoords )
++			{
++				c.uv[0] = HalfToFloat( ptricmds[2] );
++				c.uv[1] = HalfToFloat( ptricmds[3] );
++			}
++			else
++			{
++				c.uv[0] = ptricmds[2] * s;
++				c.uv[1] = ptricmds[3] * t;
++			}
++			c.color = color[0] | ( color[1] << 8 ) | ( color[2] << 16 ) | ( 255u << 24 );
++
++			if( n == 0 ) v[0] = c;
++			else if( n == 1 ) v[1] = c;
++			else
++			{
++				v[2] = c;
++				// a strip's odd triangles wind the other way (as GL draws them)
++				if( !fan && ( n & 1 ))
++					R_VRSceneAddStudioTriangle( &v[1], &v[0], &v[2], texture, masked );
++				else R_VRSceneAddStudioTriangle( &v[0], &v[1], &v[2], texture, masked );
++				if( fan ) v[1] = v[2];
++				else { v[0] = v[1]; v[1] = v[2]; }
++			}
++		}
++	}
++}
++
+ static void R_StudioDrawPoints( void )
+ {
+ 	int		i, j, k, m_skinnum;
+@@ -2156,6 +2212,21 @@ static void R_StudioDrawPoints( void )
+ 
+ 		R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
+ 
++		// the ray-traced water mirror's copy of what this eye draws: solid
++		// and masked meshes of solid and alpha-tested models, not the hands
++		if( vr_scene_capturing && !r_vrmirror_pass && !r_vrprobe_pass && RI.currententity != tr.viewent
++			&& !FBitSet( g_nFaceFlags, STUDIO_NF_ADDITIVE ) && !g_nForceFaceFlags
++			&& ( RI.currententity->curstate.rendermode == kRenderNormal || RI.currententity->curstate.rendermode == kRenderTransAlpha )
++			&& RI.currententity->curstate.renderfx != kRenderFxGlowShell )
++		{
++			mstudiotexture_t *skins = NULL;
++
++			if( m_fDoRemap ) skins = gEngfuncs.CL_GetRemapInfoForEntity( RI.currententity )->ptexture;
++			if( !skins ) skins = ptexture;
++			R_StudioCaptureMesh( ptricmds, pstudionorms, s, t, skins[pskinref[pmesh->skinref]].index,
++				FBitSet( g_nFaceFlags, STUDIO_NF_UV_COORDS ) ? true : false, FBitSet( g_nFaceFlags, STUDIO_NF_MASKED ) ? true : false );
++		}
++
+ 		if( r_studio_drawelements.value )
+ 		{
+ 			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
 diff --git a/ref/gl/gl_vrscene.c b/ref/gl/gl_vrscene.c
 new file mode 100644
-index 0000000..e9fe3bb
+index 0000000..b5c713d
 --- /dev/null
 +++ b/ref/gl/gl_vrscene.c
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,568 @@
 +/*
 +gl_vrscene.c - the world's brush geometry for the visionOS ray-traced water
 +mirror (the app's "Ray traced" sharp water method, RTWater.swift)
@@ -4683,6 +4792,115 @@ index 0000000..e9fe3bb
 +} vr_scene_t;
 +
 +static vr_scene_t vr_scene;
++
++/*
++Studio models (R_StudioCaptureMesh, gl_studio.c): the triangles eye 0 drew
++this frame, world space, between R_VRSceneBeginCapture and
++R_VRSceneEndCapture; the masked ones (alpha-tested skins) kept apart so
++they follow the opaque ones.
++*/
++typedef struct
++{
++	vr_scene_dynvert_t	v[3];
++	int			texture;	// engine texture index (R_GetTexture)
++} vr_scene_dyntri_t;
++
++#define VR_SCENE_MAX_DYNAMIC	65536
++qboolean vr_scene_capturing = false;
++static vr_scene_dyntri_t *vr_dyn[2];	// opaque, masked
++static int vr_dyn_count[2], vr_dyn_cap[2];
++static vr_scene_dyntri_t *vr_dyn_out = NULL;	// the last frame's, opaque first
++static int vr_dyn_out_count = 0, vr_dyn_out_opaque = 0, vr_dyn_out_cap = 0;
++
++void R_VRSceneAddStudioTriangle( const vr_scene_dynvert_t *a, const vr_scene_dynvert_t *b, const vr_scene_dynvert_t *c, int texture, qboolean masked )
++{
++	const int k = masked ? 1 : 0;
++	vr_scene_dyntri_t *t;
++
++	if( vr_dyn_count[0] + vr_dyn_count[1] >= VR_SCENE_MAX_DYNAMIC )
++		return;
++	if( vr_dyn_count[k] >= vr_dyn_cap[k] )
++	{
++		const int cap = vr_dyn_cap[k] ? vr_dyn_cap[k] * 2 : 4096;
++		vr_scene_dyntri_t *grown = Mem_Malloc( r_temppool, sizeof( *grown ) * cap );
++
++		if( vr_dyn[k] )
++		{
++			memcpy( grown, vr_dyn[k], sizeof( *grown ) * vr_dyn_count[k] );
++			Mem_Free( vr_dyn[k] );
++		}
++		vr_dyn[k] = grown;
++		vr_dyn_cap[k] = cap;
++	}
++	t = &vr_dyn[k][vr_dyn_count[k]++];
++	t->v[0] = *a;
++	t->v[1] = *b;
++	t->v[2] = *c;
++	t->texture = texture;
++}
++
++__attribute__((visibility("default"))) void R_VRSceneBeginCapture( void )
++{
++	vr_dyn_count[0] = vr_dyn_count[1] = 0;
++	vr_scene_capturing = true;
++}
++
++__attribute__((visibility("default"))) void R_VRSceneEndCapture( void )
++{
++	const int n = vr_dyn_count[0] + vr_dyn_count[1];
++
++	vr_scene_capturing = false;
++	if( n > vr_dyn_out_cap )
++	{
++		if( vr_dyn_out )
++			Mem_Free( vr_dyn_out );
++		vr_dyn_out_cap = n + 1024;
++		vr_dyn_out = Mem_Malloc( r_temppool, sizeof( *vr_dyn_out ) * vr_dyn_out_cap );
++	}
++	if( vr_dyn_count[0] )
++		memcpy( vr_dyn_out, vr_dyn[0], sizeof( *vr_dyn_out ) * vr_dyn_count[0] );
++	if( vr_dyn_count[1] )
++		memcpy( vr_dyn_out + vr_dyn_count[0], vr_dyn[1], sizeof( *vr_dyn_out ) * vr_dyn_count[1] );
++	vr_dyn_out_count = n;
++	vr_dyn_out_opaque = vr_dyn_count[0];
++}
++
++/*
++=================
++R_VRSceneStudio
++
++The studio triangles of the last capture, opaque first (*num_opaque of
++them); valid until the next R_VRSceneEndCapture.
++=================
++*/
++__attribute__((visibility("default"))) const vr_scene_dyntri_t *R_VRSceneStudio( int *count, int *num_opaque )
++{
++	*count = vr_dyn_out_count;
++	*num_opaque = vr_dyn_out_opaque;
++	return vr_dyn_out;
++}
++
++/*
++=================
++R_VRSceneTextureInfo
++
++An engine texture's GL name and upload size, for the app's copy of it.
++=================
++*/
++__attribute__((visibility("default"))) int R_VRSceneTextureInfo( int index, unsigned int *texnum, int *width, int *height )
++{
++	gl_texture_t *t;
++
++	if( index <= 0 || index >= MAX_TEXTURES )
++		return 0;
++	t = R_GetTexture( index );
++	if( !t || !t->texnum )
++		return 0;
++	*texnum = t->texnum;
++	*width = t->width;
++	*height = t->height;
++	return 1;
++}
 +static model_t *vr_scene_world = NULL;
 +static int vr_scene_generation = 0;
 +static qboolean vr_scene_stale = true;
@@ -5001,7 +5219,7 @@ index 0000000..e9fe3bb
 +	if( !f )
 +		return;
 +	{
-+		int header[12] = { 0x43535656 /* VVSC */, 1, s->num_verts, s->num_tris, s->num_models,
++		int header[12] = { 0x43535656 /* VVSC */, 2, s->num_verts, s->num_tris, s->num_models,
 +			s->num_textures, s->num_lightmaps, s->block_size, (int)( s->lightmap_scale * 1024.0f + 0.5f ), ninst, 0, 0 };
 +		fwrite( header, sizeof( header ), 1, f );
 +	}
@@ -5029,10 +5247,47 @@ index 0000000..e9fe3bb
 +		pglGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
 +		fwrite( pixels, (size_t)s->block_size * s->block_size * 4, 1, f );
 +	}
++	// version 2: this frame's studio triangles (opaque first), then the
++	// textures they name, each once: index, width, height, pixels
++	{
++		int counts[2] = { vr_dyn_out_count, vr_dyn_out_opaque }, used[MAX_TEXTURES / 32], nused = 0, j;
++
++		fwrite( counts, sizeof( counts ), 1, f );
++		fwrite( vr_dyn_out, sizeof( *vr_dyn_out ), vr_dyn_out_count, f );
++		memset( used, 0, sizeof( used ));
++		for( i = 0; i < vr_dyn_out_count; i++ )
++		{
++			j = vr_dyn_out[i].texture;
++			if( j > 0 && j < MAX_TEXTURES && !( used[j >> 5] & ( 1u << ( j & 31 ))))
++			{
++				used[j >> 5] |= 1u << ( j & 31 );
++				nused++;
++			}
++		}
++		fwrite( &nused, sizeof( int ), 1, f );
++		for( j = 1; j < MAX_TEXTURES; j++ )
++		{
++			unsigned int texnum;
++			int wh[3];
++
++			if( !( used[j >> 5] & ( 1u << ( j & 31 ))))
++				continue;
++			if( !R_VRSceneTextureInfo( j, &texnum, &wh[1], &wh[2] ))
++				wh[1] = wh[2] = 0;
++			wh[0] = j;
++			fwrite( wh, sizeof( wh ), 1, f );
++			if( wh[1] > 0 )
++			{
++				GL_Bind( XASH_TEXTURE0, j );
++				pglGetTexImage( GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels );
++				fwrite( pixels, (size_t)wh[1] * wh[2] * 4, 1, f );
++			}
++		}
++	}
 +	free( pixels );
 +	fclose( f );
-+	gEngfuncs.Con_Printf( "wrote %s (%d tris, %d models, %d textures, %d lightmaps, %d instances)\n",
-+		name, s->num_tris, s->num_models, s->num_textures, s->num_lightmaps, ninst );
++	gEngfuncs.Con_Printf( "wrote %s (%d tris, %d models, %d textures, %d lightmaps, %d instances, %d studio tris)\n",
++		name, s->num_tris, s->num_models, s->num_textures, s->num_lightmaps, ninst, vr_dyn_out_count );
 +}
 +#endif
 diff --git a/ref/gl/gl_warp.c b/ref/gl/gl_warp.c

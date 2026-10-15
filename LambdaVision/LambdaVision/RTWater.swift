@@ -31,6 +31,11 @@ final class RTWater {
     private var retired: [(scene: RTWaterScene, after: UInt64)] = []
     private var mipsDone = false
     private var instances: [lambda_scene_instance_t]
+    /// Skins: each one's level-0 view (the worker's copy target, kept alive
+    /// until the copy is done) and the ones copied, waiting for mipmaps.
+    private var skinViews: [Int: (slot: Int, texture: MTLTexture, view: MTLTexture)] = [:]
+    private var skinsToMip: [MTLTexture] = []
+    private var copied = [Int32](repeating: 0, count: 256)
 
     init?(device: MTLDevice, library: MTLLibrary) {
         guard device.supportsRaytracing,
@@ -39,7 +44,7 @@ final class RTWater {
         self.device = device
         self.pipeline = pipeline
         let at = MTL4ArgumentTableDescriptor()
-        at.maxBufferBindCount = 8        // TLAS @ 0 … texture table @ 7, DisplayParams @ BufferIndexUniforms
+        at.maxBufferBindCount = 11       // TLAS @ 0 … skin table @ 10, DisplayParams @ BufferIndexUniforms
         at.maxTextureBindCount = 5       // colorMap @ 0, mirror @ 2, engine stencil @ 3, lightmaps @ 4
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
@@ -90,6 +95,8 @@ final class RTWater {
                 if let old = scene { retired.append((old, frame)) }
                 scene = next
                 mipsDone = false
+                skinViews = [:]
+                skinsToMip = []
                 add = next.allocations
                 AppLog.render.log("[RTWater] map scene \(generation, privacy: .public): \(s.num_tris, privacy: .public) triangles, \(s.num_models, privacy: .public) models, \(s.num_textures, privacy: .public) textures, \(s.num_lightmaps, privacy: .public) lightmap pages")
             }
@@ -113,6 +120,14 @@ final class RTWater {
             return true
         }
         if let scene {
+            // skins the worker copied since last frame: mipmapped in this
+            // frame's encode, sampled from the next TLAS on
+            let ncopied = copied.withUnsafeMutableBufferPointer { Int(lambda_scene_skins_copied($0.baseAddress, Int32($0.count))) }
+            for i in copied.prefix(ncopied) {
+                guard let skin = skinViews[Int(i)] else { continue }
+                skinsToMip.append(skin.texture)
+                scene.markDynamicTextureReady(skin.slot)
+            }
             let n = instances.withUnsafeMutableBufferPointer {
                 Int(lambda_scene_instances($0.baseAddress, Int32($0.count)))
             }
@@ -121,7 +136,24 @@ final class RTWater {
                 let m = withUnsafeBytes(of: &i.matrix) { Array($0.bindMemory(to: Float.self)) }
                 return RTWaterScene.Instance(model: Int(i.model), matrix: m)
             }
-            scene.update(instances: list, frame: frame, completedFrame: completedFrame)
+            // the studio models eye 0 drew, and a copy of each new skin
+            var count: Int32 = 0, opaque: Int32 = 0, skinCount: Int32 = 0
+            var skins: UnsafePointer<lambda_scene_skin_t>?
+            let tris = lambda_scene_studio_acquire(&count, &opaque, &skins, &skinCount)
+            if let skins {
+                for k in 0..<Int(skinCount) where skinViews[Int(skins[k].index)] == nil {
+                    let info = skins[k]
+                    let (slot, created) = scene.dynamicTexture(engineIndex: Int(info.index), width: Int(info.width), height: Int(info.height))
+                    guard let t = created,
+                          let v = t.makeTextureView(pixelFormat: .rgba8Unorm, textureType: .type2D, levels: 0..<1, slices: 0..<1) else { continue }
+                    skinViews[Int(info.index)] = (slot, t, v)
+                    lambda_gl_worker_copy_skin(info.index, Unmanaged.passUnretained(v).toOpaque())
+                }
+            }
+            let dynamic = tris.map { RTWaterScene.Dynamic(triangles: $0, count: Int(count), numOpaque: Int(opaque)) }
+            scene.update(instances: list, dynamic: dynamic, frame: frame, completedFrame: completedFrame)
+            lambda_scene_studio_release()
+            add += scene.takeNewAllocations()
         }
         return (add, remove)
     }
@@ -135,27 +167,32 @@ final class RTWater {
                 paramsAddress: UInt64, frame: UInt64,
                 mark: (GPUPassTimer.Mark, MTL4ComputeCommandEncoder) -> Void) -> Bool {
         guard let color, let scene, scene.isReady, Int(lambda_scene_copied()) == scene.generation,
-              let (tlas, info) = scene.structure(for: frame),
+              let bound = scene.structure(for: frame),
               let enc = commandBuffer.makeComputeCommandEncoder() else { return false }
         enc.label = "RTWater"
         // ANGLE's colour, stencil and texture copies (ordered by the queue's
         // wait on its fence), and last frame's composite reading the mirror
         enc.barrier(afterQueueStages: .all, beforeStages: [.dispatch, .blit], visibilityOptions: .device)
-        if !mipsDone {
+        if !mipsDone || !skinsToMip.isEmpty {
             // the copies wrote level 0 only
-            for t in scene.textures { enc.generateMipmaps(texture: t) }
+            if !mipsDone { for t in scene.textures { enc.generateMipmaps(texture: t) } }
+            for t in skinsToMip { enc.generateMipmaps(texture: t) }
             enc.barrier(afterEncoderStages: .blit, beforeEncoderStages: .dispatch, visibilityOptions: .device)
             mipsDone = true
+            skinsToMip = []
         }
         mark(.mirrorFill, enc)
-        argumentTable.setResource(tlas.gpuResourceID, bufferIndex: 0)
+        argumentTable.setResource(bound.tlas.gpuResourceID, bufferIndex: 0)
         argumentTable.setAddress(scene.vertices.gpuAddress, index: 1)
         argumentTable.setAddress(paramsAddress, index: BufferIndex.uniforms.rawValue)
         argumentTable.setAddress(scene.indices.gpuAddress, index: 3)
         argumentTable.setAddress(scene.materials.gpuAddress, index: 4)
         argumentTable.setAddress(scene.density.gpuAddress, index: 5)
-        argumentTable.setAddress(info.gpuAddress, index: 6)
+        argumentTable.setAddress(bound.info.gpuAddress, index: 6)
         argumentTable.setAddress(scene.textureTable.gpuAddress, index: 7)
+        argumentTable.setAddress(bound.dynVertices.gpuAddress, index: 8)
+        argumentTable.setAddress(bound.dynMaterials.gpuAddress, index: 9)
+        argumentTable.setAddress(scene.dynamicTextures.table.gpuAddress, index: 10)
         argumentTable.setTexture(colorMap.gpuResourceID, index: 0)
         argumentTable.setTexture(color.gpuResourceID, index: 2)
         argumentTable.setTexture(engineStencil.gpuResourceID, index: 3)

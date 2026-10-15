@@ -1315,22 +1315,42 @@ fragment DepthOnlyOut reprojectionDepthMerge(ColorInOut in [[stage_in]],
 // plane and target layout as the screen-space mirror, divisor sspr.w), the
 // eye's ray meets the water at P and the reflected ray is traced through the
 // world's brush triangles (the engine's own polygons, gl_vrscene.c: the
-// world and its brush entities, with their current transforms). A hit is
-// shaded the way the engine draws it: the texture (a copy of the engine's,
-// mipmapped, the level from the ray's footprint) times its lightmap page
-// (doubled with overbright lightmaps). '{' textures are alpha-tested like
-// the engine's (alpha above 0.25 is solid). A miss, or the sky, leaves the
-// texel empty, so the composite falls back to the probe there, as for the
-// screen-space mirror's gaps. Studio models, sprites and particles are not
-// in the scene, and dynamic lights not in the lightmaps.
+// world and its brush entities, with their current transforms) and the
+// studio models eye 0 drew this frame (one more instance, RTDynVertex).
+// A hit is shaded the way the engine draws it: a brush by its texture (a
+// copy of the engine's, mipmapped, the level from the ray's footprint) times
+// its lightmap page (times the engine's lightmap factor), a studio model by
+// its skin times the vertex light the engine computed. '{' textures are
+// alpha-tested like the engine's (alpha above 0.25 is solid), masked skins
+// at 0.5. A miss, or the sky, leaves the texel empty, so the composite falls
+// back to the probe there, as for the screen-space mirror's gaps. Sprites
+// and particles are not in the scene, nor dynamic lights in the lightmaps.
 struct RTTexture
 {
     texture2d<half> t;
 };
 
+#define RT_DYNAMIC 1u           // RTInstanceInfo.flags: the studio triangles
+#define RT_UNTEXTURED 4u        // material flag: the skin's copy is not there yet
+
 static inline uint rtTriangle(constant RTInstanceInfo &inst, uint geometry, uint primitive)
 {
     return inst.firstTri + (geometry == inst.alphaGeometry ? inst.numOpaque : 0) + primitive;
+}
+
+static inline float2 rtLerp(float2 a, float2 b, float2 c, float2 bc)
+{
+    return a * (1.0 - bc.x - bc.y) + b * bc.x + c * bc.y;
+}
+
+// a studio triangle's texels per world unit (log2), for the mip level
+static inline float rtDensity(RTDynVertex a, RTDynVertex b, RTDynVertex c, float2 texSize)
+{
+    const float3 p0 = float3(a.pos[0], a.pos[1], a.pos[2]);
+    const float area = length(cross(float3(b.pos[0], b.pos[1], b.pos[2]) - p0, float3(c.pos[0], c.pos[1], c.pos[2]) - p0));
+    const float2 e1 = float2(b.uv[0] - a.uv[0], b.uv[1] - a.uv[1]) * texSize, e2 = float2(c.uv[0] - a.uv[0], c.uv[1] - a.uv[1]) * texSize;
+    const float uvArea = abs(e1.x * e2.y - e2.x * e1.y);
+    return (area > 1e-6 && uvArea > 1e-9) ? 0.5 * log2(uvArea / area) : 0.0;
 }
 
 kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
@@ -1342,6 +1362,9 @@ kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
                          const device float *density [[ buffer(5) ]],
                          constant RTInstanceInfo *instances [[ buffer(6) ]],
                          const device RTTexture *textures [[ buffer(7) ]],
+                         const device RTDynVertex *dynVerts [[ buffer(8) ]],
+                         const device uint *dynMaterials [[ buffer(9) ]],
+                         const device RTTexture *dynTextures [[ buffer(10) ]],
                          texture2d_array<half> colorMap [[ texture(0) ]],
                          texture2d_array<half, access::write> mirror [[ texture(2) ]],
                          texture2d_array<uint> engineStencil [[ texture(3) ]],
@@ -1374,33 +1397,56 @@ kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
             constant RTInstanceInfo &inst = instances[q.get_candidate_instance_id()];
             const uint tri = inst.firstTri + inst.numOpaque + q.get_candidate_primitive_id();
             const float2 bc = q.get_candidate_triangle_barycentric_coord();
-            const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
-            const float2 tuv = float2(v0.uv[0], v0.uv[1]) * (1.0 - bc.x - bc.y)
-                + float2(v1.uv[0], v1.uv[1]) * bc.x + float2(v2.uv[0], v2.uv[1]) * bc.y;
-            const float lod = log2(max((base + q.get_candidate_triangle_distance()) * spread, 1e-4)) + density[tri];
-            if (textures[materials[tri] & 0xFFFF].t.sample(tex, tuv, level(lod)).a > 0.25h)
+            const float footprint = log2(max((base + q.get_candidate_triangle_distance()) * spread, 1e-4));
+            bool solid;
+            if (inst.flags & RT_DYNAMIC) {
+                const uint m = dynMaterials[tri];
+                const RTDynVertex v0 = dynVerts[tri * 3], v1 = dynVerts[tri * 3 + 1], v2 = dynVerts[tri * 3 + 2];
+                texture2d<half> t = dynTextures[m & 0xFFFF].t;
+                const float2 tuv = rtLerp(float2(v0.uv[0], v0.uv[1]), float2(v1.uv[0], v1.uv[1]), float2(v2.uv[0], v2.uv[1]), bc);
+                const float lod = footprint + rtDensity(v0, v1, v2, float2(t.get_width(), t.get_height()));
+                solid = ((m >> 24) & RT_UNTEXTURED) || t.sample(tex, tuv, level(lod)).a > 0.5h;
+            } else {
+                const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
+                const float2 tuv = rtLerp(float2(v0.uv[0], v0.uv[1]), float2(v1.uv[0], v1.uv[1]), float2(v2.uv[0], v2.uv[1]), bc);
+                solid = textures[materials[tri] & 0xFFFF].t.sample(tex, tuv, level(footprint + density[tri])).a > 0.25h;
+            }
+            if (solid)
                 q.commit_triangle_intersection();
         }
         if (q.get_committed_intersection_type() == raytracing::intersection_type::triangle) {
             constant RTInstanceInfo &inst = instances[q.get_committed_instance_id()];
             const uint tri = rtTriangle(inst, q.get_committed_geometry_id(), q.get_committed_primitive_id());
             const float2 bc = q.get_committed_triangle_barycentric_coord();
-            const float t = q.get_committed_distance();
-            const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
-            const float w0 = 1.0 - bc.x - bc.y;
-            const float2 tuv = float2(v0.uv[0], v0.uv[1]) * w0 + float2(v1.uv[0], v1.uv[1]) * bc.x + float2(v2.uv[0], v2.uv[1]) * bc.y;
-            const float2 luv = float2(v0.lm[0], v0.lm[1]) * w0 + float2(v1.lm[0], v1.lm[1]) * bc.x + float2(v2.lm[0], v2.lm[1]) * bc.y;
-            // the footprint widens on a surface seen edge-on
-            const float3 p0 = float3(v0.pos[0], v0.pos[1], v0.pos[2]);
-            const float3 n = normalize(cross(float3(v1.pos[0], v1.pos[1], v1.pos[2]) - p0,
-                                             float3(v2.pos[0], v2.pos[1], v2.pos[2]) - p0));
-            const float3 ro = q.get_committed_world_to_object_transform() * float4(r, 0.0);
-            const float cosI = abs(dot(normalize(ro), n));
-            const float lod = log2(max((base + t) * spread, 1e-4)) + density[tri] - 0.5 * log2(max(cosI, 0.1));
-            const uint m = materials[tri];
-            float3 c = float3(textures[m & 0xFFFF].t.sample(tex, tuv, level(lod)).rgb);
-            if (((m >> 24) & 2) == 0)
-                c *= float3(lightmaps.sample(lm, luv, (m >> 16) & 0xFF).rgb) * p.rtWater.x;
+            const float footprint = log2(max((base + q.get_committed_distance()) * spread, 1e-4));
+            float3 c;
+            if (inst.flags & RT_DYNAMIC) {
+                const uint m = dynMaterials[tri];
+                const RTDynVertex v0 = dynVerts[tri * 3], v1 = dynVerts[tri * 3 + 1], v2 = dynVerts[tri * 3 + 2];
+                const float3 light = unpack_unorm4x8_to_float(v0.color).rgb * (1.0 - bc.x - bc.y)
+                    + unpack_unorm4x8_to_float(v1.color).rgb * bc.x + unpack_unorm4x8_to_float(v2.color).rgb * bc.y;
+                c = light;
+                if (((m >> 24) & RT_UNTEXTURED) == 0) {
+                    texture2d<half> t = dynTextures[m & 0xFFFF].t;
+                    const float2 tuv = rtLerp(float2(v0.uv[0], v0.uv[1]), float2(v1.uv[0], v1.uv[1]), float2(v2.uv[0], v2.uv[1]), bc);
+                    c *= float3(t.sample(tex, tuv, level(footprint + rtDensity(v0, v1, v2, float2(t.get_width(), t.get_height())))).rgb);
+                }
+            } else {
+                const RTVertex v0 = verts[indices[tri * 3]], v1 = verts[indices[tri * 3 + 1]], v2 = verts[indices[tri * 3 + 2]];
+                const float2 tuv = rtLerp(float2(v0.uv[0], v0.uv[1]), float2(v1.uv[0], v1.uv[1]), float2(v2.uv[0], v2.uv[1]), bc);
+                const float2 luv = rtLerp(float2(v0.lm[0], v0.lm[1]), float2(v1.lm[0], v1.lm[1]), float2(v2.lm[0], v2.lm[1]), bc);
+                // the footprint widens on a surface seen edge-on
+                const float3 p0 = float3(v0.pos[0], v0.pos[1], v0.pos[2]);
+                const float3 n = normalize(cross(float3(v1.pos[0], v1.pos[1], v1.pos[2]) - p0,
+                                                 float3(v2.pos[0], v2.pos[1], v2.pos[2]) - p0));
+                const float3 ro = q.get_committed_world_to_object_transform() * float4(r, 0.0);
+                const float cosI = abs(dot(normalize(ro), n));
+                const float lod = footprint + density[tri] - 0.5 * log2(max(cosI, 0.1));
+                const uint m = materials[tri];
+                c = float3(textures[m & 0xFFFF].t.sample(tex, tuv, level(lod)).rgb);
+                if (((m >> 24) & 2) == 0)
+                    c *= float3(lightmaps.sample(lm, luv, (m >> 16) & 0xFF).rgb) * p.rtWater.x;
+            }
             out = half4(half3(saturate(c)), 1.0h);
         }
     }

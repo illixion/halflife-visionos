@@ -4156,6 +4156,12 @@ typedef struct {
 extern const engine_scene_t *R_VRScene(void);
 extern int  R_VRSceneInstances(lambda_scene_instance_t *out, int max);
 extern void R_VRSceneTakeDirty(unsigned int *out_bits);
+extern void R_VRSceneBeginCapture(void);
+extern void R_VRSceneEndCapture(void);
+extern const void *R_VRSceneStudio(int *count, int *num_opaque);
+extern int  R_VRSceneTextureInfo(int index, unsigned int *texnum, int *width, int *height);
+#define SCENE_DYNTRI_SIZE 76    // = gl_vrscene.c vr_scene_dyntri_t
+#define SCENE_MAX_SKINS 1024
 
 static _Atomic int     g_rt_on = 0;
 static pthread_mutex_t g_scene_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -4174,6 +4180,16 @@ static int             g_scene_lm_count = 0;
 static int             g_scene_tex_next = 0;  // the next texture to copy
 static int             g_scene_lm_done = 0;   // all pages copied once
 static _Atomic int     g_scene_copied_gen = 0;
+// studio models: last frame's triangles and skins (under g_scene_mtx)
+static unsigned char  *g_studio_tris = NULL;
+static int             g_studio_cap = 0, g_studio_count = 0, g_studio_opaque = 0;
+static lambda_scene_skin_t g_studio_skins[SCENE_MAX_SKINS];
+static int             g_studio_skin_count = 0;
+// skin copies the app asked for, and the ones done
+static struct { int index; void *view; } g_skin_queue[SCENE_MAX_SKINS];
+static int             g_skin_queue_count = 0;
+static int             g_skin_done[SCENE_MAX_SKINS];
+static int             g_skin_done_count = 0;
 
 void lambda_gl_worker_set_rt(int on) { atomic_store(&g_rt_on, on ? 1 : 0); }
 
@@ -4194,6 +4210,39 @@ int lambda_scene_instances(lambda_scene_instance_t *out, int max) {
 }
 
 int lambda_scene_copied(void) { return atomic_load(&g_scene_copied_gen); }
+
+const void *lambda_scene_studio_acquire(int *count, int *num_opaque,
+                                        const lambda_scene_skin_t **skins, int *skin_count) {
+    pthread_mutex_lock(&g_scene_mtx);
+    if (count) *count = g_studio_count;
+    if (num_opaque) *num_opaque = g_studio_opaque;
+    if (skins) *skins = g_studio_skins;
+    if (skin_count) *skin_count = g_studio_skin_count;
+    return g_studio_tris;
+}
+
+void lambda_scene_studio_release(void) { pthread_mutex_unlock(&g_scene_mtx); }
+
+void lambda_gl_worker_copy_skin(int engine_index, void *mtl_view) {
+    pthread_mutex_lock(&g_scene_mtx);
+    if (g_skin_queue_count < SCENE_MAX_SKINS && mtl_view) {
+        g_skin_queue[g_skin_queue_count].index = engine_index;
+        g_skin_queue[g_skin_queue_count].view = mtl_view;
+        g_skin_queue_count++;
+    }
+    pthread_mutex_unlock(&g_scene_mtx);
+}
+
+int lambda_scene_skins_copied(int *out_indices, int max) {
+    pthread_mutex_lock(&g_scene_mtx);
+    int n = g_skin_done_count < max ? g_skin_done_count : max;
+    if (out_indices && n > 0) memcpy(out_indices, g_skin_done, sizeof(int) * (size_t)n);
+    // anything past max stays for the next call
+    memmove(g_skin_done, g_skin_done + n, sizeof(int) * (size_t)(g_skin_done_count - n));
+    g_skin_done_count -= n;
+    pthread_mutex_unlock(&g_scene_mtx);
+    return n;
+}
 
 void lambda_gl_worker_set_scene_targets(int generation, void *const *texture_views, int texture_count,
                                         void *const *lightmap_views, int lightmap_count) {
@@ -4302,10 +4351,35 @@ static void worker_scene_frame(void) {
     int n = R_VRSceneInstances(inst, LAMBDA_SCENE_MAX_INSTANCES);
     unsigned int dirty[8];
     R_VRSceneTakeDirty(dirty);
+    int studio_count = 0, studio_opaque = 0;
+    const unsigned char *studio = R_VRSceneStudio(&studio_count, &studio_opaque);
 
     pthread_mutex_lock(&g_scene_mtx);
     memcpy(g_scene_inst, inst, sizeof(inst[0]) * (size_t)(n > 0 ? n : 0));
     g_scene_inst_count = n > 0 ? n : 0;
+    // the studio triangles eye 0 captured, and their skins (each once)
+    if (studio_count > g_studio_cap) {
+        free(g_studio_tris);
+        g_studio_cap = studio_count + 1024;
+        g_studio_tris = malloc((size_t)g_studio_cap * SCENE_DYNTRI_SIZE);
+    }
+    g_studio_count = (studio && g_studio_tris) ? studio_count : 0;
+    g_studio_opaque = g_studio_count ? studio_opaque : 0;
+    if (g_studio_count) memcpy(g_studio_tris, studio, (size_t)g_studio_count * SCENE_DYNTRI_SIZE);
+    g_studio_skin_count = 0;
+    for (int i = 0, last = -1; i < g_studio_count; i++) {
+        int index;
+        memcpy(&index, g_studio_tris + (size_t)i * SCENE_DYNTRI_SIZE + 72, sizeof(int));
+        if (index == last) continue;
+        last = index;
+        int seen = 0;
+        for (int k = 0; k < g_studio_skin_count && !seen; k++) seen = g_studio_skins[k].index == index;
+        if (seen || g_studio_skin_count >= SCENE_MAX_SKINS) continue;
+        unsigned int texnum;
+        int w, h;
+        if (!R_VRSceneTextureInfo(index, &texnum, &w, &h)) continue;
+        g_studio_skins[g_studio_skin_count++] = (lambda_scene_skin_t){ index, w, h };
+    }
     if (g_scene_target_gen != 0 && g_scene_target_gen == g_scene_snap.generation) {
         GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
         glDisable(GL_SCISSOR_TEST);
@@ -4321,6 +4395,15 @@ static void worker_scene_frame(void) {
             scene_copy_texture(g_scene_lightmaps[i], g_scene_snap.block_size, g_scene_snap.block_size, g_scene_lm_views[i]);
         }
         g_scene_lm_done = 1;
+        // the skins the app asked for
+        for (int i = 0; i < g_skin_queue_count; i++) {
+            unsigned int texnum;
+            int w, h;
+            if (R_VRSceneTextureInfo(g_skin_queue[i].index, &texnum, &w, &h))
+                scene_copy_texture(texnum, w, h, g_skin_queue[i].view);
+            if (g_skin_done_count < SCENE_MAX_SKINS) g_skin_done[g_skin_done_count++] = g_skin_queue[i].index;
+        }
+        g_skin_queue_count = 0;
         if (scissor) glEnable(GL_SCISSOR_TEST);
         if (g_scene_tex_next >= g_scene_tex_count)
             atomic_store(&g_scene_copied_gen, g_scene_target_gen);
@@ -4415,7 +4498,11 @@ static int worker_engine_frame(void) {
         lambda_key_queue_apply();
         gt_begin(0);
         double t0 = ft_now_ms();
+        // the ray-traced mirror's studio models: what this eye draws
+        int capture = atomic_load(&g_rt_on);
+        if (capture) R_VRSceneBeginCapture();
         lambda_engine_frame();
+        if (capture) R_VRSceneEndCapture();
         double t1 = ft_now_ms();
         lambda_glass_capture_eye(0);
         // The client (HUD_CreateEntities) just published the active

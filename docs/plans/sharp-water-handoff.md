@@ -434,8 +434,21 @@ sky.
   surfaces), times the bilinear lightmap times `lightmap_scale`, clamped.
   Alpha test as the engine's (alpha above 0.25 is solid), in the
   intersection query's candidate loop.
-- **Not in it yet**: studio models (NPCs, items), sprites, particles,
-  dynamic lights, other water surfaces, glass.
+- **Studio models** (NPCs, items; not the hands): while the method is on,
+  the bridge brackets eye 0's frame with `R_VRSceneBeginCapture` /
+  `EndCapture`, and `R_StudioDrawPoints` hands each solid or masked mesh of
+  a normal or alpha-tested model to `R_StudioCaptureMesh`. That walks the
+  strips and fans as the engine draws them, in world space, with the
+  per-vertex light the engine computed (`R_StudioSetColorArray`) and the
+  skin's engine texture index. The worker snapshots the triangles and
+  their skins. The app copies each new skin once (`lambda_gl_worker_copy_skin`)
+  and rebuilds a studio BLAS every frame (a ring of three slots) with a
+  TLAS naming it. Shading: skin × vertex light, masked skins alpha-tested
+  at 0.5; a skin whose copy hasn't arrived shows its light alone. The TLAS
+  is the newest finished build, so a moving NPC's reflection may trail by
+  a frame or two.
+- **Not in it yet**: sprites, particles, dynamic lights, other water
+  surfaces, glass.
 
 Mac check: `r_vrscenedump N` beside `r_vrdump N` and `r_vrmirrordump N`.
 DepthProbe builds the scene from the dump, uploads its pixels and traces
@@ -444,7 +457,11 @@ water texels and writes `rt-<dump>.png` (engine mirror | trace | difference ×4)
 At the c1a2 table (19,981 triangles, 216 models, 22 instances), with
 the eye above, inside and under the slab: hits on all water texels, a mean
 difference of 2–3/255 on both draw paths, 0.5% of hits off by more than 40
-(edges), and 0.4–0.5 ms on the M2 Max GPU.
+(edges), and 0.4–0.5 ms on the M2 Max GPU. With a scientist spawned in the
+flood (`ent_create monster_scientist`, dumps 140 and 142, 740 studio
+triangles): leaving the studio models out puts 3.1–4.4% of hits off by
+more than 40, and with them 0.7–0.9% (`STUDIO=0` compares); what remains
+is the sparks, since particles are not traced.
 
 To check on the headset: that the scene appears a few frames into the map
 (the log's `[RTWater] map scene` line), and that the textures arrive. Black

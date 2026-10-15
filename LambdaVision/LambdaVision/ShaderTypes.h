@@ -219,15 +219,26 @@ typedef struct
 } RTVertex;
 
 // Per TLAS instance: where its model's triangles start in the scene, how
-// many of them are opaque (the alpha-tested ones follow), and which of the
-// BLAS's geometries is the alpha-tested one (0 or 1; ~0 for none).
+// many of them are opaque (the alpha-tested ones follow), which of the
+// BLAS's geometries is the alpha-tested one (0 or 1; ~0 for none), and
+// flags: 1 = the frame's studio triangles (RTDynVertex, not the brushes).
 typedef struct
 {
     uint32_t firstTri;
     uint32_t numOpaque;
     uint32_t alphaGeometry;
-    uint32_t pad;
+    uint32_t flags;
 } RTInstanceInfo;
+
+// A studio model's vertex as the engine drew it this frame (world space,
+// = gl_local.h vr_scene_dynvert_t): position, skin coordinates (0-1), the
+// vertex's light (rgba8). Three per triangle, not indexed. 24 bytes.
+typedef struct
+{
+    float pos[3];
+    float uv[2];
+    uint32_t color;
+} RTDynVertex;
 
 #ifdef __METAL_VERSION__
 // The drawable is linear light (rgba16Float, extended range), but the
