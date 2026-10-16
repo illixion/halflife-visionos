@@ -117,12 +117,13 @@ the thermal throttle in `anti-aliasing.md`, Phase 0 results):
 |---|---|---|---|
 | c0a0 tram ride | 5.6 | 3.3–3.7 | nominal |
 | c1a0 lobby | 5.4 | 3.8 | nominal |
-| c1a0e test chamber | 4.9 | 3.9 | fair |
-| firefight: c2a5b, in the river (+ mirror 5.2; fight unconfirmed) | 5.4 | 4.1 | fair |
+| c1a0e spawn lobby (chamber door shut) | 4.9 | 3.9 | fair |
+| c2a5b river (+ mirror 5.2) | 5.4 | 4.1 | fair |
 
-(c1a0d is a lab lobby: 5.8 / 3.9. c2a5 spawns behind a gate that stays shut,
-so it has no fight; c2a5b spawns with six soldiers within 1200 units.) All ran
-at 90 fps. Headroom can't be read off a sum: ANGLE's work and ours overlap on
+(c1a0d is a lab lobby: 5.8 / 3.9.) Neither the test chamber nor a firefight
+is measured yet: c1a0e spawns in the lobby outside the chamber with its door
+shut, and no map starts with enemies attacking. Both need a save, or walking
+in. All ran at 90 fps. Headroom can't be read off a sum: ANGLE's work and ours overlap on
 the GPU, so engine + ours can exceed the 11.1 ms frame while it holds 90 fps.
 
 Sanity check: `gpuQueue` should be close to the sum of our passes. If it is

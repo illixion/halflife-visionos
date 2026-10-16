@@ -98,8 +98,8 @@ taken after the map had loaded (two to four windows per row). Every row ran at
 | … screen-space water (no rendered mirror) | ↓ | 1.3/1.6 | 2.1/2.5 | — | 3.9/4.0 | 5.0/5.2 |
 | **throttle, 45 fps** (c1a2 window, any setting) | fair | 1.8/2.1–2.9 | 2.8–3.2/4.2–4.8 (rendered) | 1.6 + 2.9 | 4.8–6.5/6.5–9.0 | 6.0–8.3/8.0–11.4 |
 | c1a2 window after the throttle lifted | fair | 1.5/2.1 | 2.6/3.1 | 1.6 + 2.4 | 3.0/3.1 | 3.5/3.7 |
-| c1a0e test chamber | fair | 2.1/2.8 | 2.8/3.6 | — | 3.2/3.5 | 3.9/4.2 |
-| c2a5b, standing in the river (fight unconfirmed) | fair | 2.1/2.4 | 3.3/3.6 | 1.9 + 3.3 | 3.4/3.7 | 4.1/4.3 |
+| c1a0e spawn lobby (chamber door shut) | fair | 2.1/2.8 | 2.8/3.6 | — | 3.2/3.5 | 3.9/4.2 |
+| c2a5b, in the river (much water, no fight) | fair | 2.1/2.4 | 3.3/3.6 | 1.9 + 3.3 | 3.4/3.7 | 4.1/4.3 |
 
 ↓: the thermal state read "nominal" at 22:43:05 UTC and "fair" at 22:46:21;
 these rows fall between.
@@ -109,7 +109,7 @@ What it shows:
 - **The frame rate is 90 Hz, not 120.** Every full-speed window had an 11.1 ms
   frame time.
 - **The scene barely matters.** The engine costs 4.8–5.9 ms for both eyes in
-  the tram, both lobbies, the test chamber and the outdoor corridor: it is
+  the tram, three lobbies and the outdoor corridor: it is
   bound by the pixel count, not by GoldSrc's geometry.
 - **FXAA costs nothing measurable** (composite 3.0/3.1 ms with and without),
   so it can stay on until MSAA earns its place. The composite's 3 ms is the
