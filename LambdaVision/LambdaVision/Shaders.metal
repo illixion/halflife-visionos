@@ -287,15 +287,25 @@ static inline float3 probeLookup(texture2d_array<half> probeColor, depth2d_array
     return float3(probeColor.sample(s, ab * 0.5 + 0.5, base + face).rgb);
 }
 
-// What a probe saw along a direction from its origin: GL depth → distance.
+// What a probe saw along a direction from its origin: GL depth → distance,
+// bilinear between the four nearest texels' distances. A single texel's read
+// steps from one surface to the next at the texel's edge, so across a depth
+// edge the walk's hit jumps between surfaces in a staircase of probe texels,
+// magnified by the walk (the headset showed saw teeth on the c1a2 lobby
+// window's reflected floor); interpolated, the hit slides across the edge.
 static inline float probeDistance(depth2d_array<float> probeDepth, float3 dir, uint base, uint size,
                                   float n, float f)
 {
     float2 ab;
     const uint face = probeFace(dir, ab);
-    const uint2 texel = min(uint2((ab * 0.5 + 0.5) * float(size)), uint2(size - 1));
-    const float ndc = probeDepth.read(texel, base + face) * 2.0 - 1.0;
-    return 2.0 * n * f / ((f + n) - ndc * (f - n)) * sqrt(1.0 + dot(ab, ab));
+    const float2 x = clamp((ab * 0.5 + 0.5) * float(size) - 0.5, 0.0, float(size - 1));
+    const uint2 t0 = uint2(x), t1 = min(t0 + 1, uint2(size - 1));
+    const float2 w = x - float2(t0);
+    float4 ndc = float4(probeDepth.read(t0, base + face), probeDepth.read(uint2(t1.x, t0.y), base + face),
+                        probeDepth.read(uint2(t0.x, t1.y), base + face), probeDepth.read(t1, base + face));
+    ndc = ndc * 2.0 - 1.0;
+    const float4 D = 2.0 * n * f / ((f + n) - ndc * (f - n));
+    return mix(mix(D.x, D.y, w.x), mix(D.z, D.w, w.x), w.y) * sqrt(1.0 + dot(ab, ab));
 }
 
 // The reflection the composite takes from a probe: probeLookup's walk, with
