@@ -191,19 +191,22 @@ typedef struct
     // Per eye: one bit per plane row, set for water (lambda_glass_eye_t.kind).
     // Row r is word r / 32 = glassKinds[eye][r / 128][(r / 32) % 4].
     simd_uint4 glassKinds[2][2];
-    // Per eye, sharp water (Shaders.metal ssprScatter): x = the plane row it
-    // mirrors in, y = that plane's height (xash z), z = 1 on / 0 off, w = the
-    // target's size divisor against the engine image (0 = 3).
+    // Per eye, sharp water and glass: x = the plane row mirrored, y = that
+    // plane's height (xash z; screen space only), z = 1 the screen-space
+    // water mirror (Shaders.metal ssprScatter), 2 the engine's mirror of that
+    // row, water or glass (PlanarWater), 0 off; w = the target's size divisor
+    // against the engine image (0 = 3).
     simd_float4 sspr[2];
     // x = Settings → Diagnostics "Water mirror view": 0 off, 1 the mirror on
     // water, 2 its confidence, 3 the mirror target over the whole view;
     // y = sharp water's underside brightness ("waterUnderside", a share of
     // the occluder's top; 0 = leave those rays to the probe).
     simd_float4 waterDebug;
-    // The ray-traced water mirror (rtWaterTrace): x = the lightmap's scale
-    // when drawn (2 with the engine's overbright lightmaps, else 1), y = one
+    // The ray-traced mirror (rtWaterTrace): x = the lightmap's scale when
+    // drawn (2 with the engine's overbright lightmaps, else 1), y = one
     // mirror texel's angular size (tangent units, for the mip level), z = the
-    // longest ray (xash units), w unused.
+    // longest ray (xash units), w = the rows traced, bit 0 glass, bit 1 water
+    // (0: no trace this frame).
     simd_float4 rtWater;
 } DisplayParams;
 

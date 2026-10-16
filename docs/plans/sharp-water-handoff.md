@@ -447,8 +447,8 @@ sky.
   at 0.5; a skin whose copy hasn't arrived shows its light alone. The TLAS
   is the newest finished build, so a moving NPC's reflection may trail by
   a frame or two.
-- **Not in it yet**: sprites, particles, dynamic lights, other water
-  surfaces, glass.
+- **Not in it yet**: sprites, particles, dynamic lights. (Other water
+  surfaces and glass: round 18.)
 
 Mac check: `r_vrscenedump N` beside `r_vrdump N` and `r_vrmirrordump N`.
 DepthProbe builds the scene from the dump, uploads its pixels and traces
@@ -469,6 +469,83 @@ surfaces would mean the blit copy failed: ANGLE could not attach that
 format. Check the brightness against Rendered by the engine (the VBO
 path's ×2), and that doors move in the mirror. Then the cost (`gMirror`)
 on the M2, which has no ray-tracing hardware (Apple8), and on the M5.
+
+### Round 18: glass through the sharp methods, and the first headset runs
+
+The headset at the c1a2 lobby window (eye 1399.8 −610.1 −499.5, yaw 204,
+pitch 15; glass plane x = 1352, about 48 units in front) showed the pane's
+probe reflection "warped" and changing "every minute or so" while standing
+still. The probe is one cube map from the head, and its parallax walk
+cannot rebuild a thin object near the glass: the white table behind the
+player (a slab on legs) came out as two broken, oversized slabs with no
+legs, and each 30 s recapture from a slightly moved head broke it
+differently. Bilinear probe depth (`72bac12`) only smoothed the saw teeth
+at its depth edges. Glass now goes through the sharp methods:
+
+- **Settings**: "Sharp glass reflections" (`sharpGlassReflections`, on by
+  default, under Glass reflections) and the method picker, now "Sharp
+  reflection method", applying to water and glass. Screen space stays
+  water only; glass keeps the probe there. `Renderer.sharpKinds`: bit 0
+  glass, bit 1 water.
+- **Rendered** (`R_VRMirrorView( plane, kind, w, h )`): any plane of the
+  glass table. Horizontal water keeps round 16's camera (pitch and roll
+  negated, y flipped); any other plane mirrors forward and up, takes the
+  camera's angles from them (roll from up against the unrolled basis), and
+  flips x in the projection, the culling tangents' left and right swapped.
+  Glass cuts half a unit in front of its face (water half a unit below),
+  so the pane and its brush never draw; a glass mirror draws water.
+  `R_VRMirrorPick` takes, per eye, the glass or water row covering the most
+  of the view: `R_VRGlassBegin` adds each marked surface's polygons, clipped
+  to the frustum, to `vr_glass_area` (occlusion not counted; at the window
+  41.7% against the stencil's 41.65%). Rows under 0.2% are skipped; eye 1
+  keeps eye 0's plane while it covers half as much as its largest. The
+  bridge reports the mirrored row (`lambda_gl_mirror_eye`), and the
+  composite reads the target on that row, water or glass (`sspr.z = 2`).
+- **Ray traced**: `rtWaterTrace` reads each texel's stencil row and traces
+  it in that row's plane, every glass and water row of the kinds in
+  `rtWater.w`, the eye in front of the plane. The composite reads the
+  target on every such row.
+- **Mac** (`vr_setangles <pitch> <yaw> [roll]`, a new desktop-only console
+  command, points the view exactly; `ent_fire` cannot): view 150 at the
+  device pose with `r_vrmirrordump` (now version 2: plane and kind) and
+  `r_vrscenedump`; view 151 the mirrored eye (1304.2 −610.06, yaw 335.67,
+  `movetype 8` so it does not fall), flipped, as the truth. The rendered
+  glass mirror matches the truth's geometry (one table, legs, centred; the
+  truth is brighter because its camera looks back through the frosted
+  pane); the probe does not. Ray traced against rendered on the glass:
+  mean 3.5/255, 0.5% of texels off by more than 40, 0.50 ms on the M2 Max.
+  Water regression: regenerated 120/122/124, the same views with the
+  engine before this round give 5.0/255 and 0.6–0.7%, this round's
+  4.2–4.3 and 0.6% (the old dumps' 2.7–3.0 had no NPCs in their scene).
+- **Headset (M5, `RealityDevice17,1`)**: the colour map is 3815×3061 per
+  eye, so a half-size mirror is 1908×1531. Rendered glass at the window:
+  `gPlanar0/1` 0.9–2.5 ms p50 (varies with the view), `planarCPU` 1.5–1.7.
+  Ray traced: works (textures arrive, the table and legs reflect) but
+  `gMirror` 3.5 ms p50 for about 2.3M rays a frame; too slow at divisor 2.
+- **Deadlock** (since `6eb6575`, first hit on this headset run): `RTWater.prepare`
+  called `lambda_gl_worker_copy_skin` with the studio snapshot acquired;
+  both take `g_scene_mtx`, so the render loop hung on the first NPC skin
+  and the system killed the app (SIGKILL, termination namespace 0x28, no
+  jetsam). The copies are now queued after the release; DepthProbe never
+  calls `prepare`, which is why the Mac did not see it.
+- **Multisampling**: thin geometry in the mirror (the table's legs) stepped
+  and crawled with head movement: one sample per texel at half the eye's
+  size. The bridge now renders the mirror through
+  `EXT_multisampled_render_to_texture` (4 samples; the debug API's
+  `mirrorSamples` sets 1–4, not stored): the app's texture as the colour
+  attachment, a memoryless multisampled image ANGLE resolves into it as
+  the pass ends, and a multisampled depth and stencil. On the M5 it costs
+  the same as one sample within the view's noise. The first try left the
+  reflection frozen ("stuck … any head movement shows it same position"):
+  ANGLE's Metal backend resolves 16-bit unorm only on Macs
+  (`mtl_format_table_autogen.mm`), so every draw into the RGBA16Unorm
+  target failed and the texture kept its last frame. The mirror target is
+  RGBA8 now, and the bridge checks GL errors after the first pass into a
+  new framebuffer, falling back to one sample for good if it fails.
+- **Frame rate**: at the window the app ran a steady 60 fps (total 16.6 ms,
+  `frameGPU` 7–8 ms) in all these runs, where the first run this session
+  showed about 96; the frame no longer fits a 120 Hz refresh with the
+  second engine view. Not chased yet.
 
 ## Hypotheses ruled out (and why)
 - Device rasterisation/data bug for the empty splat mirror: "whole" mirror
@@ -572,6 +649,10 @@ func_illusionary rm2 near the periodic-table poster at x≈1281):
   per frame at `cl_yawspeed 10` (left ≈0.099°); `default_fov N` in the cfg
   narrows the view.
 c1a0 lobby windows: 9/10/11 (−700 −380, yaw 251; glass regression).
+c1a2 lobby window (round 18): 150 (eye 1399.8 −610.06 −499.45, pitch 15.32,
+yaw 204.33, with `r_vrmirrordump` and `r_vrscenedump`; probe 150) and 151
+(the mirrored eye 1304.2 −610.06, yaw 335.67, `ent_fire 1 movetype 8`):
+`valve/glassmirror.cfg`, angles by `vr_setangles`.
 Each dump needs its own probe (`r_vrprobedump`) from the same origin.
 
 ### Scene setup (Mac engine, background-safe)

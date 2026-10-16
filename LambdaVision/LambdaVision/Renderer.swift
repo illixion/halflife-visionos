@@ -439,9 +439,19 @@ actor Renderer {
     /// a quarter of each side (one texel per 16 engine pixels). gMirror at 3
     /// measured 1.24 ms p50 on the headset; 4 has 56% of the threads.
     static let sharpWaterDivisor = 4
-    /// Sharp water's mirror: the screen-space one or the engine's
-    /// (PlanarWater). Set by GameSettings.
+    /// Sharp glass under glassReflections: glass takes its reflection from
+    /// waterMirrorMethod when that is rendered or ray traced (screen space
+    /// has nothing for glass: the probe). Live.
+    nonisolated(unsafe) static var sharpGlassReflections: Bool = true
+    /// Sharp water's and glass's mirror: the screen-space one, the engine's
+    /// (PlanarWater) or the ray-traced one (RTWater). Set by GameSettings.
     nonisolated(unsafe) static var waterMirrorMethod: WaterMirrorMethod = .screenSpace
+    /// Which surfaces the sharp method mirrors: bit 0 glass, bit 1 water
+    /// (lambda_gl_worker_set_mirror_targets, DisplayParams.rtWater.w).
+    nonisolated static var sharpKinds: Int32 {
+        (glassReflections && sharpGlassReflections && waterMirrorMethod != .screenSpace ? 1 : 0)
+            | (waterReflections && sharpWaterReflections ? 2 : 0)
+    }
     /// The engine-rendered mirror's size, as a divisor of the colour map's.
     static let planarWaterDivisor = 2
     /// The ray-traced mirror's size, as a divisor of the colour map's.
@@ -2906,10 +2916,11 @@ actor Renderer {
             #endif
         }
         if engineHeld || !Renderer.probeReflections { glassProbe?.reset() }
-        // The engine-rendered water mirror: its targets ride on every eye
-        // while the method is on; the engine draws one only where an eye
-        // has water below it.
-        let planarOn = Renderer.waterReflections && Renderer.sharpWaterReflections
+        // The engine-rendered mirror: its targets ride on every eye while
+        // the method is on; the engine draws one only where an eye has sharp
+        // glass or water in sight.
+        let sharpKinds = Renderer.sharpKinds
+        let planarOn = sharpKinds != 0
             && Renderer.waterMirrorMethod == .rendered && glassProbe != nil && !engineHeld
             && Renderer.hdrTestMode == 0
         if planarOn, let colorMap {
@@ -2924,10 +2935,10 @@ actor Renderer {
                 #endif
             }
         }
-        planarWater?.stage(planarOn)
+        planarWater?.stage(kinds: planarOn ? sharpKinds : 0)
         // The ray-traced mirror: the worker snapshots the scene, the brush
         // instances and copies textures only while it is on.
-        let rtOn = Renderer.waterReflections && Renderer.sharpWaterReflections
+        let rtOn = sharpKinds != 0
             && Renderer.waterMirrorMethod == .rayTraced && glassProbe != nil && !engineHeld
             && Renderer.hdrTestMode == 0 && device.supportsRaytracing
         lambda_gl_worker_set_rt(rtOn ? 1 : 0)
@@ -3364,30 +3375,35 @@ actor Renderer {
             }
         }
 
-        // Sharp water: mirror both eyes' images in the water plane below them
-        // before the composite reads it (SharpWater; once per frame). The
-        // DisplayParams it reads are written below, before the commit.
+        // Sharp water and glass: mirror both eyes before the composite reads
+        // it (SharpWater, RTWater; once per frame), or take the mirror the
+        // engine drew with each eye (PlanarWater). The DisplayParams they
+        // read are written below, before the commit.
         var ssprPlanes: (SIMD4<Float>, SIMD4<Float>) = (.zero, .zero)
-        if Renderer.waterReflections && Renderer.sharpWaterReflections, glassProbe != nil, glassEyes.count == 2,
+        var rtKinds: Int32 = 0
+        let sharpNow = Renderer.sharpKinds
+        if sharpNow != 0, glassProbe != nil, glassEyes.count == 2,
            engineStencil != nil, lambda_gl_depth_target_ok() != 0, Renderer.hdrTestMode == 0,
            displayMap == nil, !loadSnapshot.isHolding {
-            ssprPlanes = SharpWater.planes(glassEyes)
+            ssprPlanes = sharpNow & 2 != 0 ? SharpWater.planes(glassEyes) : (.zero, .zero)
             ssprPlanes.0.w = Float(Renderer.sharpWaterDivisor)
             ssprPlanes.1.w = Float(Renderer.sharpWaterDivisor)
             if Renderer.waterMirrorMethod == .rendered {
                 // the engine drew the mirror with each eye (PlanarWater)
-                ssprPlanes = planarWater != nil ? PlanarWater.planes(ssprPlanes) : (.zero, .zero)
+                ssprPlanes = planarWater != nil ? PlanarWater.planes(divisor: Renderer.planarWaterDivisor) : (.zero, .zero)
             } else if Renderer.waterMirrorMethod == .rayTraced {
-                ssprPlanes.0.w = Float(Renderer.rtWaterDivisor)
-                ssprPlanes.1.w = Float(Renderer.rtWaterDivisor)
+                // every sharp glass and water pixel, each in its own plane
+                let div = Float(Renderer.rtWaterDivisor)
+                ssprPlanes = (SIMD4(0, 0, 0, div), SIMD4(0, 0, 0, div))
                 var traced = false
-                if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0, encodeUpscale, let rtWater {
+                if RTWater.hasRows(glassEyes, kinds: sharpNow), encodeUpscale, let rtWater {
                     let timer = timed ? gpuTimer : nil
                     traced = rtWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineStencil: engineStencil!,
                                             paramsAddress: displayParamsBuffer.gpuAddress
                                                 + UInt64(Self.displayParamsStride * uniformBufferIndex),
                                             frame: committedFrameIndex + 1, mark: { timer?.mark($0, $1) })
                 }
+                rtKinds = traced ? sharpNow : 0
                 if !traced { ssprPlanes = (.zero, .zero) }
             } else if ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
                 if sharpWater == nil, let library = device.makeDefaultLibrary() {
@@ -3424,7 +3440,7 @@ actor Renderer {
         // Metal 4 does no automatic hazard tracking: order this pass's
         // displayMap reads after the MetalFX upscale encoded above on the
         // same queue.
-        if !spatialScalers.isEmpty || ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+        if !spatialScalers.isEmpty || ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 || rtKinds != 0 {
             renderEncoder.barrier(afterQueueStages: .all, beforeStages: .fragment,
                                   visibilityOptions: .device)
         }
@@ -3527,12 +3543,14 @@ actor Renderer {
                 case .screenSpace: sharpWater?.color
                 }
                 if Renderer.waterMirrorMethod == .rayTraced, let scene = rtWater?.scene {
-                    // the lightmap factor, one mirror texel's angle, the longest ray
+                    // the lightmap factor, one mirror texel's angle, the
+                    // longest ray, the rows traced (bit 0 glass, bit 1 water)
                     let t = params.eyeTangents.0
                     let rows = Float(max(rtWater?.color?.height ?? 1, 1))
-                    params.rtWater = SIMD4(scene.lightmapScale, (t.z + t.w) / rows, max(Renderer.engineZFar, 4096), 0)
+                    params.rtWater = SIMD4(scene.lightmapScale, (t.z + t.w) / rows, max(Renderer.engineZFar, 4096),
+                                           Float(rtKinds))
                 }
-                if let color = mirror, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 {
+                if let color = mirror, ssprPlanes.0.z > 0 || ssprPlanes.1.z > 0 || rtKinds != 0 {
                     self.fragmentArgumentTable.setTexture(color.gpuResourceID, index: 5)
                 }
             }

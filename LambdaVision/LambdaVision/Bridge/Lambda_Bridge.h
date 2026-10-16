@@ -535,18 +535,22 @@ void lambda_gl_worker_set_probe_face(void *mtl_color_view, void *mtl_depth_view,
 // targets it keeps per slice before the next face.
 void lambda_gl_worker_forget_probe_targets(void);
 
-// ---- Rendered water mirror (Renderer.waterMirrorMethod .rendered) ----
-// Each eye's targets for the engine's mirror of that eye in the water below
-// it (gl_rmain.c R_VRMirrorView), drawn right after the eye, before its
-// fence: 2D views (one slice) of a colour texture in the colorMap's format
-// and a depth32Float_stencil8 texture, width x height. NULL = off. Kept
-// until changed.
+// ---- Rendered mirror (Renderer.waterMirrorMethod .rendered) ----
+// Each eye's targets for the engine's mirror of that eye in the glass or
+// water plane covering the most of its view (gl_rmain.c R_VRMirrorPick,
+// R_VRMirrorView), drawn right after the eye, before its fence: 2D views (one
+// slice) of a colour texture in the colorMap's format and a
+// depth32Float_stencil8 texture, width x height. kinds: which rows may be
+// mirrored, bit 0 glass, bit 1 water. NULL = off. Kept until changed.
 void lambda_gl_worker_set_mirror_targets(void *mtl_color0, void *mtl_depth0,
                                          void *mtl_color1, void *mtl_depth1,
-                                         int width, int height);
-// Whether the last frame drew this eye's mirror, and in which water (z,
-// xash units): the plane SharpWater.planes picks from the same eye's table.
-int  lambda_gl_mirror_eye(int eye, float *water_z);
+                                         int width, int height, int kinds);
+// Whether the last frame drew this eye's mirror, and in which row of that
+// eye's glass table (lambda_glass_get_eye).
+int  lambda_gl_mirror_eye(int eye, int *row);
+// The rendered mirror's samples per texel (1 = none; more than the GL
+// offers are clamped): 4 unless changed (EXT_multisampled_render_to_texture).
+void lambda_gl_worker_set_mirror_samples(int samples);
 // ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced) ----
 // The engine's world triangles (gl_vrscene.c R_VRScene), snapshotted by the
 // GL worker once per map while the method is on, for the app's acceleration

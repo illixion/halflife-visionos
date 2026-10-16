@@ -63,10 +63,13 @@ struct SettingsView: View {
                     Toggle("Water reflections (prototype)", isOn: $settings.waterReflections)
                     Toggle("Sharp water reflections", isOn: $settings.sharpWaterReflections)
                         .disabled(!settings.waterReflections)
-                    Picker("Sharp water method", selection: $settings.waterMirrorMethod) {
+                    Toggle("Sharp glass reflections", isOn: $settings.sharpGlassReflections)
+                        .disabled(!settings.glassReflections)
+                    Picker("Sharp reflection method", selection: $settings.waterMirrorMethod) {
                         ForEach(WaterMirrorMethod.allCases) { Text($0.label).tag($0) }
                     }
-                    .disabled(!settings.waterReflections || !settings.sharpWaterReflections)
+                    .disabled(!(settings.waterReflections && settings.sharpWaterReflections)
+                              && !(settings.glassReflections && settings.sharpGlassReflections))
                     slider("Water ripples", $settings.waterRipples, 0.0...3.0, 0.25) {
                         String(format: "%.2g×", $0)
                     }
@@ -85,7 +88,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft. Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it. Per-pixel reprojection depth tells the headset how far away each pixel is, so near walls and the gun hold still when you move your head between frames; off treats the whole image as distant, as before. Glass reflections add a reflection to windows and glass, strongest at glancing angles, like real glass; water reflections do the same for water, with gentle ripples (Water ripples; 0 is a still mirror), and Sharp water reflections mirror what you see in flat water instead of only the room's general shape; both are prototypes of modern lighting. Reflection strength scales both: 1× is close to physical and faint in this art.")
+                    Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing. Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft. Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it. Per-pixel reprojection depth tells the headset how far away each pixel is, so near walls and the gun hold still when you move your head between frames; off treats the whole image as distant, as before. Glass reflections add a reflection to windows and glass, strongest at glancing angles, like real glass; water reflections do the same for water, with gentle ripples (Water ripples; 0 is a still mirror), and Sharp water reflections mirror what you see in flat water instead of only the room's general shape. Sharp glass reflections do the same for windows when the method is Rendered or Ray traced: Rendered draws the view again from your mirror image for the window or water filling most of your view, Ray traced follows every reflected ray (fast on chips with ray-tracing hardware). Otherwise glass reflects a snapshot of the room around you, which bends what is close to the pane. Both are prototypes of modern lighting. Reflection strength scales both: 1× is close to physical and faint in this art.")
                 }
 
                 Section("Diagnostics") {

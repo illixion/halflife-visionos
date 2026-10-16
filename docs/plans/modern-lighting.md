@@ -854,6 +854,17 @@ and ray tracing through the world's brush geometry (tier 5, `RTWater`,
 headset; `docs/plans/sharp-water-handoff.md` rounds 16 and 17 have the
 details and the device checklist.
 
+### Glass through tiers 2 and 5 (2026-10-16)
+
+Glass takes its reflection from the same methods ("Sharp glass
+reflections", under Glass reflections; "Sharp reflection method" picks for
+both): the engine mirrors each eye in the glass or water plane covering the
+most of its view, multisampled, or every glass and water pixel is ray
+traced in its own plane. The probe alone could not reflect what stands near
+a pane (it broke a table into slabs and re-broke it at every recapture).
+Round 18 of `docs/plans/sharp-water-handoff.md` has the details and the
+headset numbers.
+
 ### What the next tier needs
 
 - **Tier 2 (planar reflections):** a second engine render per reflective

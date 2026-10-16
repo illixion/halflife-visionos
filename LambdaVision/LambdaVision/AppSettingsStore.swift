@@ -42,6 +42,7 @@ enum AppSettingsStore {
     private static let waterReflectionsKey = "lambdavision.settings.waterReflections"
     private static let reflectionStrengthKey = "lambdavision.settings.reflectionStrength"
     private static let sharpWaterKey = "lambdavision.settings.sharpWaterReflections"
+    private static let sharpGlassKey = "lambdavision.settings.sharpGlassReflections"
     private static let waterMirrorMethodKey = "lambdavision.settings.waterMirrorMethod"
     private static let waterRipplesKey = "lambdavision.settings.waterRipples"
 
@@ -99,7 +100,14 @@ enum AppSettingsStore {
         get { bool(sharpWaterKey, false) }   // off until it measures well on device
         set { defaults.set(newValue, forKey: sharpWaterKey) }
     }
-    /// How sharp water makes its mirror (Renderer.waterMirrorMethod).
+    /// Glass takes its reflection from the sharp method too, rendered or ray
+    /// traced (Renderer.sharpGlassReflections), under Glass reflections. On by
+    /// default: the probe alone warps what is near the pane.
+    static var sharpGlassReflections: Bool {
+        get { bool(sharpGlassKey, true) }
+        set { defaults.set(newValue, forKey: sharpGlassKey) }
+    }
+    /// How sharp water and glass make their mirror (Renderer.waterMirrorMethod).
     static var waterMirrorMethod: WaterMirrorMethod {
         get {
             guard let raw = defaults.string(forKey: waterMirrorMethodKey),

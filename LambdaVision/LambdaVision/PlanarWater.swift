@@ -2,16 +2,20 @@
 //  PlanarWater.swift
 //  LambdaVision
 //
-//  The engine-rendered water mirror (Renderer.waterMirrorMethod .rendered):
-//  after each eye, the engine draws that eye's view again from the eye
-//  mirrored in the water below it (gl_rmain.c R_VRMirrorView, called by the
-//  GL worker before the eye's fence) into this target's slice. The composite
-//  reads it where it would read the screen-space mirror (SharpWater), at the
-//  same uv: the mirrored camera keeps the eye's projection, so each water
-//  pixel's reflection is where the eye sees the water. Unlike the
-//  screen-space mirror it holds what no pixel on screen does, such as a
-//  table's underside seen from beside its top. It costs a second engine
-//  view per eye on frames with water, at a quarter of the pixels.
+//  The engine-rendered mirror (Renderer.waterMirrorMethod .rendered), for
+//  sharp water and sharp glass: after each eye, the engine draws that eye's
+//  view again from the eye mirrored in the glass or water plane covering the
+//  most of it (gl_rmain.c R_VRMirrorPick, R_VRMirrorView, called by the GL
+//  worker before the eye's fence) into this target's slice. The composite
+//  reads it on that plane's pixels where it would read the screen-space
+//  mirror (SharpWater) or the probe, at the same uv: the mirrored camera
+//  keeps the eye's projection, so each pixel's reflection is where the eye
+//  sees the plane. Unlike the screen-space mirror it holds what no pixel on
+//  screen does, such as a table's underside seen from beside its top or the
+//  room behind the player in a window; unlike the probe it is exact, and
+//  current every frame. It costs a second engine view per eye on frames
+//  with sharp glass or water in sight, at a quarter of the pixels. One plane
+//  per eye: other glass and water keep the probe.
 //
 
 import Metal
@@ -23,7 +27,7 @@ final class PlanarWater {
     private var colorSlices: [MTLTexture] = []
     private var depthSlices: [MTLTexture] = []
     private var size = (w: 0, h: 0)
-    private var staged = false
+    private var staged: Int32 = 0
 
     init(device: MTLDevice) {
         self.device = device
@@ -44,8 +48,11 @@ final class PlanarWater {
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
-        // the colour map's format: ANGLE is known to render into it
-        guard let c = array(colorMap.pixelFormat), let d = array(.depth32Float_stencil8) else { return [] }
+        // RGBA8, not the colour map's 16-bit format: ANGLE renders into both,
+        // but resolves multisampling (the bridge's mirror_fbo_for) into 16-bit
+        // unorm only on Macs; on the headset every multisampled draw failed and
+        // the mirror kept a stale frame. The reflection needs no more bits.
+        guard let c = array(.rgba8Unorm), let d = array(.depth32Float_stencil8) else { return [] }
         c.label = "PlanarWaterColor"
         d.label = "PlanarWaterDepth"
         color = c
@@ -57,25 +64,26 @@ final class PlanarWater {
             d.makeTextureView(pixelFormat: .depth32Float_stencil8, textureType: .type2D, levels: 0..<1, slices: $0..<($0 + 1))!
         }
         size = (w, h)
-        staged = false
+        staged = 0
         // the worker keeps a render target per slice view: drop the old ones
         lambda_gl_worker_forget_probe_targets()
         return [c, d]
     }
 
-    /// Before the eyes' renders: hand the engine the targets (on), or take
-    /// them back (off). Kept by the engine until changed.
-    func stage(_ on: Bool) {
-        guard on != staged else { return }
-        if on, colorSlices.count == 2 {
+    /// Before the eyes' renders: hand the engine the targets and which rows
+    /// it may mirror (kinds: bit 0 glass, bit 1 water), or take them back
+    /// (0). Kept by the engine until changed.
+    func stage(kinds: Int32) {
+        guard kinds != staged else { return }
+        if kinds != 0, colorSlices.count == 2 {
             func ptr(_ t: MTLTexture) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(t).toOpaque() }
             lambda_gl_worker_set_mirror_targets(ptr(colorSlices[0]), ptr(depthSlices[0]),
                                                 ptr(colorSlices[1]), ptr(depthSlices[1]),
-                                                Int32(size.w), Int32(size.h))
-            staged = true
+                                                Int32(size.w), Int32(size.h), kinds)
+            staged = kinds
         } else {
-            lambda_gl_worker_set_mirror_targets(nil, nil, nil, nil, 0, 0)
-            staged = false
+            lambda_gl_worker_set_mirror_targets(nil, nil, nil, nil, 0, 0, 0)
+            staged = 0
         }
     }
 
@@ -90,14 +98,14 @@ final class PlanarWater {
     }
 
     /// DisplayParams.sspr for the eyes the engine mirrored this frame: the
-    /// screen-space pick (the same rule the engine used), marked rendered
-    /// (z = 2) where the engine drew that eye in that water, else off.
-    static func planes(_ picked: (SIMD4<Float>, SIMD4<Float>)) -> (SIMD4<Float>, SIMD4<Float>) {
-        func mark(_ p: SIMD4<Float>, _ eye: Int32) -> SIMD4<Float> {
-            var z: Float = 0
-            guard p.z > 0.5, lambda_gl_mirror_eye(eye, &z) != 0, abs(z - p.y) < 0.5 else { return .zero }
-            return SIMD4(p.x, p.y, 2, p.w)
+    /// row of that eye's glass table it mirrored, marked rendered (z = 2),
+    /// else off. The rows are the frame's own (lambda_glass_get_eye).
+    static func planes(divisor: Int) -> (SIMD4<Float>, SIMD4<Float>) {
+        func mark(_ eye: Int32) -> SIMD4<Float> {
+            var row: Int32 = 0
+            guard lambda_gl_mirror_eye(eye, &row) != 0 else { return .zero }
+            return SIMD4(Float(row), 0, 2, Float(divisor))
         }
-        return (mark(picked.0, 0), mark(picked.1, 1))
+        return (mark(0), mark(1))
     }
 }

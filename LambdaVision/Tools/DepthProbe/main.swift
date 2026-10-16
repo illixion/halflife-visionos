@@ -828,12 +828,15 @@ func eyeSlices(_ params: DisplayParams, _ dump: Dump) -> Int {
 /// `vrsceneN.bin` beside `vrdumpN.bin` (r_vrscenedump N, the same frame)
 /// holds the world's brush triangles, this view's brush instances and the
 /// pixels of their textures and lightmaps. The trace runs at divisor RTDIV
-/// (default 2) and is compared, on the water texels, with the engine's own
-/// mirror of the same view (`vrplanarN.bin`, r_vrmirrordump N, R_VRMirrorView),
-/// which round 16 checked against the mirrored eye. Reports the mean colour
-/// difference where the trace hits, and the water the trace leaves empty
-/// although the engine mirror shows something there (not the sky). Writes
-/// rt-<dump>.png with --png: engine mirror | trace | difference ×4.
+/// (default 2) on every glass and water texel, each in its own plane, and is
+/// compared, on the texels of the row the engine mirrored, with the engine's
+/// own mirror of the same view (`vrplanarN.bin`, r_vrmirrordump N,
+/// R_VRMirrorView: the water below the eye, or since version 2 the glass or
+/// water R_VRMirrorPick takes), which round 16 checked against the mirrored
+/// eye. Reports the mean colour difference where the trace hits, and the
+/// texels the trace leaves empty although the engine mirror shows something
+/// there (not the sky). Writes rt-<dump>.png with --png: engine mirror |
+/// trace | difference ×4.
 let rtTrace = library.makeFunction(name: "rtWaterTrace").flatMap { try? device.makeComputePipelineState(function: $0) }
 
 func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams,
@@ -919,16 +922,15 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
     guard let bound = scene.structure(for: 1) else { print("\(name) ray-traced mirror: no TLAS"); failures += 1; return }
     let tlas = bound.tlas, info = bound.info
 
+    // every glass and water row, each in its own plane (rtWater.w = 3)
     var params = base
     let div = Int(ProcessInfo.processInfo.environment["RTDIV"] ?? "") ?? 2
-    var plane = sharpPlane(dump)
-    guard plane.z > 0 else { return }
-    plane.w = Float(div)
-    params.sspr = (plane, plane)
+    let target = SIMD4<Float>(0, 0, 0, Float(div))
+    params.sspr = (target, target)
     let w = dump.width, h = dump.height
     let mw = (w + div - 1) / div, mh = (h + div - 1) / div
     let t = params.eyeTangents.0
-    params.rtWater = SIMD4(Float(ProcessInfo.processInfo.environment["RTLMSCALE"] ?? "") ?? scene.lightmapScale, (t.z + t.w) / Float(mh), 8192, 0)
+    params.rtWater = SIMD4(Float(ProcessInfo.processInfo.environment["RTLMSCALE"] ?? "") ?? scene.lightmapScale, (t.z + t.w) / Float(mh), 8192, 3)
     let od = MTLTextureDescriptor()
     od.textureType = .type2DArray; od.pixelFormat = .rgba16Float; od.width = mw; od.height = mh
     od.usage = [.shaderRead, .shaderWrite]; od.storageMode = .shared
@@ -958,37 +960,64 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
     var px = [Float16](repeating: 0, count: mw * mh * 4)
     out.getBytes(&px, bytesPerRow: mw * 8, from: MTLRegionMake2D(0, 0, mw, mh), mipmapLevel: 0)
 
-    // the engine's own mirror of the view, for comparison
+    // The engine's own mirror of the view, for comparison, on the row it
+    // mirrored: version 1 the water below the eye (its height), version 2
+    // the plane R_VRMirrorPick took (normal, distance, kind).
     let planarPath = path.replacingOccurrences(of: "vrdump", with: "vrplanar")
     let pd = try? Data(contentsOf: URL(fileURLWithPath: planarPath))
-    var hits = 0, water = 0, empty = 0, sumDiff = 0, far = 0
+    let planes = dump.planes ?? []
+    var refCode: UInt8?, refAt = 20, refKind = "water"
+    if let pd, pd.count >= 20 {
+        let version = pd.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
+        if version >= 2 {
+            let f = pd.withUnsafeBytes { raw in (0..<4).map { raw.load(fromByteOffset: 16 + $0 * 4, as: Float.self) } }
+            let kind = pd.withUnsafeBytes { $0.load(fromByteOffset: 32, as: Int32.self) }
+            refAt = 36
+            refKind = kind == 1 ? "water" : "glass"
+            if let row = planes.indices.first(where: { r in
+                simd_dot(SIMD3(planes[r].x, planes[r].y, planes[r].z), SIMD3(f[0], f[1], f[2])) > 0.9999
+                    && abs(planes[r].w - f[3]) < 0.5 && Int32(r < dump.kinds.count ? dump.kinds[r] : 0) == kind
+            }) { refCode = UInt8(row + 16) }
+        } else {
+            let z = pd.withUnsafeBytes { $0.load(fromByteOffset: 16, as: Float.self) }
+            if let row = planes.indices.first(where: { r in
+                (r < dump.kinds.count ? dump.kinds[r] : 0) == 1 && planes[r].z > 0.99 && abs(planes[r].w / planes[r].z - z) < 0.5
+            }) { refCode = UInt8(row + 16) }
+        }
+    }
+    var hits = 0, marked = 0, glassTexels = 0, glassHits = 0, compared = 0, empty = 0, sumDiff = 0, far = 0
     var image = [UInt8](repeating: 0, count: mw * 3 * mh * 4)
-    let waterCode = UInt8(Int(plane.x) + 16)
     let stencil = dump.stencil!
     for gy in 0..<mh {
         for gx in 0..<mw {
             let sx = min((gx * div) + div / 2, w - 1), sy = min((gy * div) + div / 2, h - 1)
-            guard stencil[sy * w + sx] == waterCode else { continue }
-            water += 1
+            let code = stencil[sy * w + sx]
+            guard code >= 16, code <= 239 else { continue }
+            let row = Int(code) - 16
+            let isGlass = row < dump.kinds.count && dump.kinds[row] == 0
+            marked += 1
+            if isGlass { glassTexels += 1 }
             let k = (gy * mw + gx) * 4
             let a = Float(px[k + 3])
             let rt = (0..<3).map { UInt8(min(max(Float(px[k + $0]) * 255, 0), 255)) }
             var ref: [UInt8]? = nil
-            if let pd, pd.count >= 20 + w * h * 4 {
-                let o = 20 + (sy * w + sx) * 4
+            if let pd, code == refCode, pd.count >= refAt + w * h * 4 {
+                let o = refAt + (sy * w + sx) * 4
                 ref = [pd[o], pd[o + 1], pd[o + 2]]
             }
-            let row = mh - 1 - gy
+            let outRow = mh - 1 - gy
             func put(_ panel: Int, _ c: [UInt8]) {
-                let o = (row * mw * 3 + panel * mw + gx) * 4
+                let o = (outRow * mw * 3 + panel * mw + gx) * 4
                 image[o] = c[0]; image[o + 1] = c[1]; image[o + 2] = c[2]; image[o + 3] = 255
             }
             if let ref { put(0, ref) }
             if a > 0.5 {
                 hits += 1
+                if isGlass { glassHits += 1 }
                 put(1, rt)
                 if let ref {
                     let diff = (0..<3).map { abs(Int(rt[$0]) - Int(ref[$0])) }.max()!
+                    compared += 1
                     sumDiff += diff
                     if diff > 40 { far += 1 }
                     put(2, [UInt8(min(diff * 4, 255)), 0, 0])
@@ -1000,23 +1029,30 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
             }
         }
     }
-    if let dumpPath = ProcessInfo.processInfo.environment["RT_PAIRS"], let pd {
+    if let dumpPath = ProcessInfo.processInfo.environment["RT_PAIRS"], let pd, let refCode {
         // (trace, engine mirror) colour pairs on the hits, for calibration
         var pairs = [UInt8]()
         for gy in stride(from: 0, to: mh, by: 2) {
             for gx in stride(from: 0, to: mw, by: 2) {
                 let sx = min((gx * div) + div / 2, w - 1), sy = min((gy * div) + div / 2, h - 1)
                 let k = (gy * mw + gx) * 4
-                guard stencil[sy * w + sx] == waterCode, Float(px[k + 3]) > 0.5 else { continue }
-                let o = 20 + (sy * w + sx) * 4
+                guard stencil[sy * w + sx] == refCode, Float(px[k + 3]) > 0.5 else { continue }
+                let o = refAt + (sy * w + sx) * 4
                 for c in 0..<3 { pairs.append(UInt8(min(max(Float(px[k + c]) * 255, 0), 255))); pairs.append(pd[o + c]) }
             }
         }
         try? Data(pairs).write(to: URL(fileURLWithPath: dumpPath))
     }
-    print(String(format: "%@ ray-traced mirror (div %d, %d tris + %d studio, %d instances, %.2f ms Mac GPU): hits on %.1f%% of %d water texels; against the engine's mirror: mean difference %.1f/255, %.1f%% of hits off by >40, %.1f%% of water empty where the engine's mirror is not",
-                 name, div, nt, withStudio ? dynCount : 0, instances.count, gpuMs, 100 * Float(hits) / Float(max(water, 1)), water,
-                 Float(sumDiff) / Float(max(hits, 1)), 100 * Float(far) / Float(max(hits, 1)), 100 * Float(empty) / Float(max(water, 1))))
+    guard marked > 0 else { return }
+    print(String(format: "%@ ray-traced mirror (div %d, %d tris + %d studio, %d instances, %.2f ms Mac GPU): hits on %.1f%% of %d marked texels (glass %.1f%% of %d)",
+                 name, div, nt, withStudio ? dynCount : 0, instances.count, gpuMs, 100 * Float(hits) / Float(marked), marked,
+                 100 * Float(glassHits) / Float(max(glassTexels, 1)), glassTexels))
+    if refCode != nil {
+        let n = compared + empty
+        print(String(format: "  against the engine's mirror (%@, %d texels): mean difference %.1f/255, %.1f%% of hits off by >40, %.1f%% empty where the engine's mirror is not",
+                     refKind, n, Float(sumDiff) / Float(max(compared, 1)), 100 * Float(far) / Float(max(compared, 1)),
+                     100 * Float(empty) / Float(max(n, 1))))
+    }
     if let dir = pngDir { writePNG(image, mw * 3, mh, "\(dir)/rt-\(name).png") }
 }
 

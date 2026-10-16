@@ -467,14 +467,18 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         r -= 2.0 * dot(r, n) * n;            // a ripple never sends it below the surface
     const float2 clip = p.probeMix.yz;
     float3 env = p.glassAmbient.rgb;
-    // Sharp water (ssprScatter): this eye's own image mirrored in the water
-    // plane, read where this pixel is, nudged by the ripple's tilt (a tilt δ
-    // turns the reflected ray by 2δ: vertical on screen along the view).
-    // Where it has nothing, or only content from near the frame's edge, the
-    // probe fills in.
+    // Sharp water and glass: the mirror of this pixel's plane, read where
+    // this pixel is, nudged by the ripple's tilt (a tilt δ turns the
+    // reflected ray by 2δ: vertical on screen along the view; glass has none).
+    // The screen-space mirror (ssprScatter) holds the eye's own image in the
+    // water plane sspr names; the engine's (PlanarWater, sspr.z = 2) the row
+    // it mirrored, water or glass; the ray-traced one (rtWaterTrace) every
+    // row of the kinds rtWater.w names. Where it has nothing, or only
+    // content from near the frame's edge, the probe fills in.
     float sharpWeight = 0.0;
     float3 sharp = 0.0;
-    if (water && p.sspr[eye].z > 0.5 && row == uint(p.sspr[eye].x)) {
+    const bool traced = (uint(p.rtWater.w) & (water ? 2u : 1u)) != 0;
+    if (traced || (p.sspr[eye].z > 0.5 && row == uint(p.sspr[eye].x) && (water || p.sspr[eye].z > 1.5))) {
         const float4 t = p.eyeTangents[eye];
         const float3 along = normalize(d - dot(d, n) * n + 1e-5);
         const float3 across = cross(n, along);
@@ -494,7 +498,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         // the ripple must never decide whether the mirror is there, or a
         // coverage edge strobes in ripple-shaped bands.
         const half4 c = sharpWater.sample(s, suv, eye);
-        if (p.sspr[eye].z > 1.5) {
+        if (!traced && p.sspr[eye].z > 1.5) {
             // the engine-rendered mirror (PlanarWater): whole, opaque colour
             sharpWeight = 1.0;
             sharp = float3(c.rgb);
@@ -1320,11 +1324,12 @@ fragment DepthOnlyOut reprojectionDepthMerge(ColorInOut in [[stage_in]],
     return out;
 }
 
-// ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced, RTWaterScene)
-// For each mirror texel on the water row DisplayParams.sspr names (the same
-// plane and target layout as the screen-space mirror, divisor sspr.w), the
-// eye's ray meets the water at P and the reflected ray is traced through the
-// world's brush triangles (the engine's own polygons, gl_vrscene.c: the
+// ---- Ray-traced mirror (Renderer.waterMirrorMethod .rayTraced, RTWaterScene)
+// For each mirror texel (the screen-space mirror's target layout, divisor
+// sspr.w) on a glass or water row of the kinds DisplayParams.rtWater.w names
+// (bit 0 glass, bit 1 water), the eye's ray meets that row's plane at P (the
+// eye in front of it: water from below shows none) and the reflected ray is
+// traced through the world's brush triangles (the engine's own polygons, gl_vrscene.c: the
 // world and its brush entities, with their current transforms) and the
 // studio models eye 0 drew this frame (one more instance, RTDynVertex).
 // A hit is shaded the way the engine draws it: a brush by its texture (a
@@ -1386,15 +1391,22 @@ kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
         return;
     half4 out = 0.0h;
     const float2 uv = (float2(gid.xy) + 0.5) / float2(size.xy);
+    // the glass or water row this texel shows, and its plane
+    const uint2 ssize = uint2(engineStencil.get_width(), engineStencil.get_height());
+    const uint code = engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r;
+    const bool marked = code >= 16 && code <= 239;
+    const uint row = code - 16;
+    const bool water = marked && ((p.glassKinds[eye][row >> 7][(row >> 5) & 3] >> (row & 31)) & 1);
+    const float4 plane = marked ? p.glassPlanes[eye][row] : float4(0.0);
     const float3 E = p.glassEye[eye][0].xyz;
     const float3 d = ssprRay(uv, eye, p);
-    const float height = p.sspr[eye].y;
-    if (p.sspr[eye].z > 0.5 && d.z < -1e-5 && E.z > height && ssprIsWater(engineStencil, uv, eye, p)) {
+    const float side = dot(plane.xyz, E) - plane.w, nd = dot(plane.xyz, d);
+    if (marked && (uint(p.rtWater.w) & (water ? 2u : 1u)) != 0 && side > 0.0 && nd < -1e-5) {
         constexpr sampler tex(filter::linear, mip_filter::linear, address::repeat);
         constexpr sampler lm(filter::linear, address::clamp_to_edge);
-        const float s = (height - E.z) / d.z;
+        const float s = side / -nd;
         const float3 P = E + d * s;
-        const float3 r = normalize(float3(d.x, d.y, -d.z));
+        const float3 r = normalize(d - 2.0 * nd * plane.xyz);
         const float spread = p.rtWater.y, base = s * length(d);
         raytracing::ray ray(P + r * 0.05, r, 0.0, p.rtWater.z);
         raytracing::intersection_params params;

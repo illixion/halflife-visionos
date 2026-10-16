@@ -188,9 +188,16 @@ final class GameSettings {
         didSet { AppSettingsStore.sharpWaterReflections = sharpWaterReflections
                  Renderer.sharpWaterReflections = sharpWaterReflections }
     }
-    /// How sharp water makes its mirror: from the screen, or rendered by the
-    /// engine from the mirrored eye (sees under tables, costs a second
-    /// engine view per eye on frames with water). Live.
+    /// Glass reflects through the sharp method too (rendered or ray traced;
+    /// screen space has none for glass, which keeps the probe). Live.
+    var sharpGlassReflections: Bool = AppSettingsStore.sharpGlassReflections {
+        didSet { AppSettingsStore.sharpGlassReflections = sharpGlassReflections
+                 Renderer.sharpGlassReflections = sharpGlassReflections }
+    }
+    /// How sharp water and glass make their mirror: from the screen (water
+    /// only), rendered by the engine from the mirrored eye (sees under
+    /// tables, costs a second engine view per eye on frames with sharp
+    /// water or glass), or ray traced. Live.
     var waterMirrorMethod: WaterMirrorMethod = AppSettingsStore.waterMirrorMethod {
         didSet { AppSettingsStore.waterMirrorMethod = waterMirrorMethod
                  Renderer.waterMirrorMethod = waterMirrorMethod }
@@ -216,6 +223,11 @@ final class GameSettings {
     /// a tuning knob for the debug API until a value is settled.
     var waterUnderside: Double = Double(Renderer.waterUnderside) {
         didSet { Renderer.waterUnderside = Float(waterUnderside) }
+    }
+    /// The rendered mirror's multisampling, samples per texel (1 = off).
+    /// Not stored: for A/B checks through the debug API.
+    var mirrorSamples: Double = 4 {
+        didSet { lambda_gl_worker_set_mirror_samples(Int32(mirrorSamples.rounded())) }
     }
     var hdrTest: HDRTestPattern = .off {
         didSet { Renderer.hdrTestMode = hdrTest.rawValue
@@ -555,6 +567,7 @@ final class GameSettings {
         Renderer.waterReflections = waterReflections
         Renderer.reflectionStrength = Float(reflectionStrength)
         Renderer.sharpWaterReflections = sharpWaterReflections
+        Renderer.sharpGlassReflections = sharpGlassReflections
         Renderer.waterMirrorMethod = waterMirrorMethod
         Renderer.waterRipples = Float(waterRipples)
         Renderer.snapTurnDegrees   = Float(snapTurnDegrees)
@@ -695,23 +708,26 @@ enum WaterMirrorView: Int, CaseIterable, Identifiable {
     }
 }
 
-/// Settings → Graphics: how sharp water makes its mirror
+/// Settings → Graphics: how sharp water and glass make their mirror
 /// (Renderer.waterMirrorMethod).
 enum WaterMirrorMethod: String, CaseIterable, Identifiable {
     /// Each eye's own image mirrored on the GPU (SharpWater): cheap, but
     /// blind to what no pixel on screen holds, like a table's underside.
+    /// Water only: glass keeps the probe.
     case screenSpace
-    /// The engine draws each eye's view again from the mirrored eye
-    /// (PlanarWater, gl_rmain.c R_VRMirrorView): exact above the water.
+    /// The engine draws each eye's view again from the eye mirrored in the
+    /// glass or water covering the most of it (PlanarWater, gl_rmain.c
+    /// R_VRMirrorView): exact, one plane per eye.
     case rendered
-    /// Each water pixel's reflected ray traced through the world's brush
-    /// geometry (RTWater): exact for the world and brush entities, leaves
-    /// out models and sprites; fast with ray-tracing hardware (M5).
+    /// Each water and glass pixel's reflected ray traced through the world's
+    /// brush geometry and the studio models (RTWater): exact for every plane
+    /// at once, leaves out sprites and particles; fast with ray-tracing
+    /// hardware (M5).
     case rayTraced
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .screenSpace: "Screen space"
+        case .screenSpace: "Screen space (water only)"
         case .rendered: "Rendered by the engine"
         case .rayTraced: "Ray traced"
         }

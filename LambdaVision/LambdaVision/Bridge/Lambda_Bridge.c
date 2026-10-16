@@ -4055,30 +4055,34 @@ static void worker_render_probe_face(void) {
     atomic_store(&g_probe_cpu_fresh, 1);
 }
 
-// ---- Rendered water mirror (Renderer.waterMirrorMethod .rendered) --------
-// Each eye's view mirrored in the water below it, drawn by the engine
-// (gl_rmain.c R_VRMirrorView) right after that eye, before its fence, into
-// the app's target (PlanarWater.swift); the composite reads it where the
-// screen-space mirror would be. The plane is the one SharpWater.planes picks
-// from the same eye's table: the highest horizontal water row below the eye.
-extern int R_VRMirrorView(float waterZ, int width, int height);
+// ---- Rendered mirror (Renderer.waterMirrorMethod .rendered) -------------
+// Each eye's view mirrored in the glass or water plane covering the most of
+// it (gl_rmain.c R_VRMirrorPick), drawn by the engine (R_VRMirrorView) right
+// after that eye, before its fence, into the app's target (PlanarWater.swift);
+// the composite reads it on that plane's pixels where the screen-space mirror
+// or the probe would be. The second eye keeps the first eye's plane while it
+// covers at least half as much of its view as its largest, so the eyes agree.
+extern int R_VRMirrorPick(int kinds, const float *hint, float *plane, int *kind);
+extern int R_VRMirrorView(const float *plane, int kind, int width, int height);
 static void  *g_mirror_color[2], *g_mirror_depth[2];
-static int    g_mirror_w = 0, g_mirror_h = 0;
-static _Atomic float g_mirror_z[2];
+static int    g_mirror_w = 0, g_mirror_h = 0, g_mirror_kinds = 0;
+static float  g_mirror_plane[2][4];
+static _Atomic int   g_mirror_row[2];
 static _Atomic int   g_mirror_drawn = 0;     // bit per eye, this frame
 static _Atomic float g_mirror_cpu_ms = 0.0f;
 static _Atomic int   g_mirror_cpu_fresh = 0;
 
 void lambda_gl_worker_set_mirror_targets(void *color0, void *depth0, void *color1, void *depth1,
-                                         int width, int height) {
+                                         int width, int height, int kinds) {
     g_mirror_color[0] = color0; g_mirror_depth[0] = depth0;
     g_mirror_color[1] = color1; g_mirror_depth[1] = depth1;
     g_mirror_w = width; g_mirror_h = height;
+    g_mirror_kinds = kinds;
 }
 
-int lambda_gl_mirror_eye(int eye, float *water_z) {
+int lambda_gl_mirror_eye(int eye, int *row) {
     if (eye < 0 || eye > 1) return 0;
-    if (water_z) *water_z = atomic_load(&g_mirror_z[eye]);
+    if (row) *row = atomic_load(&g_mirror_row[eye]);
     return (atomic_load(&g_mirror_drawn) >> eye) & 1;
 }
 
@@ -4091,23 +4095,109 @@ int lambda_gl_mirror_ms(float out_ms[3]) {
     return fresh;
 }
 
+// Each eye's mirror framebuffer with multisampling: the app's colour texture
+// attached through EXT_multisampled_render_to_texture, so ANGLE renders into
+// an implicit multisampled image and resolves it into ours as the pass ends
+// (on Apple GPUs the samples live in tile memory), and a multisampled depth
+// and stencil the composite never reads. Thin geometry in the mirror (table
+// legs, rails) otherwise steps and crawls with every head movement: one
+// sample per texel at half the eye's resolution. Without the extension, or
+// with 1 sample, the plain targets (probe_fbo_for). The colour must be a
+// format ANGLE's Metal backend resolves (RGBA8; 16-bit unorm only on Macs):
+// otherwise every draw fails and the target keeps a stale frame, so the first
+// pass into a new framebuffer is checked for GL errors and a failure falls
+// back to one sample for good.
+typedef struct { void *color; int w, h, samples, checked; EGLImage ci; GLuint tex, rb, fbo; } mirror_fbo_t;
+static mirror_fbo_t g_mirror_fbos[2];
+static _Atomic int g_mirror_samples = 4;
+static int g_mirror_msrtt = -1;   // the extension: -1 unknown, 0 no, else the most samples
+
+void lambda_gl_worker_set_mirror_samples(int samples) { atomic_store(&g_mirror_samples, samples); }
+
+static void mirror_fbo_release(mirror_fbo_t *f) {
+    if (f->fbo) glDeleteFramebuffers(1, &f->fbo);
+    if (f->rb) glDeleteRenderbuffers(1, &f->rb);
+    if (f->tex) glDeleteTextures(1, &f->tex);
+    if (f->ci != EGL_NO_IMAGE && f->ci) eglDestroyImage(g_gl_disp, f->ci);
+    memset(f, 0, sizeof(*f));
+    f->ci = EGL_NO_IMAGE;
+}
+
+static GLuint mirror_fbo_for(int eye, void *color, void *depth, int w, int h) {
+    typedef void (*tex_image_fn)(GLenum, void *);
+    typedef void (*fb_tex_ms_fn)(GLenum, GLenum, GLenum, GLuint, GLint, GLsizei);
+    typedef void (*rb_ms_fn)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+    static tex_image_fn tex_image = NULL;
+    static fb_tex_ms_fn fb_tex_ms = NULL;
+    static rb_ms_fn rb_ms = NULL;
+    if (g_mirror_msrtt < 0) {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        GLint most = 0;
+        tex_image = (tex_image_fn)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+        fb_tex_ms = (fb_tex_ms_fn)eglGetProcAddress("glFramebufferTexture2DMultisampleEXT");
+        rb_ms = (rb_ms_fn)eglGetProcAddress("glRenderbufferStorageMultisampleEXT");
+        if (ext && strstr(ext, "GL_EXT_multisampled_render_to_texture") && tex_image && fb_tex_ms && rb_ms)
+            glGetIntegerv(0x8D57 /* GL_MAX_SAMPLES_EXT */, &most);
+        g_mirror_msrtt = most > 1 ? most : 0;
+        fprintf(stderr, "[mirror] multisampled render to texture: %s (up to %d samples)\n",
+                g_mirror_msrtt ? "yes" : "no", (int)most);
+    }
+    int samples = atomic_load(&g_mirror_samples);
+    if (samples > g_mirror_msrtt) samples = g_mirror_msrtt;
+    mirror_fbo_t *f = &g_mirror_fbos[eye];
+    if (samples <= 1) {
+        if (f->fbo) mirror_fbo_release(f);
+        return probe_fbo_for(color, depth);
+    }
+    if (f->fbo && f->color == color && f->w == w && f->h == h && f->samples == samples) return f->fbo;
+    if (f->fbo || f->ci) mirror_fbo_release(f);
+
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    f->ci = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)color, img_attribs);
+    if (f->ci == EGL_NO_IMAGE) { mirror_fbo_release(f); return probe_fbo_for(color, depth); }
+    // the engine caches its texture bindings (GL_Bind): put its own back
+    GLint bound = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    glGenTextures(1, &f->tex);
+    glBindTexture(GL_TEXTURE_2D, f->tex);
+    tex_image(GL_TEXTURE_2D, f->ci);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+    glGenRenderbuffers(1, &f->rb);
+    glBindRenderbuffer(GL_RENDERBUFFER, f->rb);
+    rb_ms(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8, w, h);
+    glGenFramebuffers(1, &f->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
+    fb_tex_ms(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, f->tex, 0, samples);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, f->rb);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[mirror] multisampled target incomplete (0x%x): one sample from now on\n", status);
+        mirror_fbo_release(f);
+        g_mirror_msrtt = 0;
+        return probe_fbo_for(color, depth);
+    }
+    f->color = color;
+    f->w = w; f->h = h;
+    f->samples = samples;
+    return f->fbo;
+}
+
 static void worker_render_mirror(int eye) {
     if (eye == 0) atomic_store(&g_mirror_drawn, 0);
     void *color = g_mirror_color[eye], *depth = g_mirror_depth[eye];
-    if (!color || !depth || g_mirror_w <= 0 || g_mirror_h <= 0) return;
-    const lambda_glass_eye_t *e = &g_glass_eye[eye];
-    float z = -1e30f;
-    for (int i = 0; i < e->count; i++) {
-        const float *pl = e->planes[i];
-        if (e->kind[i] != 1 || pl[2] <= 0.99f) continue;
-        float h = pl[3] / pl[2];
-        if (h < e->origin[2] - 1.0f && h > z) z = h;
-    }
-    if (z < -1e29f) return;
+    if (!color || !depth || g_mirror_w <= 0 || g_mirror_h <= 0 || !g_mirror_kinds) return;
+    float plane[4];
+    int kind = 0;
+    const float *hint = (eye == 1 && (atomic_load(&g_mirror_drawn) & 1)) ? g_mirror_plane[0] : NULL;
+    int row = R_VRMirrorPick(g_mirror_kinds, hint, plane, &kind);
+    if (row < 0) return;
 
     double t0 = ft_now_ms();
-    GLuint fbo = probe_fbo_for(color, depth);
+    GLuint fbo = mirror_fbo_for(eye, color, depth, g_mirror_w, g_mirror_h);
     if (!fbo) return;
+    mirror_fbo_t *unchecked = g_mirror_fbos[eye].fbo == fbo && !g_mirror_fbos[eye].checked ? &g_mirror_fbos[eye] : NULL;
+    if (unchecked) while (glGetError() != GL_NO_ERROR) {}
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);
@@ -4117,12 +4207,22 @@ static void worker_render_mirror(int eye) {
     glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     gt_begin(3 + eye);
-    int drawn = R_VRMirrorView(z, g_mirror_w, g_mirror_h);
+    int drawn = R_VRMirrorView(plane, kind, g_mirror_w, g_mirror_h);
     gt_end();
+    if (unchecked) {
+        GLenum err = glGetError();
+        unchecked->checked = 1;
+        if (err != GL_NO_ERROR) {
+            fprintf(stderr, "[mirror] multisampled pass failed (0x%x): one sample from now on\n", err);
+            g_mirror_msrtt = 0;
+            drawn = 0;
+        }
+    }
     if (scissor) glEnable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
     if (drawn) {
-        atomic_store(&g_mirror_z[eye], z);
+        memcpy(g_mirror_plane[eye], plane, sizeof(plane));
+        atomic_store(&g_mirror_row[eye], row);
         atomic_fetch_or(&g_mirror_drawn, 1 << eye);
     }
     float ms = (float)(ft_now_ms() - t0);

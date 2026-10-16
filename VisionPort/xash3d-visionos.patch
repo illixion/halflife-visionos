@@ -60,7 +60,7 @@ index 7cd9c1f..b0b9759 100644
  		#define DEFAULT_ACCELERATED_RENDERER "gl"
  	#endif // !XASH_MOBILE_PLATFORM
 diff --git a/engine/client/cl_main.c b/engine/client/cl_main.c
-index cb7aa9c..907959e 100644
+index cb7aa9c..25158f7 100644
 --- a/engine/client/cl_main.c
 +++ b/engine/client/cl_main.c
 @@ -32,6 +32,7 @@ CVAR_DEFINE_AUTO( showpause, "1", 0, "show pause logo when paused" );
@@ -133,7 +133,37 @@ index cb7aa9c..907959e 100644
  	CL_PopPMStates();
  
  	if( !cls.demoplayback )
-@@ -3465,6 +3498,7 @@ static void CL_InitLocal( void )
+@@ -3399,6 +3432,29 @@ static void CL_ListMessages_f( void )
+ 	Con_Printf( "Total %i messages\n", i );
+ }
+ 
++#if !XASH_VISIONOS
++/*
++=================
++CL_VRSetAngles_f
++
++Desktop only, for the visionOS port's Mac test views (r_vrdump, r_vrprobedump):
++vr_setangles <pitch> <yaw> [roll] points the view exactly, which ent_fire
++cannot do for the player.
++=================
++*/
++static void CL_VRSetAngles_f( void )
++{
++	if( Cmd_Argc() < 3 )
++	{
++		Con_Printf( S_USAGE "vr_setangles <pitch> <yaw> [roll]\n" );
++		return;
++	}
++	cl.viewangles[PITCH] = Q_atof( Cmd_Argv( 1 ));
++	cl.viewangles[YAW] = Q_atof( Cmd_Argv( 2 ));
++	cl.viewangles[ROLL] = Cmd_Argc() > 3 ? Q_atof( Cmd_Argv( 3 )) : 0.0f;
++}
++#endif
++
+ /*
+ =================
+ CL_InitLocal
+@@ -3465,6 +3521,7 @@ static void CL_InitLocal( void )
  	Cvar_RegisterVariable( &topcolor );
  	Cvar_RegisterVariable( &bottomcolor );
  	Cvar_RegisterVariable( &cl_lw );
@@ -141,6 +171,17 @@ index cb7aa9c..907959e 100644
  	Cvar_Get( "cl_lc", "1", FCVAR_ARCHIVE|FCVAR_USERINFO, "enable lag compensation" );
  	Cvar_Get( "password", "", FCVAR_USERINFO, "server password" );
  	Cvar_Get( "team", "", FCVAR_USERINFO, "player team" );
+@@ -3493,6 +3550,10 @@ static void CL_InitLocal( void )
+ 	Cvar_RegisterVariable( &cl_maxframetime );
+ 	Cvar_RegisterVariable( &cl_fixmodelinterpolationartifacts );
+ 
++#if !XASH_VISIONOS
++	Cmd_AddCommand( "vr_setangles", CL_VRSetAngles_f, "point the view: vr_setangles <pitch> <yaw> [roll] (visionOS port test views)" );
++#endif
++
+ 	// server commands
+ 	Cmd_AddCommand ("noclip", NULL, "enable or disable no clipping mode" );
+ 	Cmd_AddCommand ("notarget", NULL, "notarget mode (monsters do not see you)" );
 diff --git a/engine/client/cl_scrn.c b/engine/client/cl_scrn.c
 index a530230..9b16372 100644
 --- a/engine/client/cl_scrn.c
@@ -3517,10 +3558,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..4faf5ab 100644
+index e6e7712..0307e3e 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,45 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,48 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3539,12 +3580,15 @@ index e6e7712..4faf5ab 100644
 +extern int	vr_glass_count;
 +extern float	vr_glass_planes[VR_GLASS_MAX_PLANES][4];
 +extern byte	vr_glass_kind[VR_GLASS_MAX_PLANES];
++extern float	vr_glass_area[VR_GLASS_MAX_PLANES];
 +extern qboolean	r_vrprobe_pass;
 +void R_VRProbeFace( const float *origin, int face, int size, float zNear, float zFar );
-+// visionOS rendered water mirror (gl_rmain.c R_VRMirrorView)
++// visionOS rendered water and glass mirror (gl_rmain.c R_VRMirrorView)
 +extern qboolean	r_vrmirror_pass;
++extern qboolean	r_vrmirror_water;
 +extern vec3_t	r_vrmirror_eye_origin;
-+int R_VRMirrorView( float waterZ, int width, int height );
++int R_VRMirrorPick( int kinds, const float *hint, float *plane, int *kind );
++int R_VRMirrorView( const float *plane, int kind, int width, int height );
 +// visionOS ray-traced water mirror (gl_vrscene.c)
 +void R_VRSceneNewMap( void );
 +void R_VRSceneLightmapChanged( int page );
@@ -3601,7 +3645,7 @@ index 05a130f..842e422 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..32b7016 100644
+index 0568486..f3872d7 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3955,7 +3999,7 @@ index 0568486..32b7016 100644
  
  	return;
  }
-@@ -1167,6 +1382,265 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1382,344 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4029,52 +4073,109 @@ index 0568486..32b7016 100644
 +
 +/*
 +===============
++R_VRMirrorPick
++
++The plane the rendered mirror (R_VRMirrorView) shows for the eye just drawn:
++of this view's glass table rows of the kinds asked (bit 0 glass, bit 1
++water), the one covering the most of the view (vr_glass_area: each marked
++surface's polygons clipped to the frustum, occlusion not counted) with the
++eye in front of it. hint: the other eye's plane, kept while its row covers
++at least half as much as the largest, so both eyes mirror the same surface.
++A row under 0.2% of the view is not worth a second view. Returns the row,
++or -1; its plane and kind out.
++===============
++*/
++__attribute__((visibility("default"))) int R_VRMirrorPick( int kinds, const float *hint, float *plane, int *kind )
++{
++	const float minArea = 0.002f;
++	float bestArea = minArea;
++	int i, best = -1, hinted = -1;
++
++	if( !vr_mirror_eye_valid )
++		return -1;
++	for( i = 0; i < vr_glass_count; i++ )
++	{
++		const float *pl = vr_glass_planes[i];
++
++		if( !FBitSet( kinds, vr_glass_kind[i] ? 2 : 1 ))
++			continue;
++		if( DotProduct( pl, vr_mirror_eye.vieworigin ) - pl[3] <= 1.0f )
++			continue;
++		if( hint && DotProduct( pl, hint ) > 0.9999f && fabs( pl[3] - hint[3] ) < 0.5f )
++			hinted = i;
++		if( vr_glass_area[i] > bestArea )
++		{
++			bestArea = vr_glass_area[i];
++			best = i;
++		}
++	}
++	if( hinted >= 0 && vr_glass_area[hinted] >= Q_max( 0.5f * bestArea, minArea ))
++		best = hinted;
++	if( best < 0 )
++		return -1;
++	Vector4Copy( vr_glass_planes[best], plane );
++	*kind = vr_glass_kind[best];
++	return best;
++}
++
++/*
++===============
 +R_VRMirrorView
 +
-+visionOS rendered water mirror (the app's "Rendered" water mirror): the last
-+eye view (R_RenderFrame), mirrored in the horizontal water plane z = waterZ,
-+into the bound framebuffer's (0, 0, width, height). Where the composite
-+reads the screen-space mirror (SharpWater) at a water pixel, it reads this
-+at the same uv instead: a camera at the eye mirrored in the plane, looking
-+along the mirrored rays, with the eye's own projection, draws each pixel's
-+reflection where the eye sees the water.
++visionOS rendered mirror (the app's "Rendered" sharp reflections): the last
++eye view (R_RenderFrame), mirrored in a plane of its glass table (normal xyz,
++distance; the eye on the side the normal faces; R_VRMirrorPick), into the
++bound framebuffer's (0, 0, width, height). Where the composite reads the
++screen-space mirror (SharpWater) at a pixel of that plane, it reads this at
++the same uv instead: a camera at the eye mirrored in the plane, looking along
++the mirrored rays, with the eye's own projection, draws each pixel's
++reflection where the eye sees the plane.
 +
-+The engine's camera has no handedness flip, so the mirrored camera is the
-+eye's mirrored origin with pitch and roll negated (forward and right then
-+mirror exactly) and its up axis upside down; the projection negates the
-+camera's y to make up for it (P S, S = diag(1, -1, 1, 1)), which flips the
-+winding, so front faces are clockwise for the pass. The near plane is the
-+water itself (an oblique projection, Lengyel's): nothing below the water
-+draws, without clip planes the GL shims don't have. The depth this writes
-+is therefore not the eyes' depth; the composite only reads the colour.
++A reflection flips handedness, which the engine's camera cannot, so one
++camera axis is flipped in the projection instead, which flips the winding
++too (front faces are clockwise for the pass). Horizontal water: the eye's
++mirrored origin with pitch and roll negated (forward and right then mirror
++exactly) and its up axis upside down; the projection negates the camera's y
++(P S, S = diag(1, -1, 1, 1)). Any other plane (glass): the mirrored forward
++and up give the camera's angles, and its right, which their cross product
++fixes, is the mirrored right negated; the projection negates the camera's x.
++The near plane is the mirror itself (an oblique projection, Lengyel's):
++nothing behind it draws, without clip planes the GL shims don't have. Water
++keeps half a unit under its surface, so walls meet the waterline; glass cuts
++half a unit in front of its face, so the pane and its own brush never draw.
++The depth this writes is therefore not the eyes' depth; the composite only
++reads the colour.
 +
 +Drawn like an eye, with studio models, sprites, particles and the client's
 +triangles, which all reflect; left out are the viewmodel (the hands are not
-+in the water), every water surface (the mirror is of what is above it) and
-+dynamic lights (no lightmap rebuilds for a second view, as in the glass
-+probe). The eye's vis is kept: from below the floor the mirrored origin has
-+none of its own, and what shows in the water is what the eye's leaf sees.
-+Glass draws as plain translucent texture, unmarked, and the glass table
-+and eye are the eye's afterwards. Returns 0 when there is no eye to mirror,
-+the eye is not above the plane, or the game renders its own frames.
++in the mirror) and dynamic lights (no lightmap rebuilds for a second view, as
++in the glass probe), and for water every water surface (its mirror is of
++what is above it). The eye's vis is kept: from below the floor or behind a
++window the mirrored origin has none of its own, and what shows in the mirror
++is what the eye's leaf sees. Other glass draws as plain translucent texture,
++unmarked, and the glass table and eye are the eye's afterwards. Returns 0
++when there is no eye to mirror, the eye is not in front of the plane, or the
++game renders its own frames.
 +===============
 +*/
 +qboolean r_vrmirror_pass = false;
-+vec3_t r_vrmirror_eye_origin;	// the mirrored eye's own origin, for traces
++qboolean r_vrmirror_water = false;
++vec3_t r_vrmirror_eye_origin;	// the eye's own origin, for traces
 +
-+__attribute__((visibility("default"))) int R_VRMirrorView( float waterZ, int width, int height )
++__attribute__((visibility("default"))) int R_VRMirrorView( const float *mirror, int kind, int width, int height )
 +{
 +	const int saved_active = cl_stereo_proj_override_active;
 +	float saved_proj[16], saved_tangents[4];
 +	matrix4x4 P, V, Vinv, Pinv;
 +	vec4_t plane, C, Cc, q, qc;
-+	float tanLeft, tanRight, tanTop, tanBottom, a, cq, wq;
++	float tanLeft, tanRight, tanTop, tanBottom, a, cq, wq, side;
 +	ref_viewpass_t rvp;
 +	int i, j;
 +
 +	if( !WORLDMODEL || !vr_mirror_eye_valid || width <= 0 || height <= 0 )
 +		return 0;
-+	if( vr_mirror_eye.vieworigin[2] <= waterZ + 1.0f )
++	side = DotProduct( mirror, vr_mirror_eye.vieworigin ) - mirror[3];
++	if( side <= 1.0f )
 +		return 0;
 +
 +	rvp = vr_mirror_eye;
@@ -4082,30 +4183,55 @@ index 0568486..32b7016 100644
 +	rvp.viewport[0] = rvp.viewport[1] = 0;
 +	rvp.viewport[2] = width;
 +	rvp.viewport[3] = height;
-+	rvp.vieworigin[2] = 2.0f * waterZ - rvp.vieworigin[2];
-+	rvp.viewangles[PITCH] = -rvp.viewangles[PITCH];
-+	rvp.viewangles[ROLL] = -rvp.viewangles[ROLL];
++	VectorMA( vr_mirror_eye.vieworigin, -2.0f * side, mirror, rvp.vieworigin );
 +
-+	// the eye's projection with the camera's y negated
-+	Matrix4x4_Copy( P, vr_mirror_eye_proj );
-+	for( i = 0; i < 4; i++ )
-+		P[i][1] = -P[i][1];
-+
-+	// the eye's culling tangents: the camera's y is negated, so its top
-+	// is the eye's bottom
++	// the eye's culling tangents
 +	tanRight = ( 1.0f + vr_mirror_eye_proj[0][2] ) / vr_mirror_eye_proj[0][0];
 +	tanLeft = ( 1.0f - vr_mirror_eye_proj[0][2] ) / vr_mirror_eye_proj[0][0];
 +	tanTop = ( 1.0f + vr_mirror_eye_proj[1][2] ) / vr_mirror_eye_proj[1][1];
 +	tanBottom = ( 1.0f - vr_mirror_eye_proj[1][2] ) / vr_mirror_eye_proj[1][1];
 +
-+	// the water plane in the mirrored camera's eye space, keeping what is
-+	// above it (half a unit under the surface, so walls meet the waterline)
++	Matrix4x4_Copy( P, vr_mirror_eye_proj );
++	if( mirror[2] > 0.999f )
++	{
++		float t;
++
++		// pitch and roll negated, the camera's y negated: its top is the
++		// eye's bottom
++		rvp.viewangles[PITCH] = -rvp.viewangles[PITCH];
++		rvp.viewangles[ROLL] = -rvp.viewangles[ROLL];
++		for( i = 0; i < 4; i++ )
++			P[i][1] = -P[i][1];
++		t = tanTop; tanTop = tanBottom; tanBottom = t;
++	}
++	else
++	{
++		vec3_t f, r, u, f0, r0, u0;
++		float t;
++
++		// the mirrored forward and up as the camera's angles, the camera's
++		// x negated: its left is the eye's right
++		AngleVectors( vr_mirror_eye.viewangles, f, r, u );
++		VectorMA( f, -2.0f * DotProduct( f, mirror ), mirror, f );
++		VectorMA( u, -2.0f * DotProduct( u, mirror ), mirror, u );
++		rvp.viewangles[YAW] = RAD2DEG( atan2( f[1], f[0] ));
++		rvp.viewangles[PITCH] = -RAD2DEG( atan2( f[2], sqrt( f[0] * f[0] + f[1] * f[1] )));
++		rvp.viewangles[ROLL] = 0.0f;
++		AngleVectors( rvp.viewangles, f0, r0, u0 );
++		rvp.viewangles[ROLL] = RAD2DEG( atan2( DotProduct( u, r0 ), DotProduct( u, u0 )));
++		for( i = 0; i < 4; i++ )
++			P[i][0] = -P[i][0];
++		t = tanLeft; tanLeft = tanRight; tanRight = t;
++	}
++
++	// the mirror plane in the mirrored camera's eye space, keeping what is
++	// in front of it
 +	RI.rvp = rvp;
 +	R_SetupModelviewMatrix( V );
 +	RI.rvp = vr_mirror_eye;
 +	if( !Matrix4x4_Invert_Full( Vinv, V ))
 +		return 0;
-+	Vector4Set( plane, 0.0f, 0.0f, 1.0f, -( waterZ - 0.5f ));
++	Vector4Set( plane, mirror[0], mirror[1], mirror[2], -( mirror[3] + ( kind == 1 ? -0.5f : 0.5f )));
 +	for( j = 0; j < 4; j++ )
 +		C[j] = plane[0] * Vinv[0][j] + plane[1] * Vinv[1][j] + plane[2] * Vinv[2][j] + plane[3] * Vinv[3][j];
 +
@@ -4134,17 +4260,19 @@ index 0568486..32b7016 100644
 +			cl_stereo_proj_override[j * 4 + i] = P[i][j];	// column-major
 +	cl_stereo_cull_tangents[0] = tanLeft;
 +	cl_stereo_cull_tangents[1] = tanRight;
-+	cl_stereo_cull_tangents[2] = tanBottom;
-+	cl_stereo_cull_tangents[3] = tanTop;
++	cl_stereo_cull_tangents[2] = tanTop;
++	cl_stereo_cull_tangents[3] = tanBottom;
 +	cl_stereo_proj_override_active = 1;
 +
 +	VectorCopy( vr_mirror_eye.vieworigin, r_vrmirror_eye_origin );
 +	r_vrmirror_pass = true;
++	r_vrmirror_water = kind == 1;
 +	pglFrontFace( GL_CW );
 +	R_Set2DMode( false );
 +	R_RenderFrame( &rvp );
 +	pglFrontFace( GL_CCW );
 +	r_vrmirror_pass = false;
++	r_vrmirror_water = false;
 +
 +	// the eye is the last view again, for the glass composite and a
 +	// second mirror of the same eye
@@ -4161,42 +4289,33 @@ index 0568486..32b7016 100644
 +R_DumpMirrorForVR
 +
 +Desktop-only check of R_VRMirrorView: mirrors the view just drawn in the
-+highest water row below the eye of its glass table (r_vrwater 1), at the
-+view's size, over the 3D view, and writes the colour (RGBA8, bottom-up rows)
-+to vrplanar<N>.bin with the water height. DepthProbe compares it with the
-+engine's own render from the mirrored eye (vrmirror<N>.bin, made by moving
-+the eye; see the sharp-water handoff, round 15).
++glass or water row of its glass table that R_VRMirrorPick takes (r_vrglass 1,
++r_vrwater 1), at the view's size, over the 3D view, and writes the colour
++(RGBA8, bottom-up rows) to vrplanar<N>.bin with the plane and its kind.
++DepthProbe compares it with the engine's own render from the mirrored eye
++(vrmirror<N>.bin, made by moving the eye; see the sharp-water handoff, round
++15) and with the ray-traced mirror.
 +===============
 +*/
 +static void R_DumpMirrorForVR( void )
 +{
-+	int n = (int)r_vrmirrordump.value, w = RI.rvp.viewport[2], h = RI.rvp.viewport[3], i;
-+	float waterZ = -1e30f;
++	int n = (int)r_vrmirrordump.value, w = RI.rvp.viewport[2], h = RI.rvp.viewport[3], kind = 0, row;
++	float plane[4];
 +	byte *rgba;
 +	char name[64];
 +	FILE *f;
 +
 +	gEngfuncs.Cvar_SetValue( "r_vrmirrordump", 0 );
-+	for( i = 0; i < vr_glass_count; i++ )
++	row = R_VRMirrorPick( 3, NULL, plane, &kind );
++	if( row < 0 )
 +	{
-+		const float *pl = vr_glass_planes[i];
-+		float z;
-+
-+		if( vr_glass_kind[i] != 1 || pl[2] < 0.99f )
-+			continue;
-+		z = pl[3] / pl[2];
-+		if( z < RI.rvp.vieworigin[2] - 1.0f && z > waterZ )
-+			waterZ = z;
-+	}
-+	if( waterZ < -1e29f )
-+	{
-+		gEngfuncs.Con_Printf( "r_vrmirrordump: no water below the eye (r_vrwater 1?)\n" );
++		gEngfuncs.Con_Printf( "r_vrmirrordump: no glass or water in view (r_vrglass 1, r_vrwater 1?)\n" );
 +		return;
 +	}
 +
 +	pglClearColor( 1.0f, 0.0f, 1.0f, 1.0f );
 +	pglClear( GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT );
-+	if( !R_VRMirrorView( waterZ, w, h ))
++	if( !R_VRMirrorView( plane, kind, w, h ))
 +	{
 +		gEngfuncs.Con_Printf( "r_vrmirrordump: no mirror\n" );
 +		return;
@@ -4207,12 +4326,16 @@ index 0568486..32b7016 100644
 +	f = fopen( name, "wb" );
 +	if( f )
 +	{
-+		int header[4] = { 0x4c505656 /* VVPL */, 1, w, h };
++		// version 2: the plane (normal, distance) and its kind for version
++		// 1's water height
++		int header[4] = { 0x4c505656 /* VVPL */, 2, w, h };
 +		fwrite( header, sizeof( header ), 1, f );
-+		fwrite( &waterZ, sizeof( float ), 1, f );
++		fwrite( plane, sizeof( float ), 4, f );
++		fwrite( &kind, sizeof( int ), 1, f );
 +		fwrite( rgba, (size_t)w * h * 4, 1, f );
 +		fclose( f );
-+		gEngfuncs.Con_Printf( "wrote %s (%dx%d, water %.1f)\n", name, w, h, waterZ );
++		gEngfuncs.Con_Printf( "wrote %s (%dx%d, %s row %d: %.3f %.3f %.3f %.1f, %.1f%% of the view)\n", name, w, h,
++			kind ? "water" : "glass", row, plane[0], plane[1], plane[2], plane[3], 100.0f * vr_glass_area[row] );
 +	}
 +	free( rgba );
 +}
@@ -4222,7 +4345,7 @@ index 0568486..32b7016 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..9b083ce 100644
+index df6f012..54ea1a1 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4382,7 +4505,7 @@ index df6f012..9b083ce 100644
  	{
 +		qboolean water;
 +
-+		if( r_vrmirror_pass )
++		if( r_vrmirror_pass && r_vrmirror_water )
 +			return;	// the water mirror holds what is above the water
 +		water = R_VRWaterBegin( fa );
 +
@@ -4403,7 +4526,7 @@ index df6f012..9b083ce 100644
  	texture_t		*t;
  
 -	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
-+	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ) || r_vrmirror_pass )
++	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ) || FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ) || ( r_vrmirror_pass && r_vrmirror_water ))
  		return;
  
  	// non-transparent water is already drawed
@@ -4419,7 +4542,7 @@ index df6f012..9b083ce 100644
  
  			if( Mod_HaveLightmappedWater( ))
  				R_RenderLightmapForSurface( s );
-@@ -1830,6 +1955,123 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1830,6 +1955,204 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -4451,6 +4574,8 @@ index df6f012..9b083ce 100644
 +__attribute__((visibility("default"))) int   vr_glass_count = 0;
 +__attribute__((visibility("default"))) float vr_glass_planes[VR_GLASS_MAX_PLANES][4];
 +__attribute__((visibility("default"))) byte  vr_glass_kind[VR_GLASS_MAX_PLANES]; // 0 glass, 1 water
++// each row's share of the view (0-1), for R_VRMirrorPick
++__attribute__((visibility("default"))) float vr_glass_area[VR_GLASS_MAX_PLANES];
 +
 +static qboolean R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
 +{
@@ -4507,15 +4632,94 @@ index df6f012..9b083ce 100644
 +	VectorCopy( nw, vr_glass_planes[vr_glass_count] );
 +	vr_glass_planes[vr_glass_count][3] = d;
 +	vr_glass_kind[vr_glass_count] = kind;
++	vr_glass_area[vr_glass_count] = 0.0f;
 +	return 16 + vr_glass_count++;
++}
++
++// A clip-space point's distance inside one frustum plane: near, left,
++// right, bottom, top (GL clip space, -w <= x, y, z <= w).
++static float R_VRClipDist( const float *c, int plane )
++{
++	switch( plane )
++	{
++	case 0: return c[3] + c[2];
++	case 1: return c[3] + c[0];
++	case 2: return c[3] - c[0];
++	case 3: return c[3] + c[1];
++	default: return c[3] - c[1];
++	}
++}
++
++// The share of the view (0-1) a polygon covers: its vertices through m
++// (model to clip space), clipped to the frustum. Occlusion is not counted.
++static float R_VRPolyViewShare( const glpoly2_t *p, const matrix4x4 m )
++{
++	float a[64][4], b[64][4], (*in)[4] = a, (*out)[4] = b, (*swap)[4];
++	float area = 0.0f;
++	int n = p->numverts, i, k, plane;
++
++	if( n < 3 || n > 48 )
++		return 0.0f;
++	for( i = 0; i < n; i++ )
++	{
++		const float *v = p->verts[i];
++
++		for( k = 0; k < 4; k++ )
++			in[i][k] = m[k][0] * v[0] + m[k][1] * v[1] + m[k][2] * v[2] + m[k][3];
++	}
++	for( plane = 0; plane < 5 && n >= 3; plane++ )
++	{
++		int kept = 0;
++
++		for( i = 0; i < n; i++ )
++		{
++			const float *c = in[i], *next = in[( i + 1 ) % n];
++			const float dc = R_VRClipDist( c, plane ), dn = R_VRClipDist( next, plane );
++
++			if( dc >= 0.0f )
++			{
++				Vector4Copy( c, out[kept] );
++				kept++;
++			}
++			if(( dc >= 0.0f ) != ( dn >= 0.0f ))
++			{
++				const float t = dc / ( dc - dn );
++
++				for( k = 0; k < 4; k++ )
++					out[kept][k] = c[k] + t * ( next[k] - c[k] );
++				kept++;
++			}
++		}
++		n = kept;
++		swap = in; in = out; out = swap;
++	}
++	if( n < 3 )
++		return 0.0f;
++	for( i = 0; i < n; i++ )
++	{
++		const float *c = in[i], *next = in[( i + 1 ) % n];
++
++		if( c[3] <= 1e-6f || next[3] <= 1e-6f )
++			return 0.0f;
++		area += ( c[0] / c[3] ) * ( next[1] / next[3] ) - ( next[0] / next[3] ) * ( c[1] / c[3] );
++	}
++	return fabs( area ) * 0.125f;	// half the cross sum, over the view's 4
 +}
 +
 +static qboolean R_VRGlassBegin( const msurface_t *fa, int kind )
 +{
 +	int code = R_VRGlassCode( fa, kind );
++	const glpoly2_t *p;
++	matrix4x4 m;
 +
 +	if( !code )
 +		return false;
++	// how much of the view the row covers (R_VRMirrorPick)
++	if( tr.modelviewIdentity )
++		Matrix4x4_Copy( m, RI.worldviewProjectionMatrix );
++	else Matrix4x4_Concat( m, RI.worldviewProjectionMatrix, RI.objectMatrix );
++	for( p = fa->polys; p; p = p->next )
++		vr_glass_area[code - 16] += R_VRPolyViewShare( p, m );
 +	pglEnable( GL_STENCIL_TEST );
 +	pglStencilMask( 0xFF );
 +	pglStencilFunc( GL_ALWAYS, code, 0xFF );
@@ -4543,7 +4747,7 @@ index df6f012..9b083ce 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1946,7 +2188,8 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1946,7 +2269,8 @@ void R_DrawBrushModel( cl_entity_t *e )
  	e->visframe = tr.realframecount; // visible
  
  	// calculate dynamic lighting for bmodel
@@ -4553,7 +4757,7 @@ index df6f012..9b083ce 100644
  
  	// setup the rendermode
  	R_SetRenderMode( e );
-@@ -1959,6 +2202,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2283,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
@@ -4566,7 +4770,7 @@ index df6f012..9b083ce 100644
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2221,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2302,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
@@ -4585,7 +4789,7 @@ index df6f012..9b083ce 100644
  	}
  
  	R_DrawVBO( R_HasLightmap(), true );
-@@ -3855,6 +4112,10 @@ void R_MarkLeaves( void )
+@@ -3855,6 +4193,10 @@ void R_MarkLeaves( void )
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		return;
  
@@ -4596,7 +4800,7 @@ index df6f012..9b083ce 100644
  	if( FBitSet( r_novis.flags, FCVAR_CHANGED ) || tr.fResetVis )
  	{
  		// force recalc viewleaf
-@@ -3982,6 +4243,7 @@ void GL_RebuildLightmaps( void )
+@@ -3982,6 +4324,7 @@ void GL_RebuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();
@@ -4604,7 +4808,7 @@ index df6f012..9b083ce 100644
  
  	for( i = 0; i < gp_cl->nummodels; i++ )
  	{
-@@ -4045,6 +4307,7 @@ void GL_BuildLightmaps( void )
+@@ -4045,6 +4388,7 @@ void GL_BuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();

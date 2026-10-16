@@ -2,15 +2,17 @@
 //  RTWater.swift
 //  LambdaVision
 //
-//  The ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced): its
-//  scene (RTWaterScene) from the GL worker's snapshot of the engine's world
-//  triangles, the engine's textures and lightmap pages copied into it by the
-//  worker (Lambda_Bridge.c worker_scene_frame), the brush entities' current
-//  transforms, and the trace itself (Shaders.metal rtWaterTrace) into a
-//  target the composite reads like the screen-space mirror's: premultiplied,
-//  empty where the ray leaves the map or meets the sky, so the probe fills
-//  in there. One dispatch for both eyes, before the composite, on frames
-//  where an eye has horizontal water below it. Timed as gMirror.
+//  The ray-traced mirror (Renderer.waterMirrorMethod .rayTraced), for sharp
+//  water and sharp glass: its scene (RTWaterScene) from the GL worker's
+//  snapshot of the engine's world triangles, the engine's textures and
+//  lightmap pages copied into it by the worker (Lambda_Bridge.c
+//  worker_scene_frame), the brush entities' current transforms, and the trace
+//  itself (Shaders.metal rtWaterTrace) into a target the composite reads like
+//  the screen-space mirror's: premultiplied, empty where the ray leaves the
+//  map or meets the sky, so the probe fills in there. Every glass and water
+//  pixel of the kinds asked (DisplayParams.rtWater.w) is traced in its own
+//  plane. One dispatch for both eyes, before the composite, on frames where
+//  an eye has such a plane in sight. Timed as gMirror.
 //
 //  The scene appears a few frames into a map: the snapshot, the BLAS build
 //  and the texture copies (32 a frame) come first; until then the composite
@@ -49,6 +51,18 @@ final class RTWater {
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
         instances = Array(repeating: lambda_scene_instance_t(), count: Int(LAMBDA_SCENE_MAX_INSTANCES))
+    }
+
+    /// Whether either eye's glass table has a row of the kinds asked (bit 0
+    /// glass, bit 1 water): something for the trace to do.
+    static func hasRows(_ eyes: [lambda_glass_eye_t], kinds: Int32) -> Bool {
+        eyes.contains { e in
+            var e = e
+            let n = Int(min(max(e.count, 0), LAMBDA_GLASS_MAX_PLANES))
+            return withUnsafeBytes(of: &e.kind) { k in
+                (0..<n).contains { Int32(k[$0] == 1 ? 2 : 1) & kinds != 0 }
+            }
+        }
     }
 
     /// The target for this colour map size (divided by divisor, as
