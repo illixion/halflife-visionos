@@ -110,14 +110,20 @@ and engine timers (off by default: the HUD split can split the weapon
 encoder). If ANGLE does not expose the timer extension, the worker logs
 `[FT] GL timer queries unavailable` and the engine columns stay empty.
 
-**To fill in on device** (p50 / p95 ms, with the thermal state):
+**Measured on device 2026-10-17** (p50 ms, `3501f58`; full table, p95s and
+the thermal throttle in `anti-aliasing.md`, Phase 0 results):
 
-| Scene | engine (both eyes) | ours | headroom |
+| Scene | engine (both eyes) | ours (`gpuQueue`) | thermal |
 |---|---|---|---|
-| c0a0 tram ride | | | |
-| c1a0 lobby | | | |
-| c1a0d test chamber | | | |
-| firefight (c2a1 / c2a5) | | | |
+| c0a0 tram ride | 5.6 | 3.3–3.7 | nominal |
+| c1a0 lobby | 5.4 | 3.8 | nominal |
+| c1a0e test chamber | 4.9 | 3.9 | fair |
+| firefight: c2a5b, in the river (+ mirror 5.2; fight unconfirmed) | 5.4 | 4.1 | fair |
+
+(c1a0d is a lab lobby: 5.8 / 3.9. c2a5 spawns behind a gate that stays shut,
+so it has no fight; c2a5b spawns with six soldiers within 1200 units.) All ran
+at 90 fps. Headroom can't be read off a sum: ANGLE's work and ours overlap on
+the GPU, so engine + ours can exceed the 11.1 ms frame while it holds 90 fps.
 
 Sanity check: `gpuQueue` should be close to the sum of our passes. If it is
 much larger, commit feedback is counting the queue's wait on ANGLE's fence.

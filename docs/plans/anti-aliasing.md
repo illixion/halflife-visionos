@@ -1,9 +1,11 @@
 # Plan — Anti-aliasing inside the headset's GPU budget
 
-> **Status (2026-10-16): proposal, nothing built.** Written after the glass
-> mirror's 4× MSAA landed (`db2f854`) and the owner asked whether MSAA's
-> reputation for cost means a more modern technique would suit the headset
-> better, given its thermal limits, and what carries over to Oneiros.
+> **Status (2026-10-17): Phase 0 measured on the headset; nothing built.**
+> Written after the glass mirror's 4× MSAA landed (`db2f854`) and the owner
+> asked whether MSAA's reputation for cost means a more modern technique would
+> suit the headset better, given its thermal limits, and what carries over to
+> Oneiros. Phase 0's results (below) move the foveated render (Phase 2) ahead
+> of MSAA in priority: it is the fix for the thermal throttle.
 
 ## Answer in brief
 
@@ -74,6 +76,79 @@ thermal state at the four scenes in `modern-lighting.md` §1, plus the c1a2
 window. Then the same at the window with `fxaaEnabled` off: that delta is what
 FXAA costs. The app has held 60 fps at the window in every recent run; if
 engine + ours exceeds 11.1 ms there, the GPU is what halves the frame rate.
+
+#### Results (2026-10-17)
+
+Build `3501f58` (Release), M5 headset, visionOS 27.2, Mac Virtual Display off,
+launched cold (thermal "nominal"). Defaults: render scale 0.75, FXAA on, mirror
+method rendered, sharp water and sharp glass on, reprojection depth on, mirror
+at 4 samples. Each cell is p50/p95 in ms over whole 512-frame `[FT]` windows
+taken after the map had loaded (two to four windows per row). Every row ran at
+90 fps (frame time p50 11.1 ms), except the throttle row.
+
+| Scene | Thermal | gEngine0 | gEngine1 | gPlanar0 + 1 | gComposite | gpuQueue |
+|---|---|---|---|---|---|---|
+| c0a0 tram | nominal | 2.5/3.0 | 3.1–3.2/3.7–4.1 | 2.5 + 3.6 (when in view) | 2.7–3.1/3.2 | 3.3–3.7/3.8–3.9 |
+| c1a0 lobby | nominal | 2.5/2.9 | 2.9/3.8 | — | 3.2/3.4 | 3.8/4.1 |
+| c1a0d lab lobby | nominal | 2.5/3.0 | 3.3/4.2 | — | 3.2/3.5 | 3.9/4.2 |
+| c2a5 spawn corridor (gate shut, no fight) | nominal | 2.5/3.1 | 3.1/4.1 | — | 3.0/3.1 | 3.6/3.8 |
+| c1a2 window, facing the glass | ↓ | 1.4/1.8 | 2.5/3.0 | 1.5 + 2.3 | 3.0/3.1 | 3.5/3.6 |
+| … FXAA off | ↓ | 1.4/1.9 | 2.5/3.0 | 1.4 + 2.3 | 3.0/3.1 | 3.5/3.7 |
+| … sharp glass off (the mirror moves to the flood behind the glass) | ↓ | 1.7/2.2 | 2.8/3.4 | 1.7 + 2.6 | 2.6/2.7 | 3.1/3.3 |
+| … screen-space water (no rendered mirror) | ↓ | 1.3/1.6 | 2.1/2.5 | — | 3.9/4.0 | 5.0/5.2 |
+| **throttle, 45 fps** (c1a2 window, any setting) | fair | 1.8/2.1–2.9 | 2.8–3.2/4.2–4.8 (rendered) | 1.6 + 2.9 | 4.8–6.5/6.5–9.0 | 6.0–8.3/8.0–11.4 |
+| c1a2 window after the throttle lifted | fair | 1.5/2.1 | 2.6/3.1 | 1.6 + 2.4 | 3.0/3.1 | 3.5/3.7 |
+| c1a0e test chamber | fair | 2.1/2.8 | 2.8/3.6 | — | 3.2/3.5 | 3.9/4.2 |
+| c2a5b, standing in the river (fight unconfirmed) | fair | 2.1/2.4 | 3.3/3.6 | 1.9 + 3.3 | 3.4/3.7 | 4.1/4.3 |
+
+↓: the thermal state read "nominal" at 22:43:05 UTC and "fair" at 22:46:21;
+these rows fall between.
+
+What it shows:
+
+- **The frame rate is 90 Hz, not 120.** Every full-speed window had an 11.1 ms
+  frame time.
+- **The scene barely matters.** The engine costs 4.8–5.9 ms for both eyes in
+  the tram, both lobbies, the test chamber and the outdoor corridor: it is
+  bound by the pixel count, not by GoldSrc's geometry.
+- **FXAA costs nothing measurable** (composite 3.0/3.1 ms with and without),
+  so it can stay on until MSAA earns its place. The composite's 3 ms is the
+  read of the oversized engine image (colour, depth and stencil at 3815×3061
+  per eye), not the filter.
+- **The rendered mirror is the largest optional cost**: 3.8 ms of engine time
+  at the window, 5.2 ms in the river, whenever a mirror plane is in view.
+  Screen-space water instead costs about 1.5 ms more in our queue.
+- **The GPU timers overlap, so their sum is not GPU busy time.** In the river,
+  engine 5.4 + mirror 5.2 + ours 4.1 = 14.7 ms of timed work fits in a steady
+  11.1 ms frame: ANGLE's command buffers and ours run partly at the same time.
+  So the test above ("if engine + ours exceeds 11.1 ms") can't decide
+  anything; use the frame time, and same-spot A/Bs of single passes.
+  `gEngine1` also reads 0.5–1.2 ms above `gEngine0` in every scene, and
+  `gPlanar1` above `gPlanar0` by as much, which no scene difference explains.
+  Check it before using `gEngine` as a gate.
+- **What halves the frame rate is heat, not content.** About 6.5 minutes after
+  the cold launch (22:45:45 UTC), the frame rate fell to 45 fps for 2.8 minutes,
+  with the thermal state "fair". The passes that stream full-size textures from
+  memory went up 1.6–2× (composite 3.0 → 4.8–6.3 ms with the rendered mirror,
+  3.9 → 6.5 in screen-space mode; depth merge 0.4 → 0.6–0.8; weapon 0.1 → 0.2),
+  while the engine's tile rendering rose about 10–30%. That is consistent with
+  the system lowering the GPU and memory clocks. Turning glass and water
+  reflections off didn't lift it. The cap lifted on its own, still at "fair",
+  and every pass went back to its earlier time. The earlier 60 fps at the window
+  (thermal "fair", Mac Virtual Display on) fits the same picture.
+
+So the order changes. The composite and the depth merge read 23.4 Mpx of
+engine image every frame, and those passes are what the thermal mitigation hurts
+most. Phase 2 reads the engine image 1:1 at the drawable's 8.1 Mpx, a third of
+that traffic, and cuts the engine's fill by the same factor. Phase 1 (MSAA)
+stays, for quality, and gets cheaper after Phase 2. The gate for Phase 2 now has
+a baseline: from a cold start, how long until the frame rate first halves
+(6.5 minutes today, touring these scenes).
+
+On the headset the view belongs to the head: `vr_setangles` exists only in
+the desktop build. Place the player with `ent_fire 1 set origin "x y z"`
+(`sv_cheats 1; sv_enttools_enable 1`) and let the wearer face the subject;
+the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing −x.
 
 ### Phase 1 — 4× MSAA on the engine view
 
