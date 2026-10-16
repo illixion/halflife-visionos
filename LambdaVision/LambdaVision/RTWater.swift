@@ -139,6 +139,7 @@ final class RTWater {
             // the studio models eye 0 drew, and a copy of each new skin
             var count: Int32 = 0, opaque: Int32 = 0, skinCount: Int32 = 0
             var skins: UnsafePointer<lambda_scene_skin_t>?
+            var copies: [(index: Int32, view: MTLTexture)] = []
             let tris = lambda_scene_studio_acquire(&count, &opaque, &skins, &skinCount)
             if let skins {
                 for k in 0..<Int(skinCount) where skinViews[Int(skins[k].index)] == nil {
@@ -147,12 +148,18 @@ final class RTWater {
                     guard let t = created,
                           let v = t.makeTextureView(pixelFormat: .rgba8Unorm, textureType: .type2D, levels: 0..<1, slices: 0..<1) else { continue }
                     skinViews[Int(info.index)] = (slot, t, v)
-                    lambda_gl_worker_copy_skin(info.index, Unmanaged.passUnretained(v).toOpaque())
+                    copies.append((info.index, v))
                 }
             }
             let dynamic = tris.map { RTWaterScene.Dynamic(triangles: $0, count: Int(count), numOpaque: Int(opaque)) }
             scene.update(instances: list, dynamic: dynamic, frame: frame, completedFrame: completedFrame)
             lambda_scene_studio_release()
+            // queued once the snapshot is released: the queue takes the same
+            // lock (the first headset run of this mode hung the render loop
+            // on it until the system killed the app)
+            for c in copies {
+                lambda_gl_worker_copy_skin(c.index, Unmanaged.passUnretained(c.view).toOpaque())
+            }
             add += scene.takeNewAllocations()
         }
         return (add, remove)

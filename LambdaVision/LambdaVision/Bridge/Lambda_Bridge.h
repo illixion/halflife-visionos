@@ -590,14 +590,16 @@ int  lambda_scene_copied(void);
 // The studio models eye 0 drew last frame (gl_vrscene.c R_VRSceneStudio):
 // triangles of three {pos[3], uv[2], rgba8 light} vertices and the engine
 // texture index (76 bytes each), opaque first; and the skins they name.
-// Locks like lambda_scene_acquire: always release.
+// Locks like lambda_scene_acquire: always release, and call no other
+// lambda_scene_* / lambda_gl_worker_copy_skin until then (the same lock).
 typedef struct { int index, width, height; } lambda_scene_skin_t;
 const void *lambda_scene_studio_acquire(int *count, int *num_opaque,
                                         const lambda_scene_skin_t **skins, int *skin_count);
 void lambda_scene_studio_release(void);
 // Copy this skin (engine texture index) into the app's 2D rgba8 view, on
 // the worker after the next eyes; lambda_scene_skins_copied hands back the
-// indices copied since the last call.
+// indices copied since the last call. Never with the studio snapshot
+// acquired: it takes the same lock.
 void lambda_gl_worker_copy_skin(int engine_index, void *mtl_view);
 int  lambda_scene_skins_copied(int *out_indices, int max);
 
