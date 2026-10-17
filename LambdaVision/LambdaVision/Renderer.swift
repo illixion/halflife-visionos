@@ -2192,7 +2192,10 @@ actor Renderer {
     private func updateDynamicBufferState(frameIndex: UInt64) {
         /// Update the state of our uniform buffers before rendering
 
-        uniformBufferIndex = (uniformBufferIndex + 1) % maxBuffersInFlight
+        // The slot follows the commit count, the value wait0 waited for: a
+        // frame that returns before committing (no timing, no drawables)
+        // must not walk the ring onto the slot of a frame still on the GPU.
+        uniformBufferIndex = Int((committedFrameIndex + 1) % UInt64(maxBuffersInFlight))
 
         uniformBufferOffset = alignedUniformsSize * uniformBufferIndex
 
@@ -2245,7 +2248,14 @@ actor Renderer {
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
         let ftFrameStart = CACurrentMediaTime()
-        guard self.endFrameEvent.wait(untilSignaledValue: committedFrameIndex - UInt64(maxBuffersInFlight), timeoutMS: 10000) else {
+        // This frame's slot was last used by the frame committed
+        // maxBuffersInFlight before it, which signals committedFrameIndex + 1
+        // − maxBuffersInFlight. Waiting for one less let a frame reset an
+        // allocator and residency set the GPU was still running whenever it
+        // fell a full ring behind; the same wait page-faulted Oneiros's Mac
+        // harness (2026-10-17). wait1 below has kept the GPU at most one frame
+        // behind here, so this has not blocked in practice.
+        guard self.endFrameEvent.wait(untilSignaledValue: committedFrameIndex + 1 - UInt64(maxBuffersInFlight), timeoutMS: 10000) else {
             return
         }
         FrameTimingStats.shared.add("wait0", (CACurrentMediaTime() - ftFrameStart) * 1000)
