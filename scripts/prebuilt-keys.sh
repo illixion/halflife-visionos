@@ -7,8 +7,8 @@
 #   scripts/prebuilt-keys.sh xash     prints the libxash key only
 #
 # A key changes whenever anything that shapes the archive changes:
-#   angle  pinned ANGLE revision + angle-visionos.patch + build_angle_visionos.sh
-#          + XCODE_PIN
+#   angle  pinned ANGLE revision + angle-visionos.patch + angle-metal-rate-map.patch
+#          + build_angle_visionos.sh + XCODE_PIN
 #   xash   pinned xash3d-fwgs + hlsdk-portable revisions (from setup.sh) + every
 #          git-tracked file under VisionPort/ except the ANGLE, macOS and
 #          simulator-only scripts (patches, build scripts, stubs, VR hook
@@ -48,6 +48,7 @@ angle_key() {
     [[ -n "$rev" ]] || { echo "prebuilt-keys: no ANGLE_COMMIT pin" >&2; exit 1; }
     printf 'angle-%s-%s\n' "$(printf '%s' "$rev" | cut -c1-10)" "$(
         { printf '%s\n' VisionPort/angle-visionos.patch \
+              VisionPort/angle-metal-rate-map.patch \
               VisionPort/build_angle_visionos.sh | hash_files
           echo "xcode-$XCODE_PIN"; } | shasum -a 256 | cut -c1-12)"
 }
@@ -60,7 +61,7 @@ xash_key() {
     printf 'xash-%s-%s-%s\n' "$(printf '%s' "$xash" | cut -c1-8)" \
         "$(printf '%s' "$hlsdk" | cut -c1-8)" "$(
         { { git ls-files -- VisionPort \
-            | grep -vxE 'VisionPort/(angle-visionos\.patch|build_angle_visionos\.sh|build_xash_macos\.sh|run_xash_macos\.sh|build_xash_xrsim\.sh)'
+            | grep -vxE 'VisionPort/(angle-visionos\.patch|angle-metal-rate-map\.patch|build_angle_visionos\.sh|build_xash_macos\.sh|run_xash_macos\.sh|build_xash_xrsim\.sh)'
         } | hash_files
         echo "xcode-$XCODE_PIN"; } | shasum -a 256 | cut -c1-12)"
 }

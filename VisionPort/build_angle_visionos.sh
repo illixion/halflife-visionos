@@ -66,6 +66,16 @@ else
     fi
 fi
 
+# --- 2b. ANGLE source patch: rate-mapped framebuffers (the foveated engine
+# render, docs/plans/anti-aliasing.md Phase 2). Applied at the angle root, to
+# a fresh checkout and to an existing one alike; already applied is a no-op.
+SRC_PATCH="$HERE/angle-metal-rate-map.patch"
+if git -C "$ANGLE_ROOT/angle" apply --check -R "$SRC_PATCH" 2>/dev/null; then
+    echo "angle-metal-rate-map.patch already applied"
+else
+    git -C "$ANGLE_ROOT/angle" apply "$SRC_PATCH"
+fi
+
 # --- 3. gn gen + ninja for device and simulator ---
 cd "$ANGLE_ROOT/angle"
 COMMON_ARGS='target_os="ios" target_platform="xros" target_cpu="arm64" ios_deployment_target="2.0" is_debug=false is_component_build=false ios_enable_code_signing=false angle_enable_metal=true angle_enable_vulkan=false angle_enable_gl=false angle_enable_swiftshader=false angle_enable_null=false angle_enable_wgpu=false symbol_level=1 use_custom_libcxx=false treat_warnings_as_errors=false'

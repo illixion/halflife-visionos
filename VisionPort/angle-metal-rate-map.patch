@@ -1,0 +1,245 @@
+diff --git a/src/libANGLE/renderer/metal/ContextMtl.mm b/src/libANGLE/renderer/metal/ContextMtl.mm
+index 3fb5453650..9bd1a3d681 100644
+--- a/src/libANGLE/renderer/metal/ContextMtl.mm
++++ b/src/libANGLE/renderer/metal/ContextMtl.mm
+@@ -2123,7 +2123,7 @@ void ContextMtl::updateBlendDescArray(const gl::BlendStateExt &blendStateExt)
+ void ContextMtl::updateScissor(const gl::State &glState)
+ {
+     FramebufferMtl *framebufferMtl = mtl::GetImpl(glState.getDrawFramebuffer());
+-    gl::Rectangle renderArea       = framebufferMtl->getCompleteRenderArea();
++    gl::Rectangle renderArea       = framebufferMtl->getRasterArea();
+ 
+     ANGLE_MTL_LOG("renderArea = %d,%d,%d,%d", renderArea.x, renderArea.y, renderArea.width,
+                   renderArea.height);
+diff --git a/src/libANGLE/renderer/metal/FrameBufferMtl.h b/src/libANGLE/renderer/metal/FrameBufferMtl.h
+index 84e5326b72..60d5334224 100644
+--- a/src/libANGLE/renderer/metal/FrameBufferMtl.h
++++ b/src/libANGLE/renderer/metal/FrameBufferMtl.h
+@@ -98,6 +98,12 @@ class FramebufferMtl : public FramebufferImpl
+     bool flipY() const { return mFlipY; }
+ 
+     gl::Rectangle getCompleteRenderArea() const;
++    // The area viewports and scissors address: the rate map's screen when one
++    // is set (angle-metal-rate-map.patch), else the complete render area.
++    gl::Rectangle getRasterArea() const;
++    // Rasterize through a variable rasterization rate map from the next render
++    // pass on (nil: none). False when the device has no rate map support.
++    bool setRasterizationRateMap(const gl::Context *context, id<MTLRasterizationRateMap> map);
+     int getSamples() const;
+     WindowSurfaceMtl *getAttachedBackbuffer() const { return mBackbuffer; }
+ 
+@@ -222,6 +228,7 @@ class FramebufferMtl : public FramebufferImpl
+ 
+     WindowSurfaceMtl *mBackbuffer = nullptr;
+     bool mFlipY                   = false;
++    angle::ObjCPtr<id<MTLRasterizationRateMap>> mRasterizationRateMap;
+ 
+     mtl::BufferRef mReadPixelBuffer;
+ 
+diff --git a/src/libANGLE/renderer/metal/FrameBufferMtl.mm b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
+index 7a24908e2b..2e24dd7bc6 100644
+--- a/src/libANGLE/renderer/metal/FrameBufferMtl.mm
++++ b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
+@@ -880,6 +880,39 @@ gl::Rectangle FramebufferMtl::getCompleteRenderArea() const
+     return gl::Rectangle(0, 0, mState.getDimensions().width, mState.getDimensions().height);
+ }
+ 
++gl::Rectangle FramebufferMtl::getRasterArea() const
++{
++    if (mRasterizationRateMap)
++    {
++        const MTLSize screen = mRasterizationRateMap.get().screenSize;
++        return gl::Rectangle(0, 0, static_cast<int>(screen.width), static_cast<int>(screen.height));
++    }
++    return getCompleteRenderArea();
++}
++
++bool FramebufferMtl::setRasterizationRateMap(const gl::Context *context,
++                                             id<MTLRasterizationRateMap> map)
++{
++    ContextMtl *contextMtl = mtl::GetImpl(context);
++    if (map && ![contextMtl->getMetalDevice().get() supportsRasterizationRateMapWithLayerCount:1])
++    {
++        return false;
++    }
++    if (mRasterizationRateMap.get() == map)
++    {
++        return true;
++    }
++    mRasterizationRateMap                = map;
++    mRenderPassDesc.rasterizationRateMap = mRasterizationRateMap;
++    // A new render pass from the next draw, and the viewport and scissor
++    // recomputed against the map's screen.
++    if (mtl::GetImpl(context->getState().getDrawFramebuffer()) == this)
++    {
++        contextMtl->onDrawFrameBufferChangedState(context, this, true);
++    }
++    return true;
++}
++
+ bool FramebufferMtl::renderPassHasStarted(ContextMtl *contextMtl) const
+ {
+     return contextMtl->hasStartedRenderPass(mRenderPassDesc);
+@@ -1143,6 +1176,8 @@ angle::Result FramebufferMtl::prepareRenderPass(const gl::Context *context,
+         desc.defaultHeight = 0;
+     }
+ 
++    desc.rasterizationRateMap = mRasterizationRateMap;
++
+     return angle::Result::Continue;
+ }
+ 
+@@ -1371,11 +1406,14 @@ angle::Result FramebufferMtl::clearImpl(const gl::Context *context,
+     }
+ 
+     ContextMtl *contextMtl = mtl::GetImpl(context);
+-    const gl::Rectangle renderArea(0, 0, mState.getDimensions().width,
+-                                   mState.getDimensions().height);
++    // Under a rate map the clear's area, and a drawn clear's viewport, are in
++    // its screen space; a load-action clear covers the attachments either way.
++    const gl::Rectangle renderArea = getRasterArea();
+ 
+     clearOpts.colorFormat    = mRenderPassFirstColorAttachmentFormat;
+-    clearOpts.dstTextureSize = mState.getExtents();
++    clearOpts.dstTextureSize = mRasterizationRateMap
++                                   ? gl::Extents(renderArea.width, renderArea.height, 1)
++                                   : mState.getExtents();
+     clearOpts.clearArea      = ClipRectToScissor(contextMtl->getState(), renderArea, false);
+     clearOpts.flipY          = mFlipY;
+ 
+diff --git a/src/libANGLE/renderer/metal/metal_backend.gni b/src/libANGLE/renderer/metal/metal_backend.gni
+index ef8c6ad9f4..2512e98958 100644
+--- a/src/libANGLE/renderer/metal/metal_backend.gni
++++ b/src/libANGLE/renderer/metal/metal_backend.gni
+@@ -18,6 +18,7 @@ metal_backend_sources = [
+   "DisplayMtl_api.h",
+   "FrameBufferMtl.h",
+   "FrameBufferMtl.mm",
++  "mtl_rate_map_export.mm",
+   "IOSurfaceSurfaceMtl.h",
+   "IOSurfaceSurfaceMtl.mm",
+   "ImageMtl.h",
+diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+index a84b094ff3..b019051d74 100644
+--- a/src/libANGLE/renderer/metal/mtl_command_buffer.mm
++++ b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+@@ -1741,6 +1741,15 @@ RenderCommandEncoder &RenderCommandEncoder::restart(const RenderPassDesc &desc,
+ 
+     initAttachmentWriteDependencyAndScissorRect(mRenderPassDesc.stencilAttachment);
+ 
++    // A rate-mapped pass takes scissors in the map's screen space, which the
++    // attachments' physical sizes don't bound.
++    if (mRenderPassDesc.rasterizationRateMap)
++    {
++        const MTLSize screen               = mRenderPassDesc.rasterizationRateMap.get().screenSize;
++        mRenderPassMaxScissorRect.width  = screen.width;
++        mRenderPassMaxScissorRect.height = screen.height;
++    }
++
+     // Convert to Objective-C descriptor
+     mRenderPassDesc.convertToMetalDesc(mCachedRenderPassDescObjC, deviceMaxRenderTargets);
+ 
+diff --git a/src/libANGLE/renderer/metal/mtl_rate_map_export.mm b/src/libANGLE/renderer/metal/mtl_rate_map_export.mm
+new file mode 100644
+index 0000000000..ba7d10ef61
+--- /dev/null
++++ b/src/libANGLE/renderer/metal/mtl_rate_map_export.mm
+@@ -0,0 +1,45 @@
++//
++// Copyright 2026 The ANGLE Project Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// mtl_rate_map_export.mm:
++//    visionOS port (LambdaVision, angle-metal-rate-map.patch): rasterize a
++//    framebuffer object through a Metal variable rasterization rate map, so a
++//    GL renderer can draw foveated into EGLImage-wrapped Metal textures. The
++//    viewport and scissor are then in the map's screen space and the
++//    attachments hold its physical texels; reads of the result have to decode
++//    the layout themselves.
++//
++
++#include "export.h"
++#include "libANGLE/Context.h"
++#include "libANGLE/Framebuffer.h"
++#include "libANGLE/renderer/metal/ContextMtl.h"
++#include "libANGLE/renderer/metal/FrameBufferMtl.h"
++#include "libANGLE/renderer/metal/SurfaceMtl.h"
++#include "libANGLE/renderer/metal/mtl_common.h"
++#include "libGLESv2/global_state.h"
++
++// On the thread whose context owns `framebuffer`: from its next render pass
++// on, it rasterizes through `rateMap` (an id<MTLRasterizationRateMap> with one
++// layer; retained), or through none for NULL. Returns 1 when it took, 0 when
++// the device can't, -1 without a current context, -2 for no such framebuffer
++// object.
++extern "C" ANGLE_EXPORT int ANGLE_SetFramebufferRasterizationRateMap(unsigned int framebuffer,
++                                                                    void *rateMap)
++{
++    gl::Context *context = gl::GetValidGlobalContext();
++    if (!context)
++    {
++        return -1;
++    }
++    SCOPED_SHARE_CONTEXT_LOCK(context);
++    gl::Framebuffer *fb = context->getFramebuffer(gl::FramebufferID{framebuffer});
++    if (!fb || fb->isDefault())
++    {
++        return -2;
++    }
++    id<MTLRasterizationRateMap> map = static_cast<id<MTLRasterizationRateMap>>(rateMap);
++    return rx::mtl::GetImpl(fb)->setRasterizationRateMap(context, map) ? 1 : 0;
++}
+diff --git a/src/libANGLE/renderer/metal/mtl_state_cache.h b/src/libANGLE/renderer/metal/mtl_state_cache.h
+index 6e718e4c4c..6ba324d8c0 100644
+--- a/src/libANGLE/renderer/metal/mtl_state_cache.h
++++ b/src/libANGLE/renderer/metal/mtl_state_cache.h
+@@ -386,6 +386,10 @@ struct RenderPassDesc
+     uint32_t rasterSampleCount   = 1;
+     uint32_t defaultWidth        = 0;
+     uint32_t defaultHeight       = 0;
++    // visionOS port (angle-metal-rate-map.patch): the framebuffer's variable
++    // rasterization rate map, nil for none. Viewports and scissors are then in
++    // its screen space, which the attachments' physical texels hold.
++    angle::ObjCPtr<id<MTLRasterizationRateMap>> rasterizationRateMap;
+ };
+ 
+ }  // namespace mtl
+diff --git a/src/libANGLE/renderer/metal/mtl_state_cache.mm b/src/libANGLE/renderer/metal/mtl_state_cache.mm
+index 9036e0648a..68b2500482 100644
+--- a/src/libANGLE/renderer/metal/mtl_state_cache.mm
++++ b/src/libANGLE/renderer/metal/mtl_state_cache.mm
+@@ -814,6 +814,11 @@ bool RenderPassDesc::equalIgnoreLoadStoreOptions(const RenderPassDesc &other) co
+         return false;
+     }
+ 
++    if (rasterizationRateMap.get() != other.rasterizationRateMap.get())
++    {
++        return false;
++    }
++
+     return depthAttachment.equalIgnoreLoadStoreOptions(other.depthAttachment) &&
+            stencilAttachment.equalIgnoreLoadStoreOptions(other.stencilAttachment);
+ }
+@@ -840,6 +845,11 @@ bool RenderPassDesc::operator==(const RenderPassDesc &other) const
+         return false;
+     }
+ 
++    if (rasterizationRateMap.get() != other.rasterizationRateMap.get())
++    {
++        return false;
++    }
++
+     return depthAttachment == other.depthAttachment && stencilAttachment == other.stencilAttachment;
+ }
+ 
+@@ -880,6 +890,9 @@ void RenderPassDesc::convertToMetalDesc(MTLRenderPassDescriptor *objCDesc,
+         // No need to reset defaultRasterSampleCount as it is only applied when no attachments are
+         // provided.
+     }
++
++    // The cached Objective-C descriptor is reused for every pass: always assign.
++    objCDesc.rasterizationRateMap = rasterizationRateMap.get();
+ }
+ 
+ // StateCache implementation
