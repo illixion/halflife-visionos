@@ -215,12 +215,22 @@ actor Renderer {
     // Developer mode's palm readout, drawn into the HEV holograms' scene.
     private let palmDebug = PalmDebugPanel()
 
-    // First-person body: the rig is built once from the body slot after the
-    // engine loads gordon.mdl; the mesh is uploaded once per bake (and again
-    // when the legs toggle flips, since hidden bones are cut at upload). The
-    // body yaw trails the head yaw so the torso follows a turn, not a glance.
+    // First-person body: the rig is built from the body slot once per model
+    // (AvatarModel; Gordon changes into the HEV suit when the player gets it);
+    // the mesh is uploaded once per bake (and again when the legs toggle
+    // flips, since hidden bones are cut at upload). The body yaw trails the
+    // head yaw so the torso follows a turn, not a glance.
     private var avatarRig: AvatarRig?
     private var avatarRigFailed = false
+    /// The body slot generation the rig was built from.
+    private var avatarRigGeneration: UInt32 = 0
+    /// The game and data the body was chosen for, when it follows the suit;
+    /// and whether the model loaded is the suited one.
+    private var avatarSuitSource: (game: GameEntry, rodir: String)?
+    private var avatarSuited = false
+    /// The HUD's suit flag as last seen, and since when (render time).
+    private var avatarSuitSeen = false
+    private var avatarSuitSeenSince: Double = 0
     private var avatarMesh: StudioMesh?
     private var avatarMeshLegs = false
     private var avatarBodyYaw: Float? = nil
@@ -1255,6 +1265,15 @@ actor Renderer {
         // A look-pitch tilts the game world off the room, which the body
         // (posed in the room) cannot follow: leave it out while one is set.
         guard viewPitchOffset == 0 else { return nil }
+        avatarFollowSuit(time: time)
+        // A new model in the body slot needs its own rig, and its own feet.
+        let slotGeneration = lambda_body_generation()
+        if slotGeneration != avatarRigGeneration {
+            avatarRigGeneration = slotGeneration
+            avatarRig = nil
+            avatarRigFailed = false
+            avatarGait = nil
+        }
         if avatarRig == nil && !avatarRigFailed {
             do {
                 avatarRig = try AvatarRig()
@@ -1332,6 +1351,26 @@ actor Renderer {
         return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root,
                                    leftHand: rig.handMatrix(pose, left: true),
                                    rightHand: rig.handMatrix(pose, left: false))
+    }
+
+    /// Changes Gordon into or out of the HEV suit when the HUD's suit flag has
+    /// held for a second: a level change resets the client's HUD for a moment,
+    /// and the body shouldn't flicker with it. The body slot is reloaded here,
+    /// on the render thread that reads it (`lambda_body_pose_at` reads the
+    /// model file the load replaces).
+    private func avatarFollowSuit(time: Double) {
+        guard let source = avatarSuitSource else { return }
+        var hud = lambda_hud_state_t()
+        lambda_hud_state(&hud)
+        let suit = hud.has_suit != 0
+        if suit != avatarSuitSeen {
+            avatarSuitSeen = suit
+            avatarSuitSeenSince = time
+        }
+        guard suit != avatarSuited, time - avatarSuitSeenSince >= 1 else { return }
+        avatarSuited = suit
+        let name = AvatarModel.load(for: source.game, in: source.rodir, suit: suit)
+        AppLog.render.log("[Avatar] \(suit ? "suit on" : "suit off", privacy: .public): \(name ?? "no model", privacy: .public)")
     }
 
     /// What the game says about the ground under the player, in the rig's
@@ -2169,8 +2208,12 @@ actor Renderer {
         // the read-only game data: the game's own player (AvatarModel), else
         // the deathmatch Gordon — 343 source vertices, a full Bip01 skeleton
         // with both arm chains, embedded textures, and life-size at 72 units.
-        // Non-fatal: without it we simply draw no body.
-        let avatar = AvatarModel.load(for: game, in: rodir)
+        // Non-fatal: without it we simply draw no body. No map is loaded yet,
+        // so Gordon starts without the suit; the body draw changes him into
+        // it once the HUD reports one (avatarFollowSuit).
+        let avatar = AvatarModel.load(for: game, in: rodir, suit: false)
+        avatarSuited = false
+        avatarSuitSource = AvatarModel.followsSuit(for: game, in: rodir) ? (game, rodir) : nil
         Renderer.avatarAvailable = avatar != nil
         AppLog.render.log("[LambdaVision] avatar model \(avatar ?? "MISSING", privacy: .public)")
         if rc == 0 {

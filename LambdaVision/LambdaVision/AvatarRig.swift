@@ -158,7 +158,7 @@ struct AvatarRig {
             let name = withUnsafeBytes(of: &bone.name) { raw in
                 String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
             }
-            names.append(name)
+            names.append(AvatarRig.canonicalBoneName(name))
             parents.append(bone.parent >= 0 ? Int(bone.parent) : nil)
         }
 
@@ -182,6 +182,27 @@ struct AvatarRig {
         }
 
         try self.init(boneNames: names, parents: parents, restModel: model, vertices: vertices)
+    }
+
+    /// A bone's name as the player models spell it (Character Studio's
+    /// `Bip01 L Arm`, `Arm1`, `Arm2`, `Leg`, `Leg1`). Blue Shift's NPC models,
+    /// Gordon in his lab coat among them, were rigged with 3ds Max Biped, which
+    /// names the same bones `Clavicle`, `UpperArm`, `Forearm`, `Thigh` and
+    /// `Calf`; everything else (spine, hands, fingers, feet) matches already.
+    static func canonicalBoneName(_ name: String) -> String {
+        for side in ["L", "R"] {
+            let prefix = "Bip01 \(side) "
+            guard name.hasPrefix(prefix) else { continue }
+            switch name.dropFirst(prefix.count) {
+            case "Clavicle": return prefix + "Arm"
+            case "UpperArm": return prefix + "Arm1"
+            case "Forearm": return prefix + "Arm2"
+            case "Thigh": return prefix + "Leg"
+            case "Calf": return prefix + "Leg1"
+            default: return name
+            }
+        }
+        return name
     }
 
     /// The bones whose vertices the eye keeps clear of (`clearanceVertices`).
