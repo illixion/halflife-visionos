@@ -27,6 +27,7 @@ struct SettingsView: View {
     // Snapshot of the reload-requiring settings when the sheet opened, so we
     // can offer a reload on close if they changed.
     @State private var snapScale = 0.0
+    @State private var snapFoveated = true
     @State private var showReloadPrompt = false
 
     // A handful of chapter-start maps for the Advanced loader.
@@ -44,9 +45,11 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
+                    Toggle("Foveated rendering", isOn: $settings.foveatedEngine)
                     slider("Render scale", $settings.renderScale, 0.5...1.0, 0.05) {
                         String(format: "%.0f%%", $0 * 100)
                     }
+                    .disabled(settings.foveatedEngine)
                     // No MetalFX toggle here on purpose: the optional
                     // FXAA-pass → MetalFX-spatial chain added two
                     // full-logical-resolution passes per eye and measured
@@ -324,12 +327,13 @@ struct SettingsView: View {
         .frame(minWidth: 520, minHeight: 640)
         .onAppear {
             snapScale = appModel.gameSettings.renderScale
+            snapFoveated = appModel.gameSettings.foveatedEngine
         }
         .alert("Reload game to apply changes?", isPresented: $showReloadPrompt) {
             Button("Reload") { reloadImmersiveSpace(); dismiss() }
             Button("Later", role: .cancel) { dismiss() }
         } message: {
-            Text("Render scale only takes effect when the immersive space restarts.")
+            Text("Foveated rendering and render scale only take effect when the immersive space restarts.")
         }
     }
 
@@ -337,7 +341,7 @@ struct SettingsView: View {
     // game is running (otherwise the next launch/open picks it up anyway).
     private func done() {
         let s = appModel.gameSettings
-        let changed = s.renderScale != snapScale
+        let changed = s.renderScale != snapScale || s.foveatedEngine != snapFoveated
         if changed && appModel.immersiveSpaceState == .open {
             showReloadPrompt = true
         } else {

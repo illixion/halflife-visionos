@@ -256,8 +256,30 @@ func readDepth(_ tex: MTLTexture) -> [Float] {
 }
 
 /// DisplayParams outgrew setFragmentBytes' 4 KB (the glass plane tables).
+// The dump being checked: its size is the engine image's, uniform (the app's
+// foveated layout tables, ShaderTypes.h engineTexelPos, are the identity
+// here; EngineFoveation.tables makes the same ones).
+var engineSize = (w: 1, h: 1)
+private var identityTables: (size: (w: Int, h: Int), buffer: MTLBuffer)?
+
+func engineTables() -> MTLBuffer {
+    if let t = identityTables, t.size == engineSize { return t.buffer }
+    let (w, h) = engineSize
+    var t: [Float] = []
+    for _ in 0..<2 {
+        for n in [w, h, w, h] { t += (0...n).map(Float.init) }
+    }
+    let b = device.makeBuffer(bytes: t, length: t.count * 4, options: .storageModeShared)!
+    identityTables = (engineSize, b)
+    return b
+}
+
 func paramsBuffer(_ params: DisplayParams) -> MTLBuffer {
     var p = params
+    if p.engineImage == .zero {
+        p.engineImage = SIMD4(Float(engineSize.w), Float(engineSize.h), Float(engineSize.w), Float(engineSize.h))
+        p.mirrorBase = SIMD4(Float(engineSize.w), Float(engineSize.h), 0, 0)
+    }
     return device.makeBuffer(bytes: &p, length: MemoryLayout<DisplayParams>.stride, options: .storageModeShared)!
 }
 
@@ -282,6 +304,7 @@ struct Compositor {
 for path in args {
     let dump = try Dump(path: path)
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     // Engine near/far from the dump's GL projection: P22 = −(f+n)/(f−n), P32 = −2fn/(f−n).
     let p22 = dump.projection.columns.2.z, p32 = dump.projection.columns.3.z
     let n = p32 / (p22 - 1) / inchesPerMetre, f = p32 / (p22 + 1) / inchesPerMetre
@@ -321,6 +344,7 @@ for path in args {
         enc.setRenderPipelineState(composite)
         enc.setDepthStencilState(depthState(.greater))
         enc.setFragmentBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+        enc.setFragmentBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
         enc.setFragmentTexture(color, index: TextureIndex.color.rawValue)
         enc.setFragmentTexture(engineDepth, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -465,6 +489,7 @@ func render(_ pipeline: MTLRenderPipelineState, _ w: Int, _ h: Int, _ params: Di
     let enc = cb.makeRenderCommandEncoder(descriptor: rpd)!
     enc.setRenderPipelineState(pipeline)
     enc.setFragmentBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setFragmentBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
     for (i, t) in textures { enc.setFragmentTexture(t, index: i) }
     enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
@@ -528,6 +553,7 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
     let enc = cb.makeComputeCommandEncoder()!
     let pb = paramsBuffer(params)
     enc.setBuffer(pb, offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
     enc.setBuffer(keys, offset: 0, index: 0)
     enc.setTexture(color, index: 0)
     enc.setTexture(engineDepth, index: 1)
@@ -577,6 +603,7 @@ func renderSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MT
 func seeThrough(_ dump: Dump, _ plane: SIMD4<Float>, _ mw: Int, _ mh: Int, _ dbg: MTLBuffer,
                 thickness: Float = 4) -> (occluded: Int, share: Float, leak: Float, leakTable: Float, past: Float, image: [UInt8]) {
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     guard let stencil = dump.stencil else { return (0, 0, 0, 0, 0, []) }
     let (f, r, u) = dump.axes
     let p = dump.projection
@@ -687,6 +714,7 @@ func mirrorTruth(_ dump: Dump, _ mirror: Dump, _ plane: SIMD4<Float>, _ mw: Int,
                  _ dbg: MTLBuffer) -> (rays: Int, farther: Float, nearer: Float, missing: Float, image: [UInt8]) {
     guard let stencil = dump.stencil else { return (0, 0, 0, 0, []) }
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     func tangents(_ p: float4x4) -> SIMD4<Float> {
         SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
               (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)
@@ -763,6 +791,7 @@ func timeSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLT
             let cb = queue.makeCommandBuffer()!
             let enc = cb.makeComputeCommandEncoder()!
             enc.setBuffer(pb, offset: 0, index: BufferIndex.uniforms.rawValue)
+            enc.setBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
             enc.setBuffer(keys, offset: 0, index: 0)
             enc.setBuffer(debug, offset: 0, index: 5)
             enc.setTexture(color, index: 0); enc.setTexture(engineDepth, index: 1)
@@ -787,6 +816,7 @@ func timeSharp(_ params: DisplayParams, _ color: MTLTexture, _ engineDepth: MTLT
 /// per-eye index, slice or clear would never show. Returns texels differing.
 func eyeSlices(_ params: DisplayParams, _ dump: Dump) -> Int {
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     guard let stencil = dump.stencil else { return 0 }
     let rgba2 = [UInt8](dump.rgba) + [UInt8](dump.rgba)
     let depth2 = dump.depth + dump.depth
@@ -805,6 +835,7 @@ func eyeSlices(_ params: DisplayParams, _ dump: Dump) -> Int {
     let cb = queue.makeCommandBuffer()!
     let enc = cb.makeComputeCommandEncoder()!
     enc.setBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
     enc.setBuffer(keys, offset: 0, index: 0)
     enc.setBuffer(debug, offset: 0, index: 5)
     enc.setTexture(color, index: 0); enc.setTexture(depthT, index: 1)
@@ -928,6 +959,7 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
     let target = SIMD4<Float>(0, 0, 0, Float(div))
     params.sspr = (target, target)
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     let mw = (w + div - 1) / div, mh = (h + div - 1) / div
     let t = params.eyeTangents.0
     params.rtWater = SIMD4(Float(ProcessInfo.processInfo.environment["RTLMSCALE"] ?? "") ?? scene.lightmapScale, (t.z + t.w) / Float(mh), 8192, 3)
@@ -938,6 +970,7 @@ func rtCheck(_ path: String, _ name: String, _ dump: Dump, _ base: DisplayParams
     let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
     enc.setComputePipelineState(rtTrace)
     enc.setBuffer(paramsBuffer(params), offset: 0, index: BufferIndex.uniforms.rawValue)
+    enc.setBuffer(engineTables(), offset: 0, index: BufferIndex.engineMap.rawValue)
     enc.setAccelerationStructure(tlas, bufferIndex: 0)
     enc.setBuffer(scene.vertices, offset: 0, index: 1)
     enc.setBuffer(scene.indices, offset: 0, index: 3)
@@ -1068,6 +1101,7 @@ for path in args {
     let name = ((path.split(separator: "@").first.map(String.init) ?? path) as NSString).lastPathComponent
         .replacingOccurrences(of: ".bin", with: "") + (path.contains("@") ? "@" + path.split(separator: "@")[1] : "")
     let w = dump.width, h = dump.height
+    engineSize = (w, h)
     let color = dump.rgba.withUnsafeBytes { array2D(.rgba8Unorm, w, h, slices: 1, $0.baseAddress!, 4) }
     let stencilTex = stencil.withUnsafeBytes { array2D(.r8Uint, w, h, slices: 1, $0.baseAddress!, 1) }
     var params = DisplayParams()
@@ -1608,6 +1642,7 @@ for path in args {
 func compare(_ a: GlassView, _ b: GlassView, _ image: KeyPath<GlassView, [UInt8]> = \.env) -> (n: Int, mean: Float)? {
     guard let pa = a.dump.planes, let pb = b.dump.planes, let sa = a.dump.stencil, let sb = b.dump.stencil else { return nil }
     let w = a.dump.width, h = a.dump.height
+    engineSize = (w, h)
     let (fa, ra, ua) = a.dump.axes, (fb, rb, ub) = b.dump.axes
     let p = a.dump.projection
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
@@ -1669,6 +1704,7 @@ func probeDistance(_ probe: Probe, _ dir: SIMD3<Float>) -> Float {
 func compareVirtual(_ a: GlassView, _ b: GlassView, _ probe: Probe) -> (n: Int, mean: Float)? {
     guard let pa = a.dump.planes, let pb = b.dump.planes, let sa = a.dump.stencil, let sb = b.dump.stencil else { return nil }
     let w = a.dump.width, h = a.dump.height
+    engineSize = (w, h)
     let (fa, ra, ua) = a.dump.axes, (fb, rb, ub) = b.dump.axes
     let p = a.dump.projection
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
@@ -1722,6 +1758,7 @@ func compareVirtual(_ a: GlassView, _ b: GlassView, _ probe: Probe) -> (n: Int, 
 func compareSharp(_ a: GlassView, _ b: GlassView) -> (n: Int, mean: Float, baseline: Float)? {
     guard let sa = a.sharp, let sb = b.sharp else { return nil }
     let w = a.dump.width, h = a.dump.height
+    engineSize = (w, h)
     let p = a.dump.projection
     let t = SIMD4((1 - p.columns.2.x) / p.columns.0.x, (1 + p.columns.2.x) / p.columns.0.x,
                   (1 + p.columns.2.y) / p.columns.1.y, (1 - p.columns.2.y) / p.columns.1.y)

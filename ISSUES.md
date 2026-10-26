@@ -61,6 +61,63 @@ instead of deleting them.
 
 ## Open — rendering
 
+- **Gordon in the mirrors** (owner request, 2026-10-17). Glass and water
+  reflections don't show the player's body, though the first-person body is
+  a full player model. The body is loaded into the engine's body slot
+  (`lambda_body_load`) but drawn by the app's weapon pass, in its IK pose,
+  after the composite, so no mirror sees it. The rendered mirror is a second
+  engine view (`R_VRMirrorView`) made before that pass; the ray-traced mirror
+  traces what the engine drew (`R_VRSceneAddStudioTriangle`), and the engine
+  never draws the first-person player; the screen-space mirror only has what
+  is on screen, which never includes the body's underside. So it means
+  drawing the avatar, in the same pose, into the rendered mirror and adding
+  its skinned triangles to the ray-traced scene. The screen-space method
+  stays without it.
+  - Rendered mirror, the plan: draw it inside the mirror pass, after
+    `R_VRMirrorView`'s `R_RenderFrame` and before the pass resolves, so it
+    gets the mirror's depth (a catwalk over water still hides your feet's
+    reflection), samples and oblique near plane. Drawn from Metal afterwards
+    it would have no mirror depth (the mirror's depth is a memoryless ANGLE
+    renderbuffer). The engine's own third-person player is no substitute: it
+    stands at the physics origin, in the game's animation, not where the
+    player's head is.
+  - Pieces: the engine exports the mirror view's view-projection (and the eye
+    it mirrored); the app hands the bridge the avatar's bone matrices in room
+    space plus that eye's room pose each frame, and the bridge maps them into
+    the game world with the yaw and translation between the eye's room pose
+    and the engine's eye; a GLES3 skinning program in the bridge draws the
+    body slot's mesh and textures (uploaded once per bake), lit like the
+    weapon pass's body, saving and restoring the GL2 shim's program, vertex
+    array, buffers, texture bindings and depth, blend, cull and winding (the
+    pass draws clockwise). The head is drawn in the mirror (it is cut only
+    first person). The pose is currently made after the eyes are rendered,
+    so either it moves ahead of the eye loop or the reflection lags a frame.
+  - Ray traced: skin the body into a vertex buffer each frame (a compute
+    pass from the same palette), refit its acceleration structure, add it
+    as an instance with the body's textures.
+
+- **Gordon in a lab coat before the HEV suit** (owner request, 2026-10-17).
+  Blue Shift ships `models/gordon_scientist.mdl` (+`t.mdl` textures; also in
+  `bshift_hd`), the NPC model of its crossover scenes. Wear it as the body,
+  and show it in the reflections above, until the player has the suit (the
+  HUD state's `hasSuit`), then switch to the HEV Gordon. Only where Blue Shift
+  is installed; without it, Gordon stays in the suit. Its skeleton has to build
+  the avatar rig (`AvatarModel.load` falls through on a model that doesn't),
+  and today it can't: it is a full Bip01 skeleton (body plus a `heads` part
+  with Gordon's head; the HD one adds tie bones) but with 3ds Max Biped names,
+  `Clavicle`/`UpperArm`/`Forearm` and `Thigh`/`Calf`, where the player models
+  and `AvatarRig` use `Arm`/`Arm1`/`Arm2` and `Leg`/`Leg1`. The rig needs those
+  as aliases.
+  - Built 2026-10-17, played on the device 2026-10-26 with no problems
+    reported: `AvatarRig.canonicalBoneName`, `AvatarModel.labCoat`
+    (`bshift_hd` first, then `bshift`), and the body draw changes into the
+    suit once the HUD's flag has held a second (`Renderer.avatarFollowSuit`,
+    which reloads the body slot on the render thread and rebuilds the rig and
+    gait for the new skeleton). Still worth a look when next in hands mode: a
+    Biped hand's axes may not match the player models' frame
+    (`AvatarRig.handRotation`). The reflections half waits on the mirror
+    entry above.
+
 - **HEV HUD next steps.** The holographic HUD (`HEVHUD.swift` on RAVEHolo;
   client state from `cl_dll/hud_redraw.cpp` `g_vr_hud_state`) replaces the
   stock health, suit, ammo and flashlight readouts: ammo beside the gun hand,

@@ -132,6 +132,13 @@ final class GameSettings {
                  }
         }
     }
+    /// The engine renders through the compositor's foveation (EngineFoveation)
+    /// instead of uniformly at `renderScale`. Like the scale, it applies when
+    /// the immersive space next opens.
+    var foveatedEngine: Bool = AppSettingsStore.foveatedEngine {
+        didSet { AppSettingsStore.foveatedEngine = foveatedEngine
+                 Renderer.foveatedEngine = foveatedEngine }
+    }
     /// HIDDEN from SettingsView and deliberately NOT seeded from
     /// AppSettingsStore: the optional FXAA-pass → MetalFX-spatial-upscale
     /// chain adds two full-logical-resolution passes per eye and measured
@@ -559,6 +566,7 @@ final class GameSettings {
     /// already reflects stored values.
     func applyRendererStatics() {
         Renderer.engineScale       = Float(renderScale)
+        Renderer.foveatedEngine    = foveatedEngine
         Renderer.useMetalFXChain   = metalFXEnabled
         Renderer.compositeFXAA     = fxaaEnabled
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0

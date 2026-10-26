@@ -46,7 +46,7 @@ final class RTWater {
         self.device = device
         self.pipeline = pipeline
         let at = MTL4ArgumentTableDescriptor()
-        at.maxBufferBindCount = 11       // TLAS @ 0 … skin table @ 10, DisplayParams @ BufferIndexUniforms
+        at.maxBufferBindCount = 12       // TLAS @ 0 … skin table @ 10, DisplayParams @ BufferIndexUniforms, engine tables @ 11
         at.maxTextureBindCount = 5       // colorMap @ 0, mirror @ 2, engine stencil @ 3, lightmaps @ 4
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
@@ -65,11 +65,12 @@ final class RTWater {
         }
     }
 
-    /// The target for this colour map size (divided by divisor, as
-    /// DisplayParams.sspr.w tells the kernel), made on first use or when it
-    /// changes. Returns the new allocations for the residency set.
-    func ensureTarget(colorMap: MTLTexture, divisor: Int) -> [MTLAllocation] {
-        let w = (colorMap.width + divisor - 1) / divisor, h = (colorMap.height + divisor - 1) / divisor
+    /// The target for the mirror base (EngineFoveation.Layout,
+    /// DisplayParams.mirrorBase) divided by divisor, as DisplayParams.sspr.w
+    /// tells the kernel, made on first use or when it changes. Returns the
+    /// new allocations for the residency set.
+    func ensureTarget(base: MTLSize, divisor: Int) -> [MTLAllocation] {
+        let w = (base.width + divisor - 1) / divisor, h = (base.height + divisor - 1) / divisor
         if color != nil, size.w == w, size.h == h { return [] }
         let d = MTLTextureDescriptor()
         d.textureType = .type2DArray
@@ -185,7 +186,7 @@ final class RTWater {
     /// caller fills before the command buffer is committed. Returns whether
     /// it traced (else the composite has nothing to read).
     func encode(commandBuffer: MTL4CommandBuffer, colorMap: MTLTexture, engineStencil: MTLTexture,
-                paramsAddress: UInt64, frame: UInt64,
+                engineMap: MTLBuffer, paramsAddress: UInt64, frame: UInt64,
                 mark: (GPUPassTimer.Mark, MTL4ComputeCommandEncoder) -> Void) -> Bool {
         guard let color, let scene, scene.isReady, Int(lambda_scene_copied()) == scene.generation,
               let bound = scene.structure(for: frame),
@@ -214,6 +215,7 @@ final class RTWater {
         argumentTable.setAddress(bound.dynVertices.gpuAddress, index: 8)
         argumentTable.setAddress(bound.dynMaterials.gpuAddress, index: 9)
         argumentTable.setAddress(scene.dynamicTextures.table.gpuAddress, index: 10)
+        argumentTable.setAddress(engineMap.gpuAddress, index: BufferIndex.engineMap.rawValue)
         argumentTable.setTexture(colorMap.gpuResourceID, index: 0)
         argumentTable.setTexture(color.gpuResourceID, index: 2)
         argumentTable.setTexture(engineStencil.gpuResourceID, index: 3)

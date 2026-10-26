@@ -173,6 +173,11 @@ actor Renderer {
     // The stencil aspect of engineDepth, where the engine marks glass
     // (r_vrglass) for the composite's glass reflection.
     var engineStencil: MTLTexture?
+    // How the engine image covers each eye's screen (EngineFoveation): the
+    // size the engine renders at, the texels its targets hold, and the
+    // shaders' per-eye tables. Foveated or uniform, set with the targets.
+    let engineFoveation: EngineFoveation
+    var engineLayout: EngineFoveation.Layout? { engineFoveation.layout }
     // What the glass reflects (GlassProbe), made when glass is first on, and
     // each eye's view and glass planes from the engine, read after the eyes.
     var glassProbe: GlassProbe?
@@ -406,6 +411,8 @@ actor Renderer {
     // targets, so these are read once at drawable setup — a change applies on
     // the next immersive-space open, not live.
     nonisolated(unsafe) static var engineScale: Float = 0.75
+    /// GameSettings.foveatedEngine, read when the engine targets are made.
+    nonisolated(unsafe) static var foveatedEngine: Bool = true
     // Hidden in Settings and forced false at startup (see GameSettings): the
     // FXAA-pass → MetalFX-spatial chain adds two full-logical-resolution
     // passes per eye for ~13-14 ms GPU/frame (~50 FPS), and upscaling to the
@@ -939,6 +946,8 @@ actor Renderer {
     nonisolated(unsafe) static var renderTargetW: Int = 0
     nonisolated(unsafe) static var renderTargetH: Int = 0
     nonisolated(unsafe) static var hudBoxAspect: Float = 0.75   // box tan height / width (sumV/sumH)
+    /// Each eye's 2D box as screen fractions x0, y0, x1, y1 (top-down), for /foveation.
+    nonisolated(unsafe) static var hudBoxRects: [SIMD4<Float>] = [.zero, .zero]
     static let hudHalfTan: Float = tanf(50.0 / 2.0 * .pi / 180.0)  // matches the 50°-wide overlay
 
     /// Map an ARKit world-space gaze direction to a menu pixel (render-target
@@ -1541,7 +1550,7 @@ actor Renderer {
         let argTableDesc = MTL4ArgumentTableDescriptor()
         argTableDesc.maxBufferBindCount = 4
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
-        argTableDesc.maxBufferBindCount = 3     // DisplayParams@2 (composite)
+        argTableDesc.maxBufferBindCount = 12    // DisplayParams@2, engine tables@11 (composite)
         argTableDesc.maxTextureBindCount = 6    // colour@0, engine depth@1, engine stencil@2, glass probe colour@3, depth@4, sharp water@5
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         // Separate table for the FXAA pass: MTL4 argument tables are live
@@ -1606,6 +1615,7 @@ actor Renderer {
         self.reprojectionDepthPass = ReprojectionDepth(device: device, layerRenderer: layerRenderer)
         self.loadSnapshot = LoadSnapshot(device: device, layerRenderer: layerRenderer,
                                          slots: maxBuffersInFlight + 1)
+        self.engineFoveation = EngineFoveation(device: device)
 
         do {
             mesh = try Self.buildMesh(device: device, mtlVertexDescriptor: mtlVertexDescriptor)
@@ -1923,26 +1933,43 @@ actor Renderer {
         }
         let logicalW = w
         let logicalH = h
-        // Scale the engine render below the logical size: the GL world pass
-        // cost is fill-bound and nearly linear in pixels — measured on the
-        // M5 device, full logical (capped 4096×3282, 13.4 Mpx) costs
-        // p50 13.3 ms/stereo pair (misses the 11.1 ms 90 Hz budget), while
-        // 2048² (4.2 Mpx) costs ~6 ms. 0.6× logical ≈ 6.8 Mpx lands at
-        // ~8 ms with p95 headroom. Preserves the drawable's aspect.
-        // MetalFX below upscales the result back to full logical.
-        // 0.75× (+56% pixels over 0.6×) projects to p50 ~10-11 ms by the
-        // same linear model — near the 11.1 ms 90 Hz budget; drop back to
-        // 0.7 if busy scenes judder. Now driven by the Graphics settings
-        // (Renderer.engineScale); read here so a change takes effect on the
-        // next immersive-space open.
-        let engineScale = Double(Renderer.engineScale)
-        let maxDim = 4096
-        var s = engineScale
-        if Double(max(w, h)) * s > Double(maxDim) {
-            s = Double(maxDim) / Double(max(w, h))
+        // Foveated (EngineFoveation, the default): the engine renders the
+        // compositor's whole logical screen through a rate map per eye, full
+        // density where the user looks, into targets the size of the maps'
+        // physical layout: about a third of the uniform render's pixels.
+        var layout: EngineFoveation.Layout?
+        if Renderer.foveatedEngine, let rateMap = drawable.rasterizationRateMaps.first {
+            layout = engineFoveation.configureFoveated(source: rateMap)
+            if layout == nil {
+                AppLog.render.log("[LambdaVision] foveated engine render unavailable (rate map layers \(rateMap.layerCount)) — rendering uniform")
+            }
         }
-        w = Int((Double(w) * s).rounded())
-        h = Int((Double(h) * s).rounded())
+        if layout == nil {
+            // Uniform: scale the engine render below the logical size. The GL
+            // world pass cost is fill-bound and nearly linear in pixels —
+            // measured on the M5 device, full logical (capped 4096×3282,
+            // 13.4 Mpx) costs p50 13.3 ms/stereo pair (misses the 11.1 ms
+            // 90 Hz budget), while 2048² (4.2 Mpx) costs ~6 ms. 0.6× logical
+            // ≈ 6.8 Mpx lands at ~8 ms with p95 headroom. Preserves the
+            // drawable's aspect. 0.75× (+56% pixels over 0.6×) projects to
+            // p50 ~10-11 ms by the same linear model — near the 11.1 ms 90 Hz
+            // budget; drop back to 0.7 if busy scenes judder. Driven by the
+            // Graphics settings (Renderer.engineScale); read here so a change
+            // takes effect on the next immersive-space open.
+            let engineScale = Double(Renderer.engineScale)
+            let maxDim = 4096
+            var s = engineScale
+            if Double(max(w, h)) * s > Double(maxDim) {
+                s = Double(maxDim) / Double(max(w, h))
+            }
+            w = Int((Double(w) * s).rounded())
+            h = Int((Double(h) * s).rounded())
+            layout = engineFoveation.configureUniform(size: MTLSize(width: w, height: h, depth: 1))
+        }
+        guard let layout else { fatalError("Unable to make the engine image's tables") }
+        // The targets: the texels each eye's slice holds.
+        w = layout.texture.width
+        h = layout.texture.height
 
         // ANGLE renders into this Swift-allocated MTLTexture each frame; the
         // display pass samples it. GL is the only pixel producer. 16-bit
@@ -2021,11 +2048,14 @@ actor Renderer {
         let snapshotTextures = loadSnapshot.ensureTextures(colorMap: tex, engineDepth: depthTex)
 
         #if !targetEnvironment(simulator)
-        commandQueueResidencySet.addAllocations([tex, depthTex] + snapshotTextures)
+        commandQueueResidencySet.addAllocations([tex, depthTex, layout.tables] + snapshotTextures)
         commandQueueResidencySet.commit()
         #endif
 
-        lambda_engine_set_render_size(Int32(w), Int32(h))
+        // The size the engine renders at: under a rate map its viewport is
+        // the map's screen, which Metal compresses into the targets.
+        lambda_engine_set_render_size(Int32(layout.screen.width), Int32(layout.screen.height))
+        AppLog.render.log("[LambdaVision] engine renders \(layout.screen.width)x\(layout.screen.height) into \(w)x\(h)\(layout.foveated ? " (foveated)" : "", privacy: .public)")
 
         // MetalFX spatial upscale back to full logical resolution. Its
         // edge-directed reconstruction doubles as edge smoothing — the
@@ -2041,7 +2071,7 @@ actor Renderer {
         // full drawable fights the compositor's own foveated upsampling.
         // Edge smoothing now happens inside the composite pass instead
         // (fragmentShaderFXAA / Renderer.compositeFXAA).
-        let useMetalFXChain = Renderer.useMetalFXChain
+        let useMetalFXChain = Renderer.useMetalFXChain && !layout.foveated
         if useMetalFXChain, logicalW > w, MTLFXSpatialScalerDescriptor.supportsMetal4FX(device),
            let compiler = try? device.makeCompiler(descriptor: MTL4CompilerDescriptor()) {
             let sd = MTLFXSpatialScalerDescriptor()
@@ -2881,8 +2911,8 @@ actor Renderer {
             // pinch targets the stock menu). hudBoxAspect is set per frame in
             // the eye loop below.
             Renderer.latestHeadTransform = frameDeviceAnchor?.originFromAnchorTransform
-            Renderer.renderTargetW = colorMap.width
-            Renderer.renderTargetH = colorMap.height
+            Renderer.renderTargetW = engineLayout?.screen.width ?? colorMap.width
+            Renderer.renderTargetH = engineLayout?.screen.height ?? colorMap.height
         }
         if let m = muzzleOffset {
             lambda_set_muzzle(m.x, m.y, m.z, 1)
@@ -2934,6 +2964,23 @@ actor Renderer {
             if fresh & 2 != 0 { FrameTimingStats.shared.add("gEngine1", Double(eyeMs[1])) }
         }
 
+        // Foveated engine render: follow the compositor's map (a cheap check
+        // per frame; the per-eye maps and tables are rebuilt only when it
+        // changed, and the replaced ones live until their frames complete).
+        do {
+            let change = engineFoveation.update(from: primary.rasterizationRateMaps.first,
+                                                frame: committedFrameIndex + 1,
+                                                completedFrame: endFrameEvent.signaledValue)
+            #if !targetEnvironment(simulator)
+            if !change.add.isEmpty || !change.remove.isEmpty {
+                if !change.add.isEmpty { commandQueueResidencySet.addAllocations(change.add) }
+                if !change.remove.isEmpty { commandQueueResidencySet.removeAllocations(change.remove) }
+                commandQueueResidencySet.commit()
+            }
+            #endif
+        }
+        let engineScreen = engineLayout?.screen ?? MTLSize(width: colorMap.width, height: colorMap.height, depth: 1)
+
         // Level load: while the engine is busy, keep drawing the snapshot of
         // its last frame instead of waiting on it (LoadSnapshot). Its frames
         // run without anyone waiting; the live view returns once the client
@@ -2979,7 +3026,8 @@ actor Renderer {
         if planarOn, let colorMap {
             if planarWater == nil { planarWater = PlanarWater(device: device) }
             if let planarWater {
-                let fresh = planarWater.ensureTargets(colorMap: colorMap, divisor: Renderer.planarWaterDivisor)
+                let base = engineLayout?.mirrorBase ?? MTLSize(width: colorMap.width, height: colorMap.height, depth: 1)
+                let fresh = planarWater.ensureTargets(base: base, divisor: Renderer.planarWaterDivisor)
                 #if !targetEnvironment(simulator)
                 if !fresh.isEmpty {
                     commandQueueResidencySet.addAllocations(fresh)
@@ -3013,6 +3061,14 @@ actor Renderer {
             let off: Float = eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             lambda_gl_worker_set_depth_texture(Unmanaged.passUnretained(engineDepthLayerViews[eye]).toOpaque())
+            // Foveated: the eye's own one-layer map (EngineFoveation keeps it
+            // alive while this frame is in flight), and the targets' size.
+            if let layout = engineLayout, let maps = layout.maps {
+                lambda_gl_worker_set_rate_map(Unmanaged.passUnretained(maps.eye[eye]).toOpaque(),
+                                              Int32(layout.texture.width), Int32(layout.texture.height))
+            } else {
+                lambda_gl_worker_set_rate_map(nil, 0, 0)
+            }
             var tang = primary.frustumTangents(viewIndex: eye)  // (left, right, top, bottom)
 
             // 2D overlay (HUD/console/menu) placement: a box of fixed
@@ -3028,7 +3084,7 @@ actor Renderer {
                 let tL = tang.x, tR = tang.y, tT = tang.z, tB = tang.w
                 let sumH = tL + tR, sumV = tT + tB
                 let conv = -eyeApple_x / hudDistance             // tan-space, toward the nose
-                let fullW = Float(colorMap.width), fullH = Float(colorMap.height)
+                let fullW = Float(engineScreen.width), fullH = Float(engineScreen.height)
                 // Same fraction of both axes keeps ortho pixels square.
                 let frac = 2.0 * hudHalfTan / sumH
                 let x0 = ((tL + conv) / sumH - frac / 2.0) * fullW
@@ -3036,6 +3092,8 @@ actor Renderer {
                 lambda_gl_worker_set_2d_viewport(x0, y0, fullW * frac, fullH * frac)
                 // The box's tan height/width ratio, for the gaze→menu mapper.
                 if eye == 0 { Renderer.hudBoxAspect = sumV / sumH }
+                Renderer.hudBoxRects[eye] = SIMD4(x0 / fullW, 1 - (y0 / fullH + frac),
+                                                  x0 / fullW + frac, 1 - y0 / fullH)
             }
             // The glass probe's face for this frame rides on the second eye.
             if eye == 1, Renderer.probeReflections, let glassProbe {
@@ -3052,7 +3110,7 @@ actor Renderer {
                                         lambda_gl_worker_render_eye_full(
                                             Int32(eye), off,
                                             fp, zNear, zFar, afp, ofp,
-                                            eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                                            eyePtr, Int32(engineScreen.width), Int32(engineScreen.height),
                                             0.1, 0.1, 0.1)
                                     }
                                 }
@@ -3062,7 +3120,7 @@ actor Renderer {
                         return lambda_gl_worker_render_eye_tangents(
                             Int32(eye), off,
                             fp, zNear, zFar,
-                            eyePtr, Int32(colorMap.width), Int32(colorMap.height),
+                            eyePtr, Int32(engineScreen.width), Int32(engineScreen.height),
                             0.1, 0.1, 0.1)
                     }
                 }
@@ -3086,7 +3144,8 @@ actor Renderer {
                     rtWater = RTWater(device: device, library: library)
                 }
                 if let rtWater {
-                    var fresh = rtWater.ensureTarget(colorMap: colorMap, divisor: Renderer.rtWaterDivisor)
+                    let base = engineLayout?.mirrorBase ?? MTLSize(width: colorMap.width, height: colorMap.height, depth: 1)
+                    var fresh = rtWater.ensureTarget(base: base, divisor: Renderer.rtWaterDivisor)
                     let change = rtWater.prepare(frame: committedFrameIndex + 1, completedFrame: endFrameEvent.signaledValue)
                     fresh += change.add
                     #if !targetEnvironment(simulator)
@@ -3392,7 +3451,7 @@ actor Renderer {
             captureSnapshotThisFrame = false
             // This command buffer signals committedFrameIndex + 1 (renderFrame).
             loadSnapshot.encodeCapture(commandBuffer: commandBuffer, colorMap: colorMap,
-                                       engineDepth: engineDepth, frame: committedFrameIndex + 1)
+                                       engineDepth: engineDepth, layout: engineLayout, frame: committedFrameIndex + 1)
         }
         let snapshotAlpha = loadSnapshot.alpha(now: CACurrentMediaTime())
 
@@ -3449,9 +3508,10 @@ actor Renderer {
                 let div = Float(Renderer.rtWaterDivisor)
                 ssprPlanes = (SIMD4(0, 0, 0, div), SIMD4(0, 0, 0, div))
                 var traced = false
-                if RTWater.hasRows(glassEyes, kinds: sharpNow), encodeUpscale, let rtWater {
+                if RTWater.hasRows(glassEyes, kinds: sharpNow), encodeUpscale, let rtWater, let layout = engineLayout {
                     let timer = timed ? gpuTimer : nil
                     traced = rtWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineStencil: engineStencil!,
+                                            engineMap: layout.tables,
                                             paramsAddress: displayParamsBuffer.gpuAddress
                                                 + UInt64(Self.displayParamsStride * uniformBufferIndex),
                                             frame: committedFrameIndex + 1, mark: { timer?.mark($0, $1) })
@@ -3462,8 +3522,8 @@ actor Renderer {
                 if sharpWater == nil, let library = device.makeDefaultLibrary() {
                     sharpWater = SharpWater(device: device, library: library)
                 }
-                if let sharpWater {
-                    let fresh = sharpWater.ensureTargets(colorMap: colorMap, divisor: Renderer.sharpWaterDivisor)
+                if let sharpWater, let layout = engineLayout {
+                    let fresh = sharpWater.ensureTargets(base: layout.mirrorBase, divisor: Renderer.sharpWaterDivisor)
                     #if !targetEnvironment(simulator)
                     if !fresh.isEmpty {
                         commandQueueResidencySet.addAllocations(fresh)
@@ -3473,7 +3533,7 @@ actor Renderer {
                     if encodeUpscale {
                         let timer = timed ? gpuTimer : nil
                         sharpWater.encode(commandBuffer: commandBuffer, colorMap: colorMap, engineDepth: engineDepth,
-                                          engineStencil: engineStencil!,
+                                          engineStencil: engineStencil!, engineMap: layout.tables,
                                           paramsAddress: displayParamsBuffer.gpuAddress
                                               + UInt64(Self.displayParamsStride * uniformBufferIndex),
                                           mark: { timer?.mark($0, $1) })
@@ -3548,6 +3608,13 @@ actor Renderer {
             params.decodeGamma = Renderer.displayDecodeGamma
             params.hdrTest = Float(Renderer.hdrTestMode)
             params.aspect = vp.map { Float($0.width / max($0.height, 1)) } ?? 1
+            // The engine image's layout, for every read of it (here and in
+            // the mirror kernels, which share these params).
+            if let layout = engineLayout {
+                params.engineImage = layout.engineImage
+                params.mirrorBase = layout.mirrorBaseParam
+                self.fragmentArgumentTable.setAddress(layout.tables.gpuAddress, index: BufferIndex.engineMap.rawValue)
+            }
             if perPixelDepth {
                 self.fragmentArgumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
                 let n = Renderer.engineZNear / 39.37, f = Renderer.engineZFar / 39.37
@@ -3890,6 +3957,7 @@ actor Renderer {
         #if !LAMBDA_NO_DEBUG_SERVER
         if encodeUpscale {
             FrameCapture.shared.encode(commandBuffer: commandBuffer, drawable: drawable, colorMap: colorMap,
+                                       engineLayout: engineLayout,
                                        residencySet: residencySets[uniformBufferIndex],
                                        completion: endFrameEvent, value: committedFrameIndex + 1)
         }

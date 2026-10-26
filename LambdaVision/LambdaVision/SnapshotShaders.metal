@@ -56,13 +56,13 @@ static inline float2 snapshotUV(float2 screen, uint flipV)
     return float2(screen.x, flipV ? 1.0 - screen.y : screen.y);
 }
 
-// The captured depth under a screen point, as GL window depth (0 near, 1 far).
-static inline float snapshotDepth(depth2d_array<float> depth, float2 screen, uint flipV, ushort eye)
+// The captured depth under a screen point, as GL window depth (0 near, 1 far),
+// read through the engine image's layout when it was captured (foveated or
+// not: ShaderTypes.h engineTexel).
+static inline float snapshotDepth(depth2d_array<float> depth, float2 screen, uint flipV, ushort eye,
+                                  float4 image, constant float *engineMap)
 {
-    const uint2 size = uint2(depth.get_width(), depth.get_height());
-    const float2 uv = snapshotUV(screen, flipV);
-    const uint2 texel = min(uint2(uv * float2(size)), size - 1);
-    return depth.read(texel, eye);
+    return depth.read(engineTexel(snapshotUV(screen, flipV), eye, image, engineMap), eye);
 }
 
 // Where a captured screen point at a given depth was, in world space.
@@ -76,7 +76,8 @@ static inline float3 snapshotWorld(constant SnapshotUniforms &u, ushort eye, flo
 vertex SnapshotOut snapshotMeshVertex(uint vid [[vertex_id]],
                                       ushort amp_id [[amplification_id]],
                                       constant SnapshotUniforms &u [[buffer(BufferIndexUniforms)]],
-                                      depth2d_array<float> depth [[texture(1)]])
+                                      depth2d_array<float> depth [[texture(1)]],
+                                      constant float *engineMap [[buffer(BufferIndexEngineMap)]])
 {
     const ushort eye = ushort(u.eyeBase + amp_id);
     const uint cellIndex = vid / 6, corner = vid % 6;
@@ -88,7 +89,7 @@ vertex SnapshotOut snapshotMeshVertex(uint vid [[vertex_id]],
     float nearest = INFINITY, farthest = 0.0, farthestDepth = 0.0, mineDepth = 0.0;
     for (uint k = 0; k < 3; k++) {
         const float2 s = snapshotScreen(cell, first + k, u.grid);
-        const float z = snapshotDepth(depth, s, u.flipV, eye);
+        const float z = snapshotDepth(depth, s, u.flipV, eye, u.engineImage, engineMap);
         const float d = max(distance(snapshotWorld(u, eye, s, z), u.captureEye[eye].xyz), u.minDistance);
         nearest = min(nearest, d);
         if (d > farthest) { farthest = d; farthestDepth = z; }
@@ -136,12 +137,13 @@ vertex SnapshotOut snapshotBackdropVertex(uint vid [[vertex_id]],
 
 fragment float4 snapshotFragment(SnapshotOut in [[stage_in]],
                                  constant SnapshotUniforms &u [[buffer(BufferIndexUniforms)]],
-                                 texture2d_array<half> color [[texture(TextureIndexColor)]])
+                                 texture2d_array<half> color [[texture(TextureIndexColor)]],
+                                 constant float *engineMap [[buffer(BufferIndexEngineMap)]])
 {
     if (in.torn > 0.5)
         discard_fragment();
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
-    const half3 rgb = color.sample(s, in.uv, in.eye).rgb;
+    const half3 rgb = color.sample(s, engineTexUV(in.uv, in.eye, u.engineImage, engineMap), in.eye).rgb;
     const float fade = in.outside > 0.0 ? saturate(1.0 - in.outside / max(u.overscan, 1e-3)) * 0.5 : 1.0;
     return float4(displayLinearize(float3(rgb), u.decodeGamma) * fade, u.alpha);
 }

@@ -152,6 +152,7 @@ nonisolated final class FrameCapture: @unchecked Sendable {
     /// / `value` is the endFrameEvent value this command buffer's frame
     /// signals; `residencySet` the frame's (already committed) set.
     func encode(commandBuffer: MTL4CommandBuffer, drawable: LayerRenderer.Drawable, colorMap: MTLTexture?,
+                engineLayout: EngineFoveation.Layout? = nil,
                 residencySet: MTLResidencySet, completion: MTLSharedEvent, value: UInt64) {
         let (pending, retired) = state.withLockUnchecked { s -> (Pending?, [MTLBuffer]) in
             s.lastFrameAt = CACurrentMediaTime()
@@ -170,7 +171,7 @@ nonisolated final class FrameCapture: @unchecked Sendable {
         guard let pending else { return }
 
         let plan: Plan
-        switch Self.plan(pending.request, drawable: drawable, colorMap: colorMap) {
+        switch Self.plan(pending.request, drawable: drawable, colorMap: colorMap, engineLayout: engineLayout) {
         case .success(let p): plan = p
         case .failure(let failure): pending.resume(.failure(failure)); return
         }
@@ -234,10 +235,13 @@ nonisolated final class FrameCapture: @unchecked Sendable {
         let width: Int, height: Int
         let offset: Int
         let bytesPerRow: Int
-        // Composited only: the foveation map to unwarp through.
+        // The foveation map to unwarp through.
         let rateMap: MTLRasterizationRateMap?
         let rateLayer: Int
         let logicalWidth: Int, logicalHeight: Int
+        // The engine source's map runs bottom-up (EngineFoveation), like its
+        // rows: the unwarp mirrors it to the decoded, top-down plane.
+        var bottomUp = false
     }
 
     private struct Plan: @unchecked Sendable {
@@ -251,7 +255,7 @@ nonisolated final class FrameCapture: @unchecked Sendable {
     }
 
     private static func plan(_ request: Request, drawable: LayerRenderer.Drawable,
-                             colorMap: MTLTexture?) -> Result<Plan, Failure> {
+                             colorMap: MTLTexture?, engineLayout: EngineFoveation.Layout?) -> Result<Plan, Failure> {
         // The eyes ordered by where they sit (view order isn't guaranteed
         // to be left, right): leftmost first.
         let order = drawable.views.indices.sorted {
@@ -276,10 +280,16 @@ nonisolated final class FrameCapture: @unchecked Sendable {
                 // colorMap slice = the eye index the engine rendered (view index).
                 let slice = min(view, colorMap.arrayLength - 1)
                 let bpr = colorMap.width * layout.bytesPerPixel
-                eyes.append(EyeCopy(texture: colorMap, slice: slice, originX: 0, originY: 0,
-                                    width: colorMap.width, height: colorMap.height, offset: offset, bytesPerRow: bpr,
-                                    rateMap: nil, rateLayer: 0,
-                                    logicalWidth: colorMap.width, logicalHeight: colorMap.height))
+                // Foveated: unwarp through the eye's own map to the engine's
+                // screen (or keep the physical layout, unwarp=false).
+                let eyeMap = request.unwarp ? engineLayout?.maps?.eye[slice] : nil
+                let logical = eyeMap.flatMap { _ in engineLayout?.screen } ?? MTLSize(width: colorMap.width, height: colorMap.height, depth: 1)
+                var copy = EyeCopy(texture: colorMap, slice: slice, originX: 0, originY: 0,
+                                   width: colorMap.width, height: colorMap.height, offset: offset, bytesPerRow: bpr,
+                                   rateMap: eyeMap, rateLayer: 0,
+                                   logicalWidth: logical.width, logicalHeight: logical.height)
+                copy.bottomUp = true
+                eyes.append(copy)
                 offset += bpr * colorMap.height
             }
             return .success(Plan(request: request, layout: layout, flip: true, eyes: eyes, totalBytes: offset,
@@ -348,7 +358,14 @@ nonisolated final class FrameCapture: @unchecked Sendable {
                 // down: the foveal region is denser than the output.
                 let inter = (min(eye.logicalWidth, target.width * 2), min(eye.logicalHeight, target.height * 2))
                 let layer = eye.rateLayer
+                let bottomUp = eye.bottomUp
+                let screenH = Float(eye.logicalHeight), texH = Float(eye.height)
                 let map = FrameImage.AxisMap.mapped(output: inter, screen: (eye.logicalWidth, eye.logicalHeight)) { x, y in
+                    if bottomUp {
+                        // the plane was flipped to top-down when decoded
+                        let p = rateMap.physicalCoordinates(screenCoordinates: MTLCoordinate2DMake(x, screenH - y), layer: layer)
+                        return (p.x, texH - p.y)
+                    }
                     let p = rateMap.physicalCoordinates(screenCoordinates: MTLCoordinate2DMake(x, y), layer: layer)
                     return (p.x, p.y)
                 }

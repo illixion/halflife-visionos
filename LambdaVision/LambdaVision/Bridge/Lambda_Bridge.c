@@ -2275,6 +2275,24 @@ int lambda_vid_render_height = 2048;
 // already-current size a frame early/late — benign.
 static volatile int g_render_size_dirty;
 
+// The 2D panel keeps one angular size whatever the render size (render scale,
+// foveated or not): R_Set2DMode maps the whole render target onto the panel,
+// so a fixed scale would shrink the text and HUD as the target grows (5087
+// wide foveated against 3815 at the uniform 0.75 they were tuned at, hud_scale
+// 4 and con_fontscale 3). A hud_scale of 320 or more is the HUD's virtual
+// width (CL_GetScreenInfo), which then holds at any size by itself; the
+// console's font scale is set per size, and the console reloads its fonts
+// when it changes (Con_RunConsole).
+#define LAMBDA_2D_REFERENCE_WIDTH 3815.0f
+#define LAMBDA_2D_HUD_WIDTH "954"   // 3815 / 4
+static void lambda_2d_scale_apply(int width) {
+    extern void Cbuf_AddText( const char *text );
+    char cmd[48];
+    snprintf(cmd, sizeof cmd, "con_fontscale %.3f\n",
+             3.0f * (float)width / LAMBDA_2D_REFERENCE_WIDTH);
+    Cbuf_AddText(cmd);
+}
+
 void lambda_engine_set_render_size(int width, int height) {
     if (width > 0)  lambda_vid_render_width  = width;
     if (height > 0) lambda_vid_render_height = height;
@@ -2291,9 +2309,9 @@ static void lambda_render_size_apply(void) {
     R_ChangeDisplaySettings(lambda_vid_render_width, lambda_vid_render_height, 0);
     // Tell the client dll (HUD) about the new resolution so its text/sprite
     // scaling recomputes — otherwise HUD/credits keep the old scale factors
-    // and render microscopic at low render scale (the console, drawn engine-
-    // side from refState, was already correct).
+    // and render microscopic at low render scale.
     SCR_VidInit();
+    lambda_2d_scale_apply(lambda_vid_render_width);
 }
 
 // ---- Game library contracts (see Lambda_Bridge.h) ----
@@ -2451,12 +2469,12 @@ int lambda_engine_init(const char *writable_dir,
         // GL_EXT_texture_filter_anisotropic and Apple GPUs do 16x nearly
         // free — HL's oblique floors/walls smear badly without it.
         Cbuf_AddText("gl_anisotropy 16\n");
-        // The 2D virtual screen is the eye render target (~3000 px wide);
-        // HL HUD art and engine fonts draw at pixel sizes designed for
-        // 640-1024-wide screens and are microscopic without scaling.
-        // hud_scale 4 gives the HUD a ~768 px virtual screen.
-        Cbuf_AddText("hud_scale 4\n");
-        Cbuf_AddText("con_fontscale 3\n");
+        // The 2D virtual screen is the eye render target (3815-5087 px
+        // wide); HL HUD art and engine fonts draw at pixel sizes designed for
+        // 640-1024-wide screens and are microscopic without scaling. The
+        // scales follow the render size (lambda_2d_scale_apply).
+        Cbuf_AddText("hud_scale " LAMBDA_2D_HUD_WIDTH "\n");
+        lambda_2d_scale_apply(lambda_vid_render_width);
         // net_graph draws in raw virtual-screen pixels; at ~3000 px wide
         // (further minified into the angular 2D box) the 192x64 default is
         // an unreadable postage stamp.
@@ -3417,6 +3435,25 @@ static volatile int g_frame_depth_ok = 0;   // the last requested depth target t
 
 int lambda_gl_depth_target_ok(void) { return g_frame_depth_ok; }
 
+// Foveated render (EngineFoveation.swift): this eye's one-layer
+// id<MTLRasterizationRateMap>, borrowed (the app keeps it alive until the
+// eye's GPU work is done), and the size of the target textures. With a map,
+// the viewport is the map's screen size while the attachments hold its
+// physical texels; ANGLE (VisionPort/angle-metal-rate-map.patch) binds the
+// map to the framebuffer's render passes, and Metal compresses the one into
+// the other.
+static void     *g_frame_rate_map = NULL;
+static int       g_frame_phys_w = 0, g_frame_phys_h = 0;
+static volatile int g_frame_rate_map_ok = 0;  // the last eye rendered through its map
+
+int lambda_gl_rate_map_ok(void) { return g_frame_rate_map_ok; }
+
+// ANGLE's entry point (VisionPort/angle-metal-rate-map.patch): the framebuffer
+// object rasterizes through this map from its next render pass until it is
+// deleted or given another (NULL: none). 1 when it took, 0 when the device
+// can't, negative for no context or no such framebuffer.
+extern int ANGLE_SetFramebufferRasterizationRateMap(unsigned int framebuffer, void *rate_map);
+
 // GPU-side frame fence (EGL_ANGLE_metal_shared_event_sync). When the app
 // supplies an MTLSharedEvent + value, end_frame encodes a signal of that
 // value on ANGLE's internal command queue instead of blocking the CPU in
@@ -3484,30 +3521,35 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                         : 0;
     }
 
+    // The attachments' size: the textures' physical texels under a rate map,
+    // where width × height is its screen (the viewport); the same otherwise.
+    const int att_w = g_frame_rate_map ? g_frame_phys_w : width;
+    const int att_h = g_frame_rate_map ? g_frame_phys_h : height;
+
     // Multisampled color + depth-stencil renderbuffers, kept across frames
     // while the size is stable (colorMap size is fixed after first frame).
     // xash's BSP/studio rendering relies on z-test and skybox/decals on
     // stencil; without depth every fragment passes and far geometry
     // overwrites near geometry.
     if (g_frame_depth == 0
-        || g_frame_depth_w != width
-        || g_frame_depth_h != height) {
+        || g_frame_depth_w != att_w
+        || g_frame_depth_h != att_h) {
         if (g_frame_depth)      { glDeleteRenderbuffers(1, &g_frame_depth);      g_frame_depth = 0; }
         if (g_frame_msaa_color) { glDeleteRenderbuffers(1, &g_frame_msaa_color); g_frame_msaa_color = 0; }
         glGenRenderbuffers(1, &g_frame_depth);
         glBindRenderbuffer(GL_RENDERBUFFER, g_frame_depth);
         if (g_frame_samples > 1) {
             glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_frame_samples,
-                                             GL_DEPTH24_STENCIL8, width, height);
+                                             GL_DEPTH24_STENCIL8, att_w, att_h);
             glGenRenderbuffers(1, &g_frame_msaa_color);
             glBindRenderbuffer(GL_RENDERBUFFER, g_frame_msaa_color);
             glRenderbufferStorageMultisample(GL_RENDERBUFFER, g_frame_samples,
-                                             GL_RGBA8, width, height);
+                                             GL_RGBA8, att_w, att_h);
         } else {
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, att_w, att_h);
         }
-        g_frame_depth_w = width;
-        g_frame_depth_h = height;
+        g_frame_depth_w = att_w;
+        g_frame_depth_h = att_h;
     }
 
     GLuint depth_rb = g_frame_depth;
@@ -3552,6 +3594,13 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
         lambda_gl_release_depth_target();
         return -5;
     }
+
+    // Foveated: the framebuffer rasterizes through the eye's map from the
+    // first draw (the clear below is a load action, which covers the whole
+    // attachment either way). The FBO is rebuilt every eye, so the map never
+    // outlives it.
+    g_frame_rate_map_ok = g_frame_rate_map
+        && ANGLE_SetFramebufferRasterizationRateMap(g_frame_fbo, g_frame_rate_map) == 1;
 
     g_frame_w = width;
     g_frame_h = height;
@@ -3761,6 +3810,9 @@ static int        g_w_have_2d_rect = 0;
 static float      g_w_2d_rect[4] = {0};
 // Head translation since baseline (baseline-forward frame, xash units).
 static float      g_w_view_offset[3] = {0};
+// The upcoming render's rate map and target size (g_frame_rate_map), or NULL.
+static void      *g_w_rate_map = NULL;
+static int        g_w_phys_w = 0, g_w_phys_h = 0;
 
 // --- Frame timing instrumentation --------------------------------------
 // Always-on, cheap (~one sorted copy every FT_WINDOW frames). Answers
@@ -4564,6 +4616,8 @@ static int worker_engine_frame(void) {
     lambda_view_yaw_apply();
     lambda_aim_offset_apply();
     g_frame_depth_mtl = g_w_depth;
+    g_frame_rate_map = g_w_rate_map;
+    g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
     int br = lambda_gl_begin_frame_into_mtl_texture(
         g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
     int er = 0;
@@ -4714,6 +4768,8 @@ static void *gl_worker_main(void *arg) {
             // renderer (no sim tick). cl_stereo_eye_offset shifts the camera
             // along view-right inside V_RenderView.
             g_frame_depth_mtl = g_w_depth;
+            g_frame_rate_map = g_w_rate_map;
+            g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
@@ -4938,6 +4994,14 @@ int lambda_gl_worker_render_eye_full(int eye_index, float eye_offset,
 void lambda_gl_worker_set_depth_texture(void *mtl_depth_view) {
     pthread_mutex_lock(&g_w_api_mtx);
     g_w_depth = mtl_depth_view;
+    pthread_mutex_unlock(&g_w_api_mtx);
+}
+
+void lambda_gl_worker_set_rate_map(void *mtl_rate_map, int physical_width, int physical_height) {
+    pthread_mutex_lock(&g_w_api_mtx);
+    g_w_rate_map = mtl_rate_map;
+    g_w_phys_w = physical_width;
+    g_w_phys_h = physical_height;
     pthread_mutex_unlock(&g_w_api_mtx);
 }
 

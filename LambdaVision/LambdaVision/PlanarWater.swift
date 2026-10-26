@@ -33,11 +33,11 @@ final class PlanarWater {
         self.device = device
     }
 
-    /// The target for this colour map size (divided by divisor), made on
-    /// first use or when it changes. Returns the new allocations for the
-    /// residency set.
-    func ensureTargets(colorMap: MTLTexture, divisor: Int) -> [MTLAllocation] {
-        let w = (colorMap.width + divisor - 1) / divisor, h = (colorMap.height + divisor - 1) / divisor
+    /// The target for the mirror base (EngineFoveation.Layout) divided by
+    /// divisor, made on first use or when it changes. Returns the new
+    /// allocations for the residency set.
+    func ensureTargets(base: MTLSize, divisor: Int) -> [MTLAllocation] {
+        let w = (base.width + divisor - 1) / divisor, h = (base.height + divisor - 1) / divisor
         if color != nil, size.w == w, size.h == h { return [] }
         func array(_ format: MTLPixelFormat) -> MTLTexture? {
             let d = MTLTextureDescriptor()

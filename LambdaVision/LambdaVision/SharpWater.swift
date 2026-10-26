@@ -43,17 +43,18 @@ final class SharpWater {
         self.project = project
         self.resolve = resolve
         let at = MTL4ArgumentTableDescriptor()
-        at.maxBufferBindCount = 3        // keys @ 0, DisplayParams @ BufferIndexUniforms
+        at.maxBufferBindCount = 12       // keys @ 0, DisplayParams @ BufferIndexUniforms, engine tables @ 11
         at.maxTextureBindCount = 4       // colorMap @ 0, engine depth @ 1, mirror @ 2, engine stencil @ 3
         guard let table = try? device.makeArgumentTable(descriptor: at) else { return nil }
         argumentTable = table
     }
 
-    /// The target and key buffer for this colour map size (divided by
-    /// divisor, as DisplayParams.sspr.w tells the shaders), made on first use
-    /// or when it changes. Returns the new allocations for the residency set.
-    func ensureTargets(colorMap: MTLTexture, divisor: Int) -> [MTLAllocation] {
-        let w = (colorMap.width + divisor - 1) / divisor, h = (colorMap.height + divisor - 1) / divisor
+    /// The target and key buffer for the mirror base (EngineFoveation.Layout,
+    /// DisplayParams.mirrorBase) divided by divisor, as DisplayParams.sspr.w
+    /// tells the shaders, made on first use or when it changes. Returns the
+    /// new allocations for the residency set.
+    func ensureTargets(base: MTLSize, divisor: Int) -> [MTLAllocation] {
+        let w = (base.width + divisor - 1) / divisor, h = (base.height + divisor - 1) / divisor
         if color != nil, size.w == w, size.h == h { return [] }
         let d = MTLTextureDescriptor()
         d.textureType = .type2DArray
@@ -77,7 +78,7 @@ final class SharpWater {
     /// mark: GPU timestamps after the fill, the projection and the resolve
     /// (GPUPassTimer gMirrorFill / gMirrorProject / gMirror).
     func encode(commandBuffer: MTL4CommandBuffer, colorMap: MTLTexture, engineDepth: MTLTexture,
-                engineStencil: MTLTexture, paramsAddress: UInt64,
+                engineStencil: MTLTexture, engineMap: MTLBuffer, paramsAddress: UInt64,
                 mark: (GPUPassTimer.Mark, MTL4ComputeCommandEncoder) -> Void) {
         guard let color, let keys, let keyCount4, let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.label = "SharpWater"
@@ -87,6 +88,7 @@ final class SharpWater {
         argumentTable.setAddress(keys.gpuAddress, index: 0)
         argumentTable.setAddress(keyCount4.gpuAddress, index: 1)
         argumentTable.setAddress(paramsAddress, index: BufferIndex.uniforms.rawValue)
+        argumentTable.setAddress(engineMap.gpuAddress, index: BufferIndex.engineMap.rawValue)
         argumentTable.setTexture(colorMap.gpuResourceID, index: 0)
         argumentTable.setTexture(engineDepth.gpuResourceID, index: 1)
         argumentTable.setTexture(color.gpuResourceID, index: 2)

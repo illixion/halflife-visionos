@@ -28,6 +28,9 @@ typedef NS_ENUM(EnumBackingType, BufferIndex)
     BufferIndexUniforms       = 2,
     BufferIndexViewProjection = 3,
     BufferIndexBones          = 4,
+    // The engine image's per-eye layout tables (EngineFoveation, Shaders.metal
+    // engineTexelPos): after the ray-traced mirror's ten scene buffers.
+    BufferIndexEngineMap      = 11,
 };
 
 typedef NS_ENUM(EnumBackingType, VertexAttribute)
@@ -96,6 +99,9 @@ typedef struct
     float           overscan;       // the backdrop reaches this far past the captured frame (fraction of it), edge texels smeared and darkened
     float           decodeGamma;    // displayLinearize exponent (0 = write the engine's values as they are)
     float           pad[2];
+    // = DisplayParams.engineImage when the snapshot was taken (its tables are
+    // copied with it)
+    simd_float4     engineImage;
 } SnapshotUniforms;
 
 // Constant-buffer slot spacing for the per-submesh WeaponUniforms array, and
@@ -208,6 +214,18 @@ typedef struct
     // longest ray (xash units), w = the rows traced, bit 0 glass, bit 1 water
     // (0: no trace this frame).
     simd_float4 rtWater;
+    // The engine image (EngineFoveation): x, y = its screen, the size the
+    // engine renders at (logical pixels; the shaders' bottom-up uv times
+    // this); z, w = the texels each slice holds. Foveated, the tables at
+    // BufferIndexEngineMap spread the texels over the screen through each
+    // eye's rate map; uniform, the sizes match and the tables are the
+    // identity.
+    simd_float4 engineImage;
+    // x, y = the size the mirror targets' divisors divide (sspr.w): the
+    // uniform engine image's, which a foveated one keeps at 0.75 × its
+    // screen, so the mirrors keep their resolution and the screen-space
+    // mirror's 10-bit texel keys still fit; z, w unused.
+    simd_float4 mirrorBase;
 } DisplayParams;
 
 // The ray-traced water mirror's scene (RTWaterScene.swift, Shaders.metal
@@ -255,6 +273,70 @@ typedef struct
 static inline float3 displayLinearize(float3 c, float gamma)
 {
     return gamma > 0.0 ? metal::pow(metal::saturate(c), gamma) : c;
+}
+
+// The engine image's layout (EngineFoveation.swift). Shaders address it by
+// the eye's screen uv, bottom-up like the image (uv.y = 0 is the bottom row).
+// Foveated, its texels spread over the screen through the eye's rate map,
+// which these tables hold per eye and axis: a rate map is separable and its
+// breakpoints fall on whole pixels, so linear interpolation between the
+// tables' integer entries is exact. Per eye, in order: screen x → texel x
+// (W + 1 entries), screen y → texel y (H + 1), texel x → screen x (TW + 1),
+// texel y → screen y (TH + 1), where W × H = image.xy (engineImage) and
+// TW × TH = image.zw. Uniform, every table is the identity.
+static inline float engineTable(constant float *t, uint n, float x)
+{
+    x = metal::clamp(x, 0.0f, float(n));
+    const uint i = metal::min(uint(x), n - 1);
+    return metal::mix(t[i], t[i + 1], x - float(i));
+}
+
+static inline constant float *engineTables(constant float *map, ushort eye, float4 image)
+{
+    const uint4 n = uint4(image);
+    return map + eye * (n.x + n.y + n.z + n.w + 4);
+}
+
+// Where a screen uv lands in the engine image, in texels (centres at .5).
+static inline float2 engineTexelPos(float2 uv, ushort eye, float4 image, constant float *map)
+{
+    const uint4 n = uint4(image);
+    constant float *t = engineTables(map, eye, image);
+    const float2 s = uv * image.xy;
+    return float2(engineTable(t, n.x, s.x), engineTable(t + n.x + 1, n.y, s.y));
+}
+
+// The texture coordinate to sample a screen uv at.
+static inline float2 engineTexUV(float2 uv, ushort eye, float4 image, constant float *map)
+{
+    return engineTexelPos(uv, eye, image, map) / image.zw;
+}
+
+// The texel a screen uv falls in, for read().
+static inline uint2 engineTexel(float2 uv, ushort eye, float4 image, constant float *map)
+{
+    return metal::min(uint2(engineTexelPos(uv, eye, image, map)), uint2(image.zw) - 1);
+}
+
+// The screen uv of a position in the engine image, in texels.
+static inline float2 engineScreenUV(float2 texelPos, ushort eye, float4 image, constant float *map)
+{
+    const uint4 n = uint4(image);
+    constant float *t = engineTables(map, eye, image) + n.x + n.y + 2;
+    return float2(engineTable(t, n.z, texelPos.x), engineTable(t + n.z + 1, n.w, texelPos.y)) / image.xy;
+}
+
+// Screen pixels one engine texel spans at a screen uv, per axis: 1 in the
+// fovea and everywhere in a uniform image, more where the periphery is
+// compressed.
+static inline float2 engineTexelSpan(float2 uv, ushort eye, float4 image, constant float *map)
+{
+    const uint4 n = uint4(image);
+    constant float *t = engineTables(map, eye, image);
+    const uint2 i = metal::min(uint2(metal::max(uv * image.xy, 0.0f)), n.xy - 1);
+    const float dx = t[i.x + 1] - t[i.x];
+    const float dy = t[n.x + 1 + i.y + 1] - t[n.x + 1 + i.y];
+    return 1.0f / metal::max(float2(dx, dy), float2(1e-3f));
 }
 #endif
 

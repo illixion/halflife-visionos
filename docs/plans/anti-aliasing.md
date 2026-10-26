@@ -1,6 +1,8 @@
 # Plan — Anti-aliasing inside the headset's GPU budget
 
-> **Status (2026-10-17): Phase 0 measured on the headset; nothing built.**
+> **Status (2026-10-17): Phase 0 measured; Phase 2 (foveated engine render)
+> built and checked on the headset (2D panel fixes too, 2026-10-26), thermal
+> baseline still to measure.**
 > Written after the glass mirror's 4× MSAA landed (`db2f854`) and the owner
 > asked whether MSAA's reputation for cost means a more modern technique would
 > suit the headset better, given its thermal limits, and what carries over to
@@ -209,6 +211,74 @@ The compositor already tells us where pixels matter; the engine ignores it.
   (1.0× logical instead of 0.75×), no periphery shimmer, and MSAA cost falls
   with the pixels. **Gate:** same-spot A/B of `gEngine` + `gComposite`, and the
   thermal state after 10 minutes at the window.
+
+#### Built (2026-10-17)
+
+- ANGLE: `VisionPort/angle-metal-rate-map.patch` (`1208a73`), exporting
+  `ANGLE_SetFramebufferRasterizationRateMap`. The bridge binds each eye's map
+  to the frame's framebuffer, which it rebuilds every eye.
+- `EngineFoveation.swift` builds the per-eye maps from the compositor's
+  (sampling its mapping per screen pixel, the larger step of each pixel's
+  neighbours as quality, the vertical axis mirrored for ANGLE's bottom-up
+  image) and rebuilds them when the compositor's map changes. The copies come
+  out a little denser than the source (Metal rounds a sample up, never down).
+- No `rasterization_rate_map_decoder`: every pass that reads the engine image
+  goes through per-eye lookup tables (screen x/y → texel and back,
+  `ShaderTypes.h` `engineTexelPos`). Interpolating between entries is exact,
+  the fovea reads 1:1, and the uniform image (setting off) is identity tables
+  through the same code.
+- The mirrors keep their old size: their divisors divide 0.75 × the logical
+  screen (`mirrorBase`), not the engine's screen.
+- Setting "Foveated rendering" (default on); render scale applies only with it
+  off. Both take effect when the immersive space reopens. MetalFX's spatial
+  scaler is off while foveated.
+- The 2D panel keeps its angular size at any render size (`hud_scale` as a
+  virtual width, `con_fontscale` scaled from the width), and its non-additive
+  draws clear the glass and water stencil codes under them (`R_VRPanelStencil`).
+
+#### Measured (2026-10-17)
+
+The compositor's map on the M5: 2 layers, screen 5087×4081, physical
+2048×1984 per eye, granularity 32. It never changed during a session (one
+build at open, no rebuilds). The per-eye maps come out 2144×2078 each (+10%
+pixels over the compositor's), held in 2144×2080 slices: 4.5 Mpx per eye
+against 11.7 Mpx uniform at 0.75.
+
+Same spot, c1a0e spawn, thermal "nominal", head nearly still (p50/p95 ms):
+
+| | gEngine0 + 1 | gComposite | gDepth | gWeapon | gpuQueue | frameGPU |
+|---|---|---|---|---|---|---|
+| uniform 3815×3061 | 1.9 + 2.6 | 3.2/3.4 | 0.5/0.5 | 0.1/0.1 | 3.9/4.0 | 6.6/8.0 |
+| foveated | 1.3 + 1.2 | 3.9/4.7 | 0.8/1.1 | 0.2/0.4 | 5.2/5.8 | 6.6/7.6 |
+
+- **The engine costs about half** (4.5 → 2.5 ms for both eyes).
+- **Our queue looks slower, and that is the GPU clock.** The depth merge and the
+  weapon pass do exactly the same work in both modes (neither reads the engine
+  image) and still took 1.6× as long foveated, while frameGPU stayed at 6.6 ms.
+  With less work per frame the system lowers the GPU clock until the GPU is
+  busy for about as long as before: the saving shows up as power and heat, not
+  as shorter passes. Scaled by that 1.6, the frame's work fell by about 40%.
+  Uniform mode on this build matched Phase 0, so the identity tables cost
+  nothing measurable.
+- Checked by screenshot through the unwarp (engine and composited, both eyes):
+  the tram, the c2a5b river with each mirror method (rendered, screen space, ray
+  traced), the c1a2 window glass and the console. Straight edges stay straight
+  across the rate steps, and reflections and glass sit where they should.
+- **The 2D layer was the regression.** The console's text was hard to read
+  toward the box's edge and washed over by glass behind it. Three causes: the
+  panel drew 1.33× smaller (fixed `hud_scale` and `con_fontscale` against a
+  5087-wide screen instead of 3815); the console font is nearest-filtered with
+  no mips, so the low-rate band drops strokes; and the glass and water codes
+  under the panel stayed in the stencil. The first and the last are fixed,
+  and on the headset (2026-10-26) the console reads well and stays clear of
+  the glass, so mipmapped 2D textures are not needed for now. `/foveation`
+  `rates` and `panel` give the panel's rate profile if text softens again.
+- Still to measure: the thermal baseline (minutes from a cold start until the
+  frame rate first halves, 6.5 in Phase 0).
+- Known gaps: Xash's own mirror surfaces (textures named `reflect*`, custom
+  maps only) copy the framebuffer with `glCopyTexImage2D`, which under a rate
+  map returns the physical layout; and the MSAA resolve blit in
+  `lambda_gl_end_frame` (off today) would need the same care in Phase 1.
 
 ### Phase 3 — Reflections in the same budget
 

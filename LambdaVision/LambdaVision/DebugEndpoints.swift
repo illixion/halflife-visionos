@@ -606,7 +606,8 @@ enum DebugEndpoints {
 
     private static let settingsTable: [Setting] = [
         // Graphics
-        .number("renderScale", \.renderScale, 0.5...1, note: "applies when the immersive space next opens"),
+        .number("renderScale", \.renderScale, 0.5...1, note: "applies when the immersive space next opens, with foveatedEngine off"),
+        .flag("foveatedEngine", \.foveatedEngine, note: "the engine renders through the compositor's foveation (EngineFoveation); applies when the immersive space next opens"),
         .flag("fxaaEnabled", \.fxaaEnabled),
         .flag("linearColor", \.linearColor),
         .flag("reprojectionDepth", \.reprojectionDepth),
@@ -699,6 +700,42 @@ enum DebugEndpoints {
 
     // MARK: Perf and diagnostics
 
+    private static func foveationReply() -> JSONValue {
+        let r = EngineFoveation.report
+        func size(_ s: MTLSize) -> JSONValue { .array([.int(s.width), .int(s.height)]) }
+        return .object([
+            "foveated": .bool(r.foveated),
+            "setting": .bool(Renderer.foveatedEngine),
+            "screen": size(r.screen),
+            "texture": size(r.texture),
+            "eyes": .array(r.eyes.map(size)),
+            "qualityScale": .double(Double(r.qualityScale)),
+            "rebuilds": .int(r.rebuilds),
+            "lastRebuildMs": .double(r.lastRebuildMs),
+            "angleTookMap": .bool(lambda_gl_rate_map_ok() != 0),
+            "compositor": .object([
+                "layers": .int(r.compositorLayers),
+                "screen": size(r.compositorScreen),
+                "physical": .array(r.compositorPhysical.map(size)),
+                "granularity": size(r.granularity),
+            ]),
+            "rates": .object([
+                "compositor": .array(r.compositorRates.map(profile)),
+                "eyes": .array(r.eyeRates.map(profile)),
+            ]),
+            // The 2D layer's box per eye as fractions of the screen, top-down
+            // (x0, y0, x1, y1), where the rates above apply to it.
+            "panel": .array(Renderer.hudBoxRects.map { b in
+                .array([b.x, b.y, b.z, b.w].map { .double((Double($0) * 1000).rounded() / 1000) })
+            }),
+            "note": "texture = what each eye's slice holds; eyes = the physical size of each eye's own map (≥ the compositor's per layer); rebuilds count compositor map changes; rates = physical texels per screen pixel at 33 even steps across x and y (top-down); panel = the 2D layer's box per eye, screen fractions x0 y0 x1 y1 (top-down)",
+        ])
+    }
+
+    private static func profile(_ p: EngineFoveation.Profile) -> JSONValue {
+        .object(["x": .array(p.x.map { .double(Double($0)) }), "y": .array(p.y.map { .double(Double($0)) })])
+    }
+
     private static func perfReply() -> JSONValue {
         let snapshot = FrameTimingStats.liveSnapshot()
         func columns(_ keys: [String]) -> JSONValue {
@@ -769,10 +806,10 @@ enum DebugEndpoints {
                  "PNG of the next rendered frame, as the player sees it: the drawable after every pass the app encodes (engine composite, arms, gun, body, HEV holograms), unwarped from foveation to its logical size. eye=both puts the eyes side by side (left first) for stereo checks. source=engine reads the engine's colour map alone. Returns image/png, not JSON: curl -o shot.png. Needs the immersive space open.",
                  parameters: [
                      .string("eye", "which eye: left, right, or both side by side", default: "both", choices: eyes),
-                     .string("source", "composited = the drawable with every Metal overlay; engine = the engine's colour map alone (no gun, body or holograms, no foveation)",
+                     .string("source", "composited = the drawable with every Metal overlay; engine = the engine's colour map alone (no gun, body or holograms), foveated like the drawable when the engine renders through its rate maps",
                              default: "composited", choices: sources),
                      .integer("width", "cap on the PNG's width in pixels for the whole picture, aspect kept; 0 = native (logical) resolution, large", default: 1600, range: 0...16384),
-                     .boolean("unwarp", "undo the drawable's foveation (false = the physical, centre-magnified layout the GPU stored)", default: true),
+                     .boolean("unwarp", "undo the foveation (false = the physical, centre-magnified layout the GPU stored: the drawable's, or the engine's own when source=engine)", default: true),
                  ],
                  trace: .never, sensitivity: .screenCapture, timeout: .seconds(20)) { args in
                 var request = FrameCapture.Request()
@@ -801,6 +838,10 @@ enum DebugEndpoints {
             .query("settings", "Every Settings value by key, with its kind, choices or range. Change one with POST /setting.",
                    releaseSafe: true) { _ in
                 settingsReply(try model().gameSettings)
+            },
+            .query("foveation", "The engine image's layout (EngineFoveation): foveated or uniform, the size the engine renders at and the texels its targets hold, each eye's rate map against the compositor's, how often the maps were rebuilt and whether ANGLE took the last map.",
+                   releaseSafe: true) { _ in
+                foveationReply()
             },
             .query("perf", "Frame timing over the last 512 frames (p50/p95/p99/max per column): the app's [FT] CPU-observed stages and the GPU execution columns (GPUPassTimer).",
                    releaseSafe: true) { _ in

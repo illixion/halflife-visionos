@@ -3332,10 +3332,20 @@ index 3fa5df3..6490f31 100644
  				(void *)(size_t)( startindex / 4 * 6 * 2 ));
  			pglBindBufferARB( GL_ELEMENT_ARRAY_BUFFER_ARB, 0 );
 diff --git a/ref/gl/gl_backend.c b/ref/gl/gl_backend.c
-index 4e1d5b8..fab0449 100644
+index 4e1d5b8..cbfd30c 100644
 --- a/ref/gl/gl_backend.c
 +++ b/ref/gl/gl_backend.c
-@@ -561,6 +561,16 @@ qboolean VID_ScreenShot( const char *filename, int shot_type )
+@@ -467,6 +467,9 @@ void GL_SetRenderMode( int mode )
+ 		pglDisable( GL_ALPHA_TEST );
+ 		pglBlendFunc( GL_ZERO, GL_SRC_COLOR );
+ 	}
++
++	// visionOS: the 2D panel's glass and water codes (only inside 2D mode)
++	R_VRPanelStencil( mode != kRenderGlow && mode != kRenderTransAdd );
+ }
+ 
+ /*
+@@ -561,6 +564,16 @@ qboolean VID_ScreenShot( const char *filename, int shot_type )
  	int	width = 0, height = 0;
  	qboolean	result;
  
@@ -3352,7 +3362,7 @@ index 4e1d5b8..fab0449 100644
  	r_shot = Mem_Calloc( r_temppool, sizeof( rgbdata_t ));
  	r_shot->width = (gpGlobals->width + 3) & ~3;
  	r_shot->height = (gpGlobals->height + 3) & ~3;
-@@ -616,6 +626,11 @@ qboolean VID_CubemapShot( const char *base, uint size, const float *vieworg, qbo
+@@ -616,6 +629,11 @@ qboolean VID_CubemapShot( const char *base, uint size, const float *vieworg, qbo
  	string		basename;
  	int		i = 1, flags, result;
  
@@ -3385,10 +3395,10 @@ index 038abd4..6509d98 100644
  
  static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int offset_x, int offset_y, float scale_x, float scale_y )
 diff --git a/ref/gl/gl_draw.c b/ref/gl/gl_draw.c
-index 26974c1..b5b4b4a 100644
+index 26974c1..2242266 100644
 --- a/ref/gl/gl_draw.c
 +++ b/ref/gl/gl_draw.c
-@@ -121,6 +121,12 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
+@@ -121,6 +121,42 @@ void GL_UpdateTexture( int texnum, int cols, int rows, int width, int height, co
  	GL_ApplyTextureParams( tex );
  }
  
@@ -3398,10 +3408,40 @@ index 26974c1..b5b4b4a 100644
 +__attribute__((visibility("default"))) int   cl_stereo_2d_viewport_active = 0;
 +__attribute__((visibility("default"))) float cl_stereo_2d_viewport[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 +
++/*
++===============
++R_VRPanelStencil
++
++The 2D panel's non-additive draws (console, menus, text) clear the glass and
++water codes under them (R_VRGlass), so the platform's glass and water shading
++stays off the 2D layer instead of washing over its text. Additive HUD art
++keeps them: added before or after the shading, it reads the same. Called on
++entering 2D mode and by GL_SetRenderMode; leaving 2D mode turns it off.
++===============
++*/
++void R_VRPanelStencil( qboolean clear )
++{
++	if( !glState.in2DMode || !cl_stereo_2d_viewport_active )
++		return;
++
++	if( clear )
++	{
++		pglEnable( GL_STENCIL_TEST );
++		pglStencilMask( 0xFF );
++		pglStencilFunc( GL_ALWAYS, 0, 0xFF );
++		pglStencilOp( GL_KEEP, GL_KEEP, GL_REPLACE );
++	}
++	else
++	{
++		pglStencilOp( GL_KEEP, GL_KEEP, GL_KEEP );
++		pglDisable( GL_STENCIL_TEST );
++	}
++}
++
  /*
  ===============
  R_Set2DMode
-@@ -151,10 +157,25 @@ void R_Set2DMode( qboolean enable )
+@@ -151,10 +187,25 @@ void R_Set2DMode( qboolean enable )
  			Matrix4x4_ConcatTranslate( projection_matrix, -gpGlobals->width, 0, 0 );
  			break;
  		default:
@@ -3428,6 +3468,21 @@ index 26974c1..b5b4b4a 100644
  
  		pglMatrixMode( GL_PROJECTION );
  		GL_LoadMatrix( projection_matrix );
+@@ -176,9 +227,14 @@ void R_Set2DMode( qboolean enable )
+ 		glState.in2DMode = true;
+ 		RI.currententity = NULL;
+ 		RI.currentmodel = NULL;
++		R_VRPanelStencil( true );
+ 	}
+ 	else
+ 	{
++		// whether or not the panel is still on (the screen fade turns it
++		// off before leaving 2D mode)
++		pglStencilOp( GL_KEEP, GL_KEEP, GL_KEEP );
++		pglDisable( GL_STENCIL_TEST );
+ 		pglDepthMask( GL_TRUE );
+ 		pglEnable( GL_DEPTH_TEST );
+ 		glState.in2DMode = false;
 diff --git a/ref/gl/gl_frustum.c b/ref/gl/gl_frustum.c
 index e3aa897..6b1871f 100644
 --- a/ref/gl/gl_frustum.c
@@ -3558,10 +3613,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..0307e3e 100644
+index e6e7712..107e296 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,48 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,50 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3574,6 +3629,8 @@ index e6e7712..0307e3e 100644
 +#endif
 +extern convar_t	r_vrglass;
 +extern convar_t	r_vrwater;
++// visionOS 2D panel (gl_draw.c): clears the glass and water codes under it
++void R_VRPanelStencil( qboolean clear );
 +
 +// visionOS glass pass (gl_rsurf.c R_VRGlass, gl_rmain.c R_VRProbeFace)
 +#define VR_GLASS_MAX_PLANES	224	// codes 16-239

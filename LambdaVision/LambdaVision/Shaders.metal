@@ -414,7 +414,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
                                 texture2d_array<uint> engineStencil, depth2d_array<float> engineDepth,
                                 texture2d_array<half> probeColor, depth2d_array<float> probeDepth,
                                 texture2d_array<half> sharpWater,
-                                sampler s, constant DisplayParams &p)
+                                sampler s, constant DisplayParams &p, constant float *engineMap)
 {
     // Settings → Diagnostics "Water mirror view" 3: the sharp-water target
     // over the whole view (magenta = empty), to see what the mirror holds
@@ -422,8 +422,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const half4 c = sharpWater.sample(s, uv, eye);
         return c.a > 0.004h ? float3(c.rgb) / float(c.a) : float3(0.3, 0.0, 0.3);
     }
-    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
-    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
+    const uint code = engineStencil.read(engineTexel(uv, eye, p.engineImage, engineMap), eye).r;
     if (code < 16 || code > 239)
         return rgb;
     const uint row = code - 16;
@@ -446,8 +445,7 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     // plane. Glass and translucent water write no depth (what is behind
     // reads farther); opaque water writes its own, at the plane.
     {
-        const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
-        const float ndc = engineDepth.read(min(uint2(uv * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+        const float ndc = engineDepth.read(engineTexel(uv, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
         const float zn = p.probeMix.y, zf = p.probeMix.z;
         const float zEngine = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
         const float zPlane = dist * dot(d, p.glassEye[eye][1].xyz);
@@ -456,7 +454,9 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     }
     if (nd > 0.0)
         n = -n;                              // the side facing the viewer
-    const float pixTan = (p.eyeTangents[eye].z + p.eyeTangents[eye].w) / float(size.y);   // one engine pixel
+    // one engine pixel (foveated, wider toward the edge of the view)
+    const float pixTan = (p.eyeTangents[eye].z + p.eyeTangents[eye].w) / p.engineImage.y
+        * engineTexelSpan(uv, eye, p.engineImage, engineMap).y;
     const float3 shape = water ? waterRipple(n, P, d, dist, saturate(-dot(d, n)), pixTan, p) : n;
     const float4 k = water ? p.water : p.glass;   // strength, F0, cap
     const float cosTheta = saturate(-dot(d, shape));
@@ -578,17 +578,19 @@ static inline float3 ssprRay(float2 uv, ushort eye, constant DisplayParams &p)
 }
 
 static inline bool ssprIsWater(texture2d_array<uint> engineStencil, float2 uv, ushort eye,
-                               constant DisplayParams &p)
+                               constant DisplayParams &p, constant float *engineMap)
 {
-    const uint2 size = uint2(engineStencil.get_width(), engineStencil.get_height());
-    const uint code = engineStencil.read(min(uint2(uv * float2(size)), size - 1), eye).r;
+    const uint code = engineStencil.read(engineTexel(uv, eye, p.engineImage, engineMap), eye).r;
     return code >= 16 && code - 16 == uint(p.sspr[eye].x);
 }
 
-static inline uint3 ssprSize(texture2d_array<half> colorMap, constant DisplayParams &p, ushort eye)
+// The mirror target's grid: the mirror base (DisplayParams.mirrorBase, the
+// uniform engine image's size) divided by sspr.w, as the app sizes it.
+static inline uint3 ssprSize(constant DisplayParams &p, ushort eye)
 {
     const uint div = p.sspr[eye].w > 0.5 ? uint(p.sspr[eye].w) : 4;
-    return uint3((colorMap.get_width() + div - 1) / div, (colorMap.get_height() + div - 1) / div, div);
+    const uint2 base = uint2(p.mirrorBase.xy);
+    return uint3((base.x + div - 1) / div, (base.y + div - 1) / div, div);
 }
 
 #ifndef SSPR_SPAN
@@ -598,15 +600,15 @@ static inline uint3 ssprSize(texture2d_array<half> colorMap, constant DisplayPar
 #define SSPR_BACKFACE 0.1   // cosine past which a source faces away from the mirrored eye (an occluder)
 #endif
 
-// The world point an engine pixel shows (its depth along its own ray).
-static inline float3 ssprPoint(depth2d_array<float> engineDepth, int2 pix, ushort eye, constant DisplayParams &p)
+// The world point an engine texel shows (its depth along its own ray).
+static inline float3 ssprPoint(depth2d_array<float> engineDepth, int2 pix, ushort eye, constant DisplayParams &p,
+                               constant float *engineMap)
 {
-    const int2 dsize = int2(engineDepth.get_width(), engineDepth.get_height());
-    pix = clamp(pix, int2(0), dsize - 1);
+    pix = clamp(pix, int2(0), int2(p.engineImage.zw) - 1);
     const float ndc = engineDepth.read(uint2(pix), eye) * 2.0 - 1.0;
     const float zn = p.probeMix.y, zf = p.probeMix.z;
     const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
-    const float3 d = ssprRay((float2(pix) + 0.5) / float2(dsize), eye, p);
+    const float3 d = ssprRay(engineScreenUV(float2(pix) + 0.5, eye, p.engineImage, engineMap), eye, p);
     return p.glassEye[eye][0].xyz + d * (z / dot(d, p.glassEye[eye][1].xyz));
 }
 
@@ -615,15 +617,15 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
                         device atomic_uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
                         depth2d_array<float> engineDepth [[ texture(1) ]],
-                        texture2d_array<uint> engineStencil [[ texture(3) ]])
+                        texture2d_array<uint> engineStencil [[ texture(3) ]],
+                        constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     const ushort eye = ushort(gid.z);
-    const uint3 size = ssprSize(colorMap, p, eye);
+    const uint3 size = ssprSize(p, eye);
     if (gid.x >= size.x || gid.y >= size.y || p.sspr[eye].z < 0.5)
         return;
     const float2 uv = (float2(gid.xy) + 0.5) / float2(size.xy);
-    const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
-    const float ndc = engineDepth.read(min(uint2(uv * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+    const float ndc = engineDepth.read(engineTexel(uv, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
     const float zn = p.probeMix.y, zf = p.probeMix.z;
     const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
     if (z < 6.0)                     // the flat viewmodel
@@ -635,8 +637,7 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     // What is behind them still occludes, though (below).
     bool marked;
     {
-        const uint2 ssize = uint2(engineStencil.get_width(), engineStencil.get_height());
-        marked = engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r >= 16;
+        marked = engineStencil.read(engineTexel(uv, eye, p.engineImage, engineMap), eye).r >= 16;
     }
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
@@ -654,7 +655,7 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     if (any(uv2 < 0.0) || any(uv2 >= 1.0))
         return;
     const uint2 target = min(uint2(uv2 * float2(size.xy)), size.xy - 1);
-    if (!ssprIsWater(engineStencil, (float2(target) + 0.5) / float2(size.xy), eye, p))
+    if (!ssprIsWater(engineStencil, (float2(target) + 0.5) / float2(size.xy), eye, p, engineMap))
         return;
     // Back faces. The reflected ray always travels upward, so it meets a
     // surface the eye sees from above (a table top, a counter) from below —
@@ -670,13 +671,13 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
     // eye: the reflected ray arrives from there.
     uint hole = 0;
     {
-        const int2 c = int2(min(uint2(uv * float2(dsize)), dsize - 1));
-        const float3 W0 = ssprPoint(engineDepth, c, eye, p);
+        const int2 c = int2(engineTexel(uv, eye, p.engineImage, engineMap));
+        const float3 W0 = ssprPoint(engineDepth, c, eye, p, engineMap);
         const float edge = 0.5 + 0.02 * z;      // a step this long between neighbours is an edge
-        float3 dx = ssprPoint(engineDepth, c + int2(1, 0), eye, p) - W0;
-        if (length_squared(dx) > edge * edge) dx = W0 - ssprPoint(engineDepth, c - int2(1, 0), eye, p);
-        float3 dy = ssprPoint(engineDepth, c + int2(0, 1), eye, p) - W0;
-        if (length_squared(dy) > edge * edge) dy = W0 - ssprPoint(engineDepth, c - int2(0, 1), eye, p);
+        float3 dx = ssprPoint(engineDepth, c + int2(1, 0), eye, p, engineMap) - W0;
+        if (length_squared(dx) > edge * edge) dx = W0 - ssprPoint(engineDepth, c - int2(1, 0), eye, p, engineMap);
+        float3 dy = ssprPoint(engineDepth, c + int2(0, 1), eye, p, engineMap) - W0;
+        if (length_squared(dy) > edge * edge) dy = W0 - ssprPoint(engineDepth, c - int2(0, 1), eye, p, engineMap);
         float3 n = cross(dx, dy);
         if (dot(n, E - W0) < 0.0) n = -n;                 // the side the eye sees
         const float3 mirroredEye = float3(E.xy, 2.0 * height - E.z);
@@ -711,7 +712,7 @@ kernel void ssprProject(uint3 gid [[thread_position_in_grid]],
             const int2 g = int2(gid.xy) + off;
             if (g.x < 0 || g.y < 0 || g.x >= int(size.x) || g.y >= int(size.y)) continue;
             const float2 uvn = (float2(g) + 0.5) / float2(size.xy);
-            const float ndcn = engineDepth.read(min(uint2(uvn * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+            const float ndcn = engineDepth.read(engineTexel(uvn, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
             const float zv = 2.0 * zn * zf / ((zf + zn) - ndcn * (zf - zn));
             const float3 dn = ssprRay(uvn, eye, p);
             float3 Wn = E + dn * (zv / dot(dn, F));
@@ -788,13 +789,12 @@ kernel void ssprClear(uint gid [[thread_position_in_grid]],
 // either test height, so an underside drawn from it is as smooth as the top).
 static inline float ssprOcclude(float3 P, float3 r, thread const float *hz, int nh,
                                 depth2d_array<float> engineDepth, ushort eye,
-                                constant DisplayParams &p, thread float2 &src)
+                                constant DisplayParams &p, constant float *engineMap, thread float2 &src)
 {
     const float3 E = p.glassEye[eye][0].xyz, F = p.glassEye[eye][1].xyz;
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
     const float4 t = p.eyeTangents[eye];
     const float height = p.sspr[eye].y;
-    const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
     const float zn = p.probeMix.y, zf = p.probeMix.z;
     float blocked = 1e30;
     src = float2(-1.0);
@@ -807,7 +807,7 @@ static inline float ssprOcclude(float3 P, float3 r, thread const float *hz, int 
             if (qz < 4.0) continue;
             const float2 at = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
             if (any(at < 0.0) || any(at >= 1.0)) continue;
-            const float ndc = engineDepth.read(min(uint2(at * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+            const float ndc = engineDepth.read(engineTexel(at, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
             const float zv = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
             const float3 ds = ssprRay(at, eye, p);
             const float Az = E.z + ds.z * (zv / dot(ds, F));
@@ -830,7 +830,8 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                         device const uint *keys [[ buffer(0) ]],
                         texture2d_array<half> colorMap [[ texture(0) ]],
                         depth2d_array<float> engineDepth [[ texture(1) ]],
-                        texture2d_array<half, access::write> mirror [[ texture(2) ]]
+                        texture2d_array<half, access::write> mirror [[ texture(2) ]],
+                        constant float *engineMap [[ buffer(BufferIndexEngineMap) ]]
 #ifdef SSPR_DEBUG
                         , device float2 *dbg [[ buffer(5) ]]   // Tools/DepthProbe only: per sub-ray (path length shown, confidence)
 #endif
@@ -838,7 +839,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
 {
     constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
     const ushort eye = ushort(gid.z);
-    const uint3 size = ssprSize(colorMap, p, eye);
+    const uint3 size = ssprSize(p, eye);
     const uint base = uint(eye) * size.y * size.x;
     threadgroup uint tile[SSPR_TILE_H][SSPR_TILE_W];
     {
@@ -895,7 +896,6 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
     const float3 R = p.glassEye[eye][2].xyz, U = p.glassEye[eye][3].xyz;
     const float height = p.sspr[eye].y;
     const float4 t = p.eyeTangents[eye];
-    const uint2 dsize = uint2(engineDepth.get_width(), engineDepth.get_height());
     const float zn = p.probeMix.y, zf = p.probeMix.z;
     // Surfaces (their world points and own sources) and occluders (their
     // heights: one is tested only at its height, so another at the same
@@ -909,7 +909,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         if (cand[k] == 0xFFFFFFFFu || (k >= SSPR_CANDIDATES && k < 5)) continue;
         const bool isHole = ((cand[k] >> 20) & 1u) != 0;
         const float2 src = (float2(cand[k] & 1023u, (cand[k] >> 10) & 1023u) + 0.5) / float2(size.xy);
-        const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+        const float ndc = engineDepth.read(engineTexel(src, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
         const float3 dk = ssprRay(src, eye, p);
         const float3 W = E + dk * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(dk, F));
         bool fresh = true;
@@ -948,7 +948,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             if (qz < 4.0) continue;
             const float2 src = float2((dot(q, R) / qz + t.x) / (t.x + t.y), (dot(q, U) / qz + t.w) / (t.z + t.w));
             if (any(src < 0.0) || any(src >= 1.0)) continue;
-            const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+            const float ndc = engineDepth.read(engineTexel(src, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
             const float3 ds = ssprRay(src, eye, p);
             const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
             const float lk = length(Ws[k] - E);
@@ -986,7 +986,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
         if (live && nh > 0) {
             float3 d = glassViewRay((float2(gid.xy) + 0.5) / float2(size.xy), eye, p);
             if (d.z > -1e-4) d = float3(d.xy, -1e-4);
-            blockedC = ssprOcclude(E + d * ((height - E.z) / d.z), float3(d.x, d.y, -d.z), hz, nh, engineDepth, eye, p, srcC);
+            blockedC = ssprOcclude(E + d * ((height - E.z) / d.z), float3(d.x, d.y, -d.z), hz, nh, engineDepth, eye, p, engineMap, srcC);
         }
         tb[lid.y][lid.x] = blockedC;
         ts[lid.y][lid.x] = srcC;
@@ -1026,7 +1026,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             float2 sSub = float2(-1.0);
             if (nearBlock) {
                 if (max(max(b0, b1), max(b2, b3)) < 1e29) { bSub = b0; sSub = ts[lid.y][lid.x]; }
-                else if (nh > 0) bSub = ssprOcclude(P, r, hz, nh, engineDepth, eye, p, sSub);
+                else if (nh > 0) bSub = ssprOcclude(P, r, hz, nh, engineDepth, eye, p, engineMap, sSub);
             }
             float best = 1e30, bestLen = 1e30;
             float2 bestSrc = float2(-1.0);
@@ -1042,7 +1042,7 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
                 exactSum += src; exactN += 1.0;
                 if (any(src < 0.0) || any(src >= 1.0)) continue;
                 if (ns == 1 && !nearBlock) { bestSrc = src; best = 0.0; bestMk = Wmk[k]; continue; }   // one surface: no check needed
-                const float ndc = engineDepth.read(min(uint2(src * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                const float ndc = engineDepth.read(engineTexel(src, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
                 const float3 ds = ssprRay(src, eye, p);
                 const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
                 const float3 off = A - P;
@@ -1106,22 +1106,26 @@ kernel void ssprResolve(uint3 gid [[thread_position_in_grid]],
             // grid's rate, was moiré; blurred it reads as the sheet softly
             // over the counter front, continuous with the rest.
             const float2 h = (bestMk ? 3.0 : 0.5) / float2(colorMap.get_width(), colorMap.get_height());
+            // (in the engine image's texels: foveated, a source's texel spans
+            // more of the screen toward the edge of the view)
+            const float2 bt = engineTexUV(bestSrc, eye, p.engineImage, engineMap);
+            const float2 kt = engineTexUV(blockSrc, eye, p.engineImage, engineMap);
             half3 col = 0.0h;
             if (wSurf > 0.0)
-                col += half(wSurf * cs) * 0.25h * (colorMap.sample(s, bestSrc + float2(-h.x, -h.y), eye).rgb
-                                            + colorMap.sample(s, bestSrc + float2( h.x, -h.y), eye).rgb
-                                            + colorMap.sample(s, bestSrc + float2(-h.x,  h.y), eye).rgb
-                                            + colorMap.sample(s, bestSrc + float2( h.x,  h.y), eye).rgb);
+                col += half(wSurf * cs) * 0.25h * (colorMap.sample(s, bt + float2(-h.x, -h.y), eye).rgb
+                                            + colorMap.sample(s, bt + float2( h.x, -h.y), eye).rgb
+                                            + colorMap.sample(s, bt + float2(-h.x,  h.y), eye).rgb
+                                            + colorMap.sample(s, bt + float2( h.x,  h.y), eye).rgb);
             if (wUnder > 0.0)
-                col += half(wUnder * cu * p.waterDebug.y) * 0.5h * (colorMap.sample(s, blockSrc + float2(-h.x, 0.0), eye).rgb
-                                                             + colorMap.sample(s, blockSrc + float2( h.x, 0.0), eye).rgb);
+                col += half(wUnder * cu * p.waterDebug.y) * 0.5h * (colorMap.sample(s, kt + float2(-h.x, 0.0), eye).rgb
+                                                             + colorMap.sample(s, kt + float2( h.x, 0.0), eye).rgb);
             sum += col;
             conf += cs * wSurf + cu * wUnder;
 #ifdef SSPR_DEBUG
             if (wUnder >= wSurf)
                 dbg[i * SSPR_SUB_X * SSPR_SUB_Y + sj * SSPR_SUB_X + si] = float2(length(P - E) + blockedNear, c * (wSurf + wUnder));
             else {
-                const float ndc = engineDepth.read(min(uint2(bestSrc * float2(dsize)), dsize - 1), eye) * 2.0 - 1.0;
+                const float ndc = engineDepth.read(engineTexel(bestSrc, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
                 const float3 ds = ssprRay(bestSrc, eye, p);
                 const float3 A = E + ds * ((2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn))) / dot(ds, F));
                 dbg[i * SSPR_SUB_X * SSPR_SUB_Y + sj * SSPR_SUB_X + si] = float2(length(P - E) + length(A - P), c * wSurf);
@@ -1168,7 +1172,8 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
                                texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
                                depth2d_array<float> probeDepth [[ texture(4) ]],
-                               texture2d_array<half> sharpWater [[ texture(5) ]])
+                               texture2d_array<half> sharpWater [[ texture(5) ]],
+                               constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -1181,11 +1186,13 @@ fragment float4 fragmentShader(ColorInOut in [[stage_in]],
     // The texture is the MetalFX-upscaled displayMap (full logical
     // resolution, already edge-reconstructed and sharpened), or the raw
     // engine colorMap when MetalFX is unavailable.
+    // Foveated, the engine image's texel for this screen position comes
+    // from its eye's layout tables (EngineFoveation), 1:1 in the fovea.
     float2 uv = in.texCoord;
-    half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    half4 colorSample = colorMap.sample(colorSampler, engineTexUV(uv, in.eye, params.engineImage, engineMap), in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params, engineMap);
 
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
@@ -1201,7 +1208,8 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
                                    texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
                                depth2d_array<float> probeDepth [[ texture(4) ]],
-                               texture2d_array<half> sharpWater [[ texture(5) ]])
+                               texture2d_array<half> sharpWater [[ texture(5) ]],
+                               constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear,
                                    mag_filter::linear,
@@ -1209,12 +1217,14 @@ fragment float4 fragmentShaderFXAA(ColorInOut in [[stage_in]],
                                    address::clamp_to_edge);
 
     // Same un-flipped UV convention as fragmentShader (see the note there).
+    // FXAA runs in the engine image's own texels around this position.
     float2 uv = in.texCoord;
+    const float2 euv = engineTexUV(uv, in.eye, params.engineImage, engineMap);
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
-    half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
-    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
+    half4 colorSample = colorMap.sample(colorSampler, euv, in.eye);
+    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, euv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params, engineMap);
     return displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
 }
 
@@ -1243,11 +1253,9 @@ struct CompositeDepthOut
 };
 
 static inline float compositorDepth(depth2d_array<float> engineDepth, float2 uv, ushort eye,
-                                    constant DisplayParams &p)
+                                    constant DisplayParams &p, constant float *engineMap)
 {
-    const uint2 size = uint2(engineDepth.get_width(), engineDepth.get_height());
-    const uint2 texel = min(uint2(uv * float2(size)), size - 1);
-    const float ndc = engineDepth.read(texel, eye) * 2.0 - 1.0;
+    const float ndc = engineDepth.read(engineTexel(uv, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
     const float distance = p.engineClip.x / (p.engineClip.y - ndc * p.engineClip.z);
     if (distance < p.depthLimits.z)
         return p.depthLimits.x;
@@ -1264,18 +1272,19 @@ fragment CompositeDepthOut fragmentShaderDepth(ColorInOut in [[stage_in]],
                                                texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
                                depth2d_array<float> probeDepth [[ texture(4) ]],
-                               texture2d_array<half> sharpWater [[ texture(5) ]])
+                               texture2d_array<half> sharpWater [[ texture(5) ]],
+                               constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
     const float2 uv = in.texCoord;
-    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
+    const half4 colorSample = colorMap.sample(colorSampler, engineTexUV(uv, in.eye, params.engineImage, engineMap), in.eye);
     float3 rgb = float3(colorSample.rgb);
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params, engineMap);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
-    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params, engineMap);
     return out;
 }
 
@@ -1286,19 +1295,21 @@ fragment CompositeDepthOut fragmentShaderFXAADepth(ColorInOut in [[stage_in]],
                                                    texture2d_array<uint> engineStencil [[ texture(2) ]],
                                texture2d_array<half> probeColor [[ texture(3) ]],
                                depth2d_array<float> probeDepth [[ texture(4) ]],
-                               texture2d_array<half> sharpWater [[ texture(5) ]])
+                               texture2d_array<half> sharpWater [[ texture(5) ]],
+                               constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     constexpr sampler colorSampler(mip_filter::linear, mag_filter::linear,
                                    min_filter::linear, address::clamp_to_edge);
     const float2 uv = in.texCoord;
+    const float2 euv = engineTexUV(uv, in.eye, params.engineImage, engineMap);
     const float2 px = float2(1.0 / colorMap.get_width(), 1.0 / colorMap.get_height());
-    const half4 colorSample = colorMap.sample(colorSampler, uv, in.eye);
-    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, uv, px, in.eye, colorSample.rgb));
+    const half4 colorSample = colorMap.sample(colorSampler, euv, in.eye);
+    float3 rgb = float3(fxaaResolve(colorMap, colorSampler, euv, px, in.eye, colorSample.rgb));
     if (kGlass)
-        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params);
+        rgb = glassShade(rgb, uv, in.eye, engineStencil, engineDepth, probeColor, probeDepth, sharpWater, colorSampler, params, engineMap);
     CompositeDepthOut out;
     out.color = displayOutput(rgb, float(colorSample.a), uv, in.position.xy, params);
-    out.depth = compositorDepth(engineDepth, uv, in.eye, params);
+    out.depth = compositorDepth(engineDepth, uv, in.eye, params, engineMap);
     return out;
 }
 
@@ -1383,17 +1394,17 @@ kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
                          texture2d_array<half> colorMap [[ texture(0) ]],
                          texture2d_array<half, access::write> mirror [[ texture(2) ]],
                          texture2d_array<uint> engineStencil [[ texture(3) ]],
-                         texture2d_array<half> lightmaps [[ texture(4) ]])
+                         texture2d_array<half> lightmaps [[ texture(4) ]],
+                         constant float *engineMap [[ buffer(BufferIndexEngineMap) ]])
 {
     const ushort eye = gid.z;
-    const uint3 size = ssprSize(colorMap, p, eye);
+    const uint3 size = ssprSize(p, eye);
     if (gid.x >= size.x || gid.y >= size.y)
         return;
     half4 out = 0.0h;
     const float2 uv = (float2(gid.xy) + 0.5) / float2(size.xy);
     // the glass or water row this texel shows, and its plane
-    const uint2 ssize = uint2(engineStencil.get_width(), engineStencil.get_height());
-    const uint code = engineStencil.read(min(uint2(uv * float2(ssize)), ssize - 1), eye).r;
+    const uint code = engineStencil.read(engineTexel(uv, eye, p.engineImage, engineMap), eye).r;
     const bool marked = code >= 16 && code <= 239;
     const uint row = code - 16;
     const bool water = marked && ((p.glassKinds[eye][row >> 7][(row >> 5) & 3] >> (row & 31)) & 1);

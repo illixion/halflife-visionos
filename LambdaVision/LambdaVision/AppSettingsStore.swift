@@ -31,6 +31,7 @@ enum AppSettingsStore {
 
     // MARK: Graphics
     private static let renderScaleKey     = "lambdavision.settings.renderScale"
+    private static let foveatedEngineKey  = "lambdavision.settings.foveatedEngine"
     private static let metalFXEnabledKey  = "lambdavision.settings.metalFXEnabled"
     private static let fxaaEnabledKey     = "lambdavision.settings.fxaaEnabled"
     private static let gammaKey           = "lambdavision.settings.gamma"
@@ -49,6 +50,13 @@ enum AppSettingsStore {
     static var renderScale: Double {
         get { double(renderScaleKey, 0.75) }
         set { defaults.set(newValue, forKey: renderScaleKey) }
+    }
+    /// The engine renders through the compositor's foveation
+    /// (EngineFoveation): full density where the user looks, a third of the
+    /// pixels overall. Render scale applies only with this off.
+    static var foveatedEngine: Bool {
+        get { bool(foveatedEngineKey, true) }
+        set { defaults.set(newValue, forKey: foveatedEngineKey) }
     }
     /// Currently IGNORED as a startup value: the MetalFX toggle is hidden and
     /// GameSettings forces the chain off regardless of what's stored here (see

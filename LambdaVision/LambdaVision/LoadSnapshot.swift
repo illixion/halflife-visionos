@@ -36,6 +36,10 @@ final class LoadSnapshot {
     /// drew it from, per eye.
     private var pendingCapture: [(clipToWorld: float4x4, eye: SIMD4<Float>)]?
     private var capture: [(clipToWorld: float4x4, eye: SIMD4<Float>)] = []
+    /// The engine image's layout when it was copied (EngineFoveation): the
+    /// copy is read through its tables, which stay alive and resident while
+    /// it is shown even if the live layout changes meanwhile.
+    private var capturedLayout: EngineFoveation.Layout?
     /// Mesh cells across and down the captured frame.
     private var pendingGrid = SIMD2<UInt32>(16, 16)
     private var grid = SIMD2<UInt32>(16, 16)
@@ -131,11 +135,11 @@ final class LoadSnapshot {
         flattenDepth = device.makeDepthStencilState(descriptor: fdd)!
 
         let vt = MTL4ArgumentTableDescriptor()
-        vt.maxBufferBindCount = 3               // uniforms@2
+        vt.maxBufferBindCount = 12              // uniforms@2, engine tables@11
         vt.maxTextureBindCount = 2              // depth@1
         vertexTable = try! device.makeArgumentTable(descriptor: vt)
         let ft = MTL4ArgumentTableDescriptor()
-        ft.maxBufferBindCount = 3
+        ft.maxBufferBindCount = 12
         ft.maxTextureBindCount = 1              // colour@0
         fragmentTable = try! device.makeArgumentTable(descriptor: ft)
 
@@ -208,11 +212,12 @@ final class LoadSnapshot {
     /// frame's command buffer before its render passes. `frame` is the
     /// endFrameEvent value this command buffer signals.
     func encodeCapture(commandBuffer: MTL4CommandBuffer, colorMap: MTLTexture,
-                       engineDepth: MTLTexture, frame: UInt64) {
-        guard let pose = pendingCapture, let color, let depth,
+                       engineDepth: MTLTexture, layout: EngineFoveation.Layout?, frame: UInt64) {
+        guard let pose = pendingCapture, let color, let depth, let layout,
               let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         pendingCapture = nil
         capture = pose
+        capturedLayout = layout
         grid = pendingGrid
         captureFrame = frame
         let size = MTLSize(width: colorMap.width, height: colorMap.height, depth: 1)
@@ -308,8 +313,9 @@ final class LoadSnapshot {
     /// `viewProjections` are the current world → clip matrices per view.
     func encode(encoder: MTL4RenderCommandEncoder, viewProjections: [float4x4],
                 slot: Int, alpha: Float) {
-        guard capture.count == viewProjections.count, let color, let depth else { return }
+        guard capture.count == viewProjections.count, let color, let depth, let layout = capturedLayout else { return }
         var u = SnapshotUniforms()
+        u.engineImage = layout.engineImage
         u.captureClipToWorld = (capture[0].clipToWorld, capture[min(1, capture.count - 1)].clipToWorld)
         u.worldToClip = (viewProjections[0], viewProjections[min(1, viewProjections.count - 1)])
         u.captureEye = (capture[0].eye, capture[min(1, capture.count - 1)].eye)
@@ -333,8 +339,10 @@ final class LoadSnapshot {
         encoder.setArgumentTable(vertexTable, stages: .vertex)
         encoder.setArgumentTable(fragmentTable, stages: .fragment)
         vertexTable.setAddress(buffer.gpuAddress, index: BufferIndex.uniforms.rawValue)
+        vertexTable.setAddress(layout.tables.gpuAddress, index: BufferIndex.engineMap.rawValue)
         vertexTable.setTexture(depth.gpuResourceID, index: 1)
         fragmentTable.setAddress(buffer.gpuAddress, index: BufferIndex.uniforms.rawValue)
+        fragmentTable.setAddress(layout.tables.gpuAddress, index: BufferIndex.engineMap.rawValue)
         fragmentTable.setTexture(color.gpuResourceID, index: TextureIndex.color.rawValue)
 
         let vertices = Int(grid.x * grid.y) * 6
@@ -357,6 +365,7 @@ final class LoadSnapshot {
     }
 
     func residentResources(slot: Int) -> [MTLResource] {
-        [uniforms[slot % uniforms.count]] + [color, depth, dumpBuffers?.color, dumpBuffers?.depth].compactMap { $0 }
+        [uniforms[slot % uniforms.count]] + [color, depth, dumpBuffers?.color, dumpBuffers?.depth,
+                                             capturedLayout?.tables].compactMap { $0 }
     }
 }

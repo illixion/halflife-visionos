@@ -309,6 +309,15 @@ void lambda_gl_worker_set_depth_texture(void *mtl_depth_view);
 // fell back to its private depth, and the texture holds nothing).
 int lambda_gl_depth_target_ok(void);
 
+// Foveated render: the rasterization rate map (an id<MTLRasterizationRateMap>
+// with one layer, borrowed, alive until the eye's GPU work is done) the next
+// renders draw through, and the physical size of the target textures they
+// hold. width × height passed to the render is then the map's screen size:
+// the engine's viewport. NULL for a uniform render.
+void lambda_gl_worker_set_rate_map(void *mtl_rate_map, int physical_width, int physical_height);
+// Whether ANGLE took the last rate map it was given.
+int lambda_gl_rate_map_ok(void);
+
 // Level loads. lambda_engine_loading() is 1 from the frame that starts a load
 // until the client is back in the new level (as of the last frame the worker
 // finished): the platform shows its snapshot instead of engine frames.
