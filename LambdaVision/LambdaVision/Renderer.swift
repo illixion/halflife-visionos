@@ -281,6 +281,10 @@ actor Renderer {
     var uniforms: UnsafeMutablePointer<Uniforms>
 
     var perDrawableTarget = [LayerRenderer.Drawable.Target: DrawableTarget]()
+    /// Progressive immersion's render-context pass, when the layer was
+    /// configured for one (ProgressivePass).
+    let progressivePass = ProgressivePass()
+    lazy var progressiveActive: Bool = ProgressivePass.isActive(layerRenderer)
 
     var rotation: Float = 0
 
@@ -3343,6 +3347,10 @@ actor Renderer {
         // Must be the SAME anchor the engine camera rendered with — the
         // compositor reprojects the image from this pose to display time.
         drawable.deviceAnchor = deviceAnchor
+        // Progressive immersion: the context must follow the device anchor
+        // (it masks against it) and its pass ends the frame (ProgressivePass).
+        let renderContext: LayerRenderer.Drawable.RenderContext? =
+            progressiveActive ? drawable.addRenderContext() : nil
 
         if perDrawableTarget[drawable.target] == nil {
             perDrawableTarget[drawable.target] = .init(drawable: drawable)
@@ -4032,6 +4040,13 @@ actor Renderer {
                                           slot: uniformBufferIndex)
                 enc.endEncoding()
             }
+        }
+
+        // The last pass the drawable gets: the screenshot below sees its erase and
+        // the portal edge too.
+        if let renderContext {
+            progressivePass.encode(commandBuffer: commandBuffer, drawable: drawable, context: renderContext,
+                                   layerRenderer: layerRenderer)
         }
 
         // Debug server screenshot (FrameCapture): a copy of this frame when

@@ -53,6 +53,14 @@ struct GraphicsSettingsPage: View {
             }
 
             Section {
+                Toggle("Progressive immersion (experimental)", isOn: $settings.progressiveImmersion)
+            } header: {
+                Text("Immersion")
+            } footer: {
+                Text("Opens the game as a portal you widen or narrow with the Digital Crown, with your room showing around it, instead of filling your whole view. It applies when the immersive space restarts. Experimental: turn it off if the portal shows black or the picture is missing.")
+            }
+
+            Section {
                 Toggle("Linear colour", isOn: $settings.linearColor)
                 SettingsSlider("Gamma", $settings.gamma, 1.8...3.6, 0.1) {
                     String(format: "%.1f", $0)

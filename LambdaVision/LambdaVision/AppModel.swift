@@ -12,7 +12,12 @@ import GameLibrary
 @MainActor
 @Observable
 class AppModel {
-    let immersiveSpaceID = "ImmersiveSpace"
+    static let fullSpaceID = "ImmersiveSpace"
+    static let progressiveSpaceID = "ImmersiveSpaceProgressive"
+    /// The space the next open uses: full, or progressive when the setting is on.
+    var immersiveSpaceID: String {
+        gameSettings.progressiveImmersion ? Self.progressiveSpaceID : Self.fullSpaceID
+    }
     enum ImmersiveSpaceState {
         case closed
         case inTransition

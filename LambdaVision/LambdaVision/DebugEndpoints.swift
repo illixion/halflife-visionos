@@ -610,6 +610,7 @@ enum DebugEndpoints {
         .flag("foveatedEngine", \.foveatedEngine, note: "the engine renders through the compositor's foveation (EngineFoveation); applies when the immersive space next opens"),
         .flag("fxaaEnabled", \.fxaaEnabled),
         .flag("engineMSAA", \.engineMSAA, note: "4x MSAA on the engine's view (half-float colour target); applies when the immersive space next opens"),
+        .flag("progressiveImmersion", \.progressiveImmersion, note: "open the game in a progressive immersive space (Digital Crown portal); applies when the immersive space next opens"),
         .flag("linearColor", \.linearColor),
         .flag("reprojectionDepth", \.reprojectionDepth),
         .flag("glassReflections", \.glassReflections),

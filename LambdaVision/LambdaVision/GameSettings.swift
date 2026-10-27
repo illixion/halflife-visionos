@@ -170,6 +170,12 @@ final class GameSettings {
         didSet { AppSettingsStore.engineMSAA = engineMSAA
                  Renderer.engineMSAA = engineMSAA }
     }
+    /// The game opens in a progressive immersive space (the Digital Crown
+    /// sets how much of the room shows around it) instead of a full one.
+    /// The space is chosen when it opens (AppModel.immersiveSpaceID).
+    var progressiveImmersion: Bool = AppSettingsStore.progressiveImmersion {
+        didSet { AppSettingsStore.progressiveImmersion = progressiveImmersion }
+    }
     /// The Settings picker's view of the two above.
     var edgeSmoothing: EdgeSmoothing {
         get {

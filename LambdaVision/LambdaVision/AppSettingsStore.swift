@@ -35,6 +35,7 @@ enum AppSettingsStore {
     private static let metalFXEnabledKey  = "lambdavision.settings.metalFXEnabled"
     private static let fxaaEnabledKey     = "lambdavision.settings.fxaaEnabled"
     private static let engineMSAAKey      = "lambdavision.settings.engineMSAA"
+    private static let progressiveImmersionKey = "lambdavision.settings.progressiveImmersion"
     private static let gammaKey           = "lambdavision.settings.gamma"
     private static let brightnessKey      = "lambdavision.settings.brightness"
     private static let linearColorKey     = "lambdavision.settings.linearColor"
@@ -76,6 +77,12 @@ enum AppSettingsStore {
     static var engineMSAA: Bool {
         get { bool(engineMSAAKey, false) }
         set { defaults.set(newValue, forKey: engineMSAAKey) }
+    }
+    /// Open the game in a progressive immersive space (Digital Crown portal
+    /// with passthrough around it) instead of a full one.
+    static var progressiveImmersion: Bool {
+        get { bool(progressiveImmersionKey, false) }
+        set { defaults.set(newValue, forKey: progressiveImmersionKey) }
     }
     /// Decode the engine's gamma-encoded image to linear light for the
     /// drawable (Renderer.displayDecodeGamma).

@@ -63,6 +63,13 @@ vertex ColorInOut fullscreenVertexShader(uint vid [[vertex_id]],
     return out;
 }
 
+// Progressive immersion (ProgressivePass): the pixels outside the portal,
+// drawn transparent so the room shows through instead of black.
+fragment float4 progressiveEraseFragment(ColorInOut in [[stage_in]])
+{
+    return float4(0.0);
+}
+
 // FXAA (compact quality variant, Lottes). The engine has no AA of its own
 // (GL MSAA through ANGLE costs ~7 ms/pair) and the composite pass bilinearly
 // upsamples a sub-logical engine render, so edges stairstep twice over.

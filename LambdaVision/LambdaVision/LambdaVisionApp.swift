@@ -195,6 +195,9 @@ enum ImmersiveSpatialInput {
 struct ImmersiveSpaceContent: CompositorContent {
 
     var appModel: AppModel
+    /// Declared by the progressive space: the layer is then configured for
+    /// the compositor's render context (ProgressivePass).
+    var progressive = false
 
     var body: some CompositorContent {
         CompositorLayer(configuration: self) { @MainActor layerRenderer in
@@ -301,6 +304,14 @@ extension ImmersiveSpaceContent: CompositorLayerConfiguration {
         // Tracking areas: the palm debug panel's buttons get system gaze
         // hover and pinches routed to them (RAVEHoloCompositor).
         RAVEHoloCompositor.configureTrackingAreas(capabilities: capabilities, configuration: &configuration)
+
+        // Progressive immersion renders through the drawable's render context
+        // (ProgressivePass, one single-sample pass at the end of the frame).
+        if progressive, configuration.layout == .layered,
+           let format = ProgressivePass.stencilFormat(for: capabilities) {
+            configuration.drawableRenderContextStencilFormat = format
+            configuration.drawableRenderContextRasterSampleCount = 1
+        }
     }
 }
 
@@ -391,7 +402,7 @@ struct LambdaVisionApp: App {
         InputCatcherPromptWindow()
         InputCatcherVolumeWindow()
 
-        ImmersiveSpace(id: appModel.immersiveSpaceID) {
+        ImmersiveSpace(id: AppModel.fullSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }
         .immersionStyle(selection: .constant(.full), in: .full)
@@ -400,6 +411,19 @@ struct LambdaVisionApp: App {
         // immersionStyle) — that layer sits on top of our render and
         // occludes any weapon model drawn "in" the hand. Hide it; ArmPass
         // draws a wireframe skeleton in its place (see Renderer.swift).
+        .upperLimbVisibility(.hidden)
+        .persistentSystemOverlays(.hidden)
+
+        // The same game as a portal (Settings › Graphics › Immersion): the
+        // Digital Crown sets how much of the room shows around it. A space of
+        // its own because the layer's configuration (the compositor's render
+        // context) is fixed when the layer is made. Only `.progressive` is
+        // allowed: with `.full` listed too, dialling the crown to the top
+        // switched the space to `.full` and showed black (device, 2026-10-27).
+        ImmersiveSpace(id: AppModel.progressiveSpaceID) {
+            ImmersiveSpaceContent(appModel: appModel, progressive: true)
+        }
+        .immersionStyle(selection: .constant(.progressive), in: .progressive)
         .upperLimbVisibility(.hidden)
         .persistentSystemOverlays(.hidden)
     }

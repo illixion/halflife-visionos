@@ -35,6 +35,7 @@ struct SettingsView: View {
     @State private var snapScale = 0.0
     @State private var snapFoveated = true
     @State private var snapMSAA = false
+    @State private var snapProgressive = false
     @State private var showReloadPrompt = false
 
     enum Page: Hashable {
@@ -138,7 +139,7 @@ struct SettingsView: View {
     private var reloadPending: Bool {
         let s = appModel.gameSettings
         let changed = s.renderScale != snapScale || s.foveatedEngine != snapFoveated
-            || s.engineMSAA != snapMSAA
+            || s.engineMSAA != snapMSAA || s.progressiveImmersion != snapProgressive
         return changed && appModel.immersiveSpaceState == .open
     }
 
@@ -146,6 +147,7 @@ struct SettingsView: View {
         snapScale = appModel.gameSettings.renderScale
         snapFoveated = appModel.gameSettings.foveatedEngine
         snapMSAA = appModel.gameSettings.engineMSAA
+        snapProgressive = appModel.gameSettings.progressiveImmersion
     }
 
     private func done() {
