@@ -318,6 +318,18 @@ void lambda_gl_worker_set_rate_map(void *mtl_rate_map, int physical_width, int p
 // Whether ANGLE took the last rate map it was given.
 int lambda_gl_rate_map_ok(void);
 
+// Engine MSAA: samples per pixel for the eyes' renders from the next frame
+// (1 = off). Takes only with the app's depth texture registered and a colour
+// format ANGLE resolves on this GPU; otherwise, or if ANGLE refuses the first
+// pass, the eyes render with one sample.
+void lambda_gl_worker_set_engine_samples(int samples);
+// Samples per pixel the last eye rendered with.
+int lambda_gl_engine_samples(void);
+// Per eye for the last frame: render passes ANGLE started for the eye's own
+// drawing, then multisampled attachments it reloaded after a split
+// (out[0..1] eye 0, out[2..3] eye 1).
+void lambda_gl_engine_pass_stats(int out[4]);
+
 // The player's body in the engine's mirrors: the avatar's bones for the next
 // frame's eyes (count 3x4 row-major bone-to-room matrices, GoldSrc axes and
 // inches, in the body slot model's bone order; a hidden bone has a zero 3x3),

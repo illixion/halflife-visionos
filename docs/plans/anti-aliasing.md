@@ -1,6 +1,7 @@
 # Plan — Anti-aliasing inside the headset's GPU budget
 
-> **Status (2026-10-17): Phase 0 measured; Phase 2 (foveated engine render)
+> **Status (2026-10-27): Phase 0 measured; Phase 1 (4× MSAA) built, off by
+> default pending a headset check; Phase 2 (foveated engine render)
 > built and checked on the headset (2D panel fixes too, 2026-10-26), thermal
 > baseline still to measure.**
 > Written after the glass mirror's 4× MSAA landed (`db2f854`) and the owner
@@ -177,6 +178,38 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   fixed-function shim, which is free once MSAA is on. And an A/B of render
   scale 0.6–0.65 with MSAA against 0.75 with FXAA: clean edges may let the
   scale drop by a third of the pixels.
+
+#### Built (2026-10-27)
+
+- ANGLE: `VisionPort/angle-metal-msrtt2.patch`, applied on top of the
+  rate-map patch. It exposes `EXT_multisampled_render_to_texture2` on Metal
+  (the backend already gave every attachment a memoryless multisampled image
+  and resolved depth and stencil from sample 0). It also adds
+  `ANGLE_GetRenderPassStats`: render encoders started, and multisampled
+  attachments unresolved after a split.
+- Bridge (`engine_ms_fbo_for`): the eye's colour slice and the app's
+  depth-stencil slice, wrapped as GL textures and attached with
+  `glFramebufferTexture2DMultisampleEXT`. There is one framebuffer per slice,
+  kept while the textures last, because the implicit multisampled images
+  belong to the GL textures. A refused attachment, or a GL error in the first
+  pass, means one sample from then on.
+- Colour map: RGBA16Float when MSAA is on, RGBA16Unorm otherwise. The
+  engine-source screenshot and the snapshot dump decode the half-float map
+  as gamma-space values.
+- Setting `engineMSAA`, stored, off by default until judged on the headset.
+  It applies when the immersive space reopens. `/foveation` reports
+  `engineSamples` and `engineRenderPasses`.
+- c1a0 lobby, foveated, console open: **one render pass per eye, no
+  unresolves.** First same-spot A/B (120 fps, head still), p50: gEngine
+  1.0 + 1.3 ms at one sample, 1.2 + 1.8 ms at four. frameGPU was 4.6 ms both
+  ways, so the GPU clock may hide or inflate part of the difference. Repeat
+  the A/B with the wearer settled before calling it.
+- **Latent bug, foveated only:** ANGLE's unresolve
+  (`FramebufferMtl::unresolveIfNeeded`) draws the resolved image back at
+  screen-normalized coordinates, while that image is stored in the rate
+  map's physical layout. Any split inside an eye would garble it. Splits
+  haven't happened yet, but watch `engineRenderPasses` in scenes with dynamic
+  lights (lightmap uploads) before turning MSAA on by default.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

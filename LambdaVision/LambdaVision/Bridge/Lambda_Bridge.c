@@ -3477,6 +3477,142 @@ static void lambda_gl_release_depth_target(void) {
     }
 }
 
+// Engine MSAA (docs/plans/anti-aliasing.md Phase 1): the eye's colour and the
+// app's depth-stencil attached as textures through
+// EXT_multisampled_render_to_texture(2) (VisionPort/angle-metal-msrtt2.patch
+// lets depth and stencil in), so ANGLE renders into memoryless multisampled
+// images and resolves them into the app's textures as each render pass ends:
+// colour averaged, depth and stencil from sample 0. On Apple GPUs the samples
+// never leave tile memory. Unlike the explicit renderbuffers above, this keeps
+// the frame's depth and stencil readable by the platform, and the engine's
+// own framebuffer reads stay legal (they read the resolved image).
+//
+// One framebuffer per eye slice, kept while the slice's textures do: the
+// implicit multisampled images belong to the GL textures, so rebuilding them
+// every eye would reallocate them. The colour must be a format ANGLE resolves
+// on this GPU (RGBA16Float or RGBA8; RGBA16Unorm only on Macs): the app picks
+// it before the first frame. A framebuffer whose first pass raises a GL error
+// falls back to one sample for good, as the mirror's does.
+typedef struct { void *color, *depth; int samples, checked; EGLImage ci, di; GLuint ctex, dtex, fbo; } engine_ms_fbo_t;
+static engine_ms_fbo_t g_engine_ms[2];
+static int g_engine_ms_next = 0;
+static engine_ms_fbo_t *g_frame_ms = NULL;      // this eye's, between begin and end
+static _Atomic int g_engine_samples_req = 1;
+static int g_engine_msrtt2 = -1;                 // -1 unknown, 0 no, else the most samples
+static volatile int g_engine_samples_now = 1;    // what the last eye rendered with
+
+void lambda_gl_worker_set_engine_samples(int samples) { atomic_store(&g_engine_samples_req, samples); }
+int lambda_gl_engine_samples(void) { return g_engine_samples_now; }
+
+// Render passes ANGLE started for each eye's own drawing (from the frame's
+// clear to the end of the engine's view, mirror and probe passes excluded),
+// and the multisampled attachments it unresolved meanwhile, for the last
+// frame (VisionPort/angle-metal-msrtt2.patch). Tile MSAA is free only while
+// an eye stays in one pass: each split reloads every attachment with a
+// full-screen draw.
+extern void ANGLE_GetRenderPassStats(unsigned long long *passes, unsigned long long *unresolves);
+static unsigned long long g_pass_mark[2];
+static _Atomic int g_eye_passes[2], g_eye_unresolves[2];
+
+static void pass_stats_begin(void) { ANGLE_GetRenderPassStats(&g_pass_mark[0], &g_pass_mark[1]); }
+static void pass_stats_end(int eye) {
+    unsigned long long p, u;
+    ANGLE_GetRenderPassStats(&p, &u);
+    atomic_store(&g_eye_passes[eye], (int)(p - g_pass_mark[0]));
+    atomic_store(&g_eye_unresolves[eye], (int)(u - g_pass_mark[1]));
+}
+
+void lambda_gl_engine_pass_stats(int out[4]) {
+    for (int eye = 0; eye < 2; eye++) {
+        out[eye * 2] = atomic_load(&g_eye_passes[eye]);
+        out[eye * 2 + 1] = atomic_load(&g_eye_unresolves[eye]);
+    }
+}
+
+static void engine_ms_release(engine_ms_fbo_t *f) {
+    if (f->fbo) glDeleteFramebuffers(1, &f->fbo);
+    if (f->ctex) glDeleteTextures(1, &f->ctex);
+    if (f->dtex) glDeleteTextures(1, &f->dtex);
+    if (f->ci && f->ci != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, f->ci);
+    if (f->di && f->di != EGL_NO_IMAGE) eglDestroyImage(g_gl_disp, f->di);
+    memset(f, 0, sizeof(*f));
+    f->ci = f->di = EGL_NO_IMAGE;
+}
+
+// The eye's multisampled framebuffer, or NULL for the single-sample path.
+static engine_ms_fbo_t *engine_ms_fbo_for(void *color, void *depth) {
+    typedef void (*tex_image_fn)(GLenum, void *);
+    typedef void (*fb_tex_ms_fn)(GLenum, GLenum, GLenum, GLuint, GLint, GLsizei);
+    static tex_image_fn tex_image = NULL;
+    static fb_tex_ms_fn fb_tex_ms = NULL;
+    int want = atomic_load(&g_engine_samples_req);
+    if (want <= 1 || !depth) {
+        for (int i = 0; i < 2; i++) if (g_engine_ms[i].fbo) engine_ms_release(&g_engine_ms[i]);
+        return NULL;
+    }
+    if (g_engine_msrtt2 < 0) {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        GLint most = 0;
+        tex_image = (tex_image_fn)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+        fb_tex_ms = (fb_tex_ms_fn)eglGetProcAddress("glFramebufferTexture2DMultisampleEXT");
+        if (ext && strstr(ext, "GL_EXT_multisampled_render_to_texture2") && tex_image && fb_tex_ms)
+            glGetIntegerv(0x8D57 /* GL_MAX_SAMPLES_EXT */, &most);
+        g_engine_msrtt2 = most > 1 ? most : 0;
+        fprintf(stderr, "[engine] multisampled render to texture on every attachment: %s (up to %d samples)\n",
+                g_engine_msrtt2 ? "yes" : "no", (int)most);
+    }
+    if (!g_engine_msrtt2) return NULL;
+    int samples = want < g_engine_msrtt2 ? want : g_engine_msrtt2;
+
+    for (int i = 0; i < 2; i++) {
+        engine_ms_fbo_t *f = &g_engine_ms[i];
+        if (f->fbo && f->color == color && f->depth == depth && f->samples == samples) return f;
+    }
+    // a new slice (or new textures): replace the older entry
+    engine_ms_fbo_t *f = &g_engine_ms[g_engine_ms_next];
+    g_engine_ms_next ^= 1;
+    if (f->fbo || f->ctex) engine_ms_release(f);
+
+    const EGLAttrib img_attribs[] = { EGL_NONE };
+    f->ci = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)color, img_attribs);
+    f->di = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT, EGL_METAL_TEXTURE_ANGLE, (EGLClientBuffer)depth, img_attribs);
+    if (f->ci == EGL_NO_IMAGE || f->di == EGL_NO_IMAGE) {
+        fprintf(stderr, "[engine] multisampled target: no EGLImage (0x%x), one sample from now on\n", eglGetError());
+        engine_ms_release(f);
+        g_engine_msrtt2 = 0;
+        return NULL;
+    }
+    // the engine caches its texture bindings (GL_Bind): put its own back
+    GLint bound = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    glGenTextures(1, &f->ctex);
+    glBindTexture(GL_TEXTURE_2D, f->ctex);
+    tex_image(GL_TEXTURE_2D, f->ci);
+    glGenTextures(1, &f->dtex);
+    glBindTexture(GL_TEXTURE_2D, f->dtex);
+    tex_image(GL_TEXTURE_2D, f->di);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+    glGenFramebuffers(1, &f->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, f->fbo);
+    fb_tex_ms(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, f->ctex, 0, samples);
+    fb_tex_ms(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, f->dtex, 0, samples);
+    GLenum err = glGetError();
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (err != GL_NO_ERROR || status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "[engine] multisampled target refused (error 0x%x, status 0x%x): one sample from now on\n",
+                err, status);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        engine_ms_release(f);
+        g_engine_msrtt2 = 0;
+        return NULL;
+    }
+    f->color = color;
+    f->depth = depth;
+    f->samples = samples;
+    fprintf(stderr, "[engine] eye target %p: %d samples\n", color, samples);
+    return f;
+}
+
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            int width, int height,
                                            float r, float g, float b) {
@@ -3484,6 +3620,26 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
     if (!mtl_texture)                return -2;
     // Worker thread holds the context current for the process lifetime;
     // no rebind needed here.
+
+    g_frame_ms = engine_ms_fbo_for(mtl_texture, g_frame_depth_mtl);
+    if (g_frame_ms) {
+        while (glGetError() != GL_NO_ERROR) {}   // only this eye's errors count for its check
+        g_frame_fbo = g_frame_ms->fbo;
+        glBindFramebuffer(GL_FRAMEBUFFER, g_frame_fbo);
+        g_frame_depth_ok = 1;
+        g_engine_samples_now = g_frame_ms->samples;
+        g_frame_rate_map_ok = g_frame_rate_map
+            && ANGLE_SetFramebufferRasterizationRateMap(g_frame_fbo, g_frame_rate_map) == 1;
+        g_frame_w = width;
+        g_frame_h = height;
+        glViewport(0, 0, width, height);
+        glClearColor(r, g, b, 1.0f);
+        glClearDepthf(1.0f);
+        glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        return 0;
+    }
+    g_engine_samples_now = 1;
 
     const EGLAttrib img_attribs[] = { EGL_NONE };
     g_frame_image = eglCreateImage(g_gl_disp, EGL_NO_CONTEXT,
@@ -3661,6 +3817,25 @@ int lambda_gl_end_frame(void) {
         }
     } else {
         glFinish();
+    }
+
+    if (g_frame_ms) {
+        // the first pass into a new target: a draw ANGLE refused (a format
+        // it can't resolve) leaves the slice stale, so drop to one sample
+        engine_ms_fbo_t *f = g_frame_ms;
+        g_frame_ms = NULL;
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        g_frame_fbo = 0;
+        if (!f->checked) {
+            GLenum err = glGetError();
+            f->checked = 1;
+            if (err != GL_NO_ERROR) {
+                fprintf(stderr, "[engine] multisampled pass raised 0x%x: one sample from now on\n", err);
+                engine_ms_release(f);
+                g_engine_msrtt2 = 0;
+            }
+        }
+        return 0;
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -4676,6 +4851,7 @@ static int worker_engine_frame(void) {
     g_frame_depth_mtl = g_w_depth;
     g_frame_rate_map = g_w_rate_map;
     g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
+    pass_stats_begin();
     int br = lambda_gl_begin_frame_into_mtl_texture(
         g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
     int er = 0;
@@ -4736,6 +4912,7 @@ static int worker_engine_frame(void) {
             lambda_engine_clear_projection_override();
         lambda_engine_set_stereo_offset(0.0f);
         gt_end();
+        pass_stats_end(0);
         worker_render_mirror(0);
         er = lambda_gl_end_frame();
         g_ft_cur[0] = t1 - t0;
@@ -4833,6 +5010,7 @@ static void *gl_worker_main(void *arg) {
             g_frame_depth_mtl = g_w_depth;
             g_frame_rate_map = g_w_rate_map;
             g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
+            pass_stats_begin();
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
@@ -4860,6 +5038,7 @@ static void *gl_worker_main(void *arg) {
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 gt_end();
+                pass_stats_end(1);
                 worker_avatar_eye(1);
                 worker_render_mirror(1);
                 worker_render_probe_face();

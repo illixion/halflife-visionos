@@ -162,6 +162,14 @@ final class GameSettings {
         didSet { AppSettingsStore.fxaaEnabled = fxaaEnabled
                  Renderer.compositeFXAA = fxaaEnabled }
     }
+    /// 4× MSAA on the engine's view, resolved on tile (Lambda_Bridge.c
+    /// engine_ms_fbo_for): smooths the geometry edges FXAA can't, thin
+    /// parts included. Its colour target is half-float, so it applies when
+    /// the immersive space next opens.
+    var engineMSAA: Bool = AppSettingsStore.engineMSAA {
+        didSet { AppSettingsStore.engineMSAA = engineMSAA
+                 Renderer.engineMSAA = engineMSAA }
+    }
     /// The drawable is linear light; the engine's image is gamma-encoded.
     /// On, every game colour is decoded before it lands there (true darks);
     /// off writes the engine's values as they are, which lifts everything
@@ -569,6 +577,7 @@ final class GameSettings {
         Renderer.foveatedEngine    = foveatedEngine
         Renderer.useMetalFXChain   = metalFXEnabled
         Renderer.compositeFXAA     = fxaaEnabled
+        Renderer.engineMSAA        = engineMSAA
         Renderer.displayDecodeGamma = linearColor ? Renderer.linearDecodeGamma : 0
         Renderer.reprojectionDepth = reprojectionDepth
         Renderer.glassReflections = glassReflections

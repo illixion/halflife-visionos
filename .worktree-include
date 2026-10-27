@@ -1,0 +1,3 @@
+# Prebuilt engine and ANGLE libraries the app links (gitignored, built by VisionPort scripts)
+LambdaVision/Vendor/angle
+LambdaVision/Vendor/libxash

@@ -34,6 +34,7 @@ enum AppSettingsStore {
     private static let foveatedEngineKey  = "lambdavision.settings.foveatedEngine"
     private static let metalFXEnabledKey  = "lambdavision.settings.metalFXEnabled"
     private static let fxaaEnabledKey     = "lambdavision.settings.fxaaEnabled"
+    private static let engineMSAAKey      = "lambdavision.settings.engineMSAA"
     private static let gammaKey           = "lambdavision.settings.gamma"
     private static let brightnessKey      = "lambdavision.settings.brightness"
     private static let linearColorKey     = "lambdavision.settings.linearColor"
@@ -71,6 +72,10 @@ enum AppSettingsStore {
     static var fxaaEnabled: Bool {
         get { bool(fxaaEnabledKey, true) }
         set { defaults.set(newValue, forKey: fxaaEnabledKey) }
+    }
+    static var engineMSAA: Bool {
+        get { bool(engineMSAAKey, false) }
+        set { defaults.set(newValue, forKey: engineMSAAKey) }
     }
     /// Decode the engine's gamma-encoded image to linear light for the
     /// drawable (Renderer.displayDecodeGamma).

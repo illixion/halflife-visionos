@@ -273,7 +273,8 @@ nonisolated final class FrameCapture: @unchecked Sendable {
         switch request.source {
         case .engine:
             guard let colorMap else { return .failure(.unsupported("the engine colour map is not allocated yet")) }
-            guard let layout = layout(colorMap.pixelFormat) else {
+            // gamma-space values whatever the format, half-float included
+            guard let layout = colorMap.pixelFormat == .rgba16Float ? .rgba16FloatEncoded : layout(colorMap.pixelFormat) else {
                 return .failure(.unsupported("engine colour format \(name(colorMap.pixelFormat))"))
             }
             for view in wanted {

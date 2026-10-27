@@ -609,6 +609,7 @@ enum DebugEndpoints {
         .number("renderScale", \.renderScale, 0.5...1, note: "applies when the immersive space next opens, with foveatedEngine off"),
         .flag("foveatedEngine", \.foveatedEngine, note: "the engine renders through the compositor's foveation (EngineFoveation); applies when the immersive space next opens"),
         .flag("fxaaEnabled", \.fxaaEnabled),
+        .flag("engineMSAA", \.engineMSAA, note: "4x MSAA on the engine's view (half-float colour target); applies when the immersive space next opens"),
         .flag("linearColor", \.linearColor),
         .flag("reprojectionDepth", \.reprojectionDepth),
         .flag("glassReflections", \.glassReflections),
@@ -713,6 +714,13 @@ enum DebugEndpoints {
             "rebuilds": .int(r.rebuilds),
             "lastRebuildMs": .double(r.lastRebuildMs),
             "angleTookMap": .bool(lambda_gl_rate_map_ok() != 0),
+            "engineSamples": .int(Int(lambda_gl_engine_samples())),
+            "engineRenderPasses": {
+                var s = [Int32](repeating: 0, count: 4)
+                lambda_gl_engine_pass_stats(&s)
+                return .object(["eye0": .int(Int(s[0])), "eye0Unresolves": .int(Int(s[1])),
+                                "eye1": .int(Int(s[2])), "eye1Unresolves": .int(Int(s[3]))])
+            }(),
             "compositor": .object([
                 "layers": .int(r.compositorLayers),
                 "screen": size(r.compositorScreen),

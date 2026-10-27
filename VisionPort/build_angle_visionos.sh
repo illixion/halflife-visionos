@@ -76,6 +76,19 @@ else
     git -C "$ANGLE_ROOT/angle" apply "$SRC_PATCH"
 fi
 
+# --- 2c. ANGLE source patch: multisampled render to texture on every
+# attachment (EXT_multisampled_render_to_texture2), so the engine's depth and
+# stencil can be tile MSAA too (docs/plans/anti-aliasing.md Phase 1), and
+# ANGLE_GetRenderPassStats (render passes started, multisampled attachments
+# unresolved) to check that each eye stays in one pass. On top of the
+# rate-map patch: both touch FrameBufferMtl.mm and mtl_command_buffer.mm.
+SRC_PATCH="$HERE/angle-metal-msrtt2.patch"
+if git -C "$ANGLE_ROOT/angle" apply --check -R "$SRC_PATCH" 2>/dev/null; then
+    echo "angle-metal-msrtt2.patch already applied"
+else
+    git -C "$ANGLE_ROOT/angle" apply "$SRC_PATCH"
+fi
+
 # --- 3. gn gen + ninja for device and simulator ---
 cd "$ANGLE_ROOT/angle"
 COMMON_ARGS='target_os="ios" target_platform="xros" target_cpu="arm64" ios_deployment_target="2.0" is_debug=false is_component_build=false ios_enable_code_signing=false angle_enable_metal=true angle_enable_vulkan=false angle_enable_gl=false angle_enable_swiftshader=false angle_enable_null=false angle_enable_wgpu=false symbol_level=1 use_custom_libcxx=false treat_warnings_as_errors=false'

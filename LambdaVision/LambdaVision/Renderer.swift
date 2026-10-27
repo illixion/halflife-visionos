@@ -430,6 +430,9 @@ actor Renderer {
     // chain above). Read on the render thread every frame, so the Settings
     // toggle applies live — it only picks between two pipeline states.
     nonisolated(unsafe) static var compositeFXAA: Bool = true
+    /// GameSettings.engineMSAA, read when the engine targets are made: it
+    /// picks the colour map's format, which ANGLE must be able to resolve.
+    nonisolated(unsafe) static var engineMSAA: Bool = false
     /// Give the compositor every pixel's real depth for reprojection
     /// (ReprojectionDepth) instead of one constant far depth. Settings →
     /// Graphics, default off until judged on device. Live.
@@ -2050,8 +2053,13 @@ actor Renderer {
         // If ANGLE cannot render into it (its format caps gate the norm16
         // extension), fall back to the old 8-bit target rather than a black
         // view: the probe runs the frame's own EGLImage path on the worker.
+        // With MSAA, half-float instead: ANGLE resolves 16-bit unorm only on
+        // Macs. The composite clamps its read to 1 as before; what changes is
+        // blending past 1 within a frame (an additive sprite under a later
+        // alpha blend), which can read a little brighter.
+        let engineMSAA = Renderer.engineMSAA
         var chosen: MTLTexture?
-        for format in [MTLPixelFormat.rgba16Unorm, .bgra8Unorm] {
+        for format in engineMSAA ? [MTLPixelFormat.rgba16Float, .bgra8Unorm] : [.rgba16Unorm, .bgra8Unorm] {
             let desc = MTLTextureDescriptor()
             desc.textureType = .type2DArray
             desc.pixelFormat = format
@@ -2076,6 +2084,7 @@ actor Renderer {
             AppLog.render.log("[LambdaVision] colorMap \(format, privacy: .public) not renderable through ANGLE (rc=\(rc): \(String(cString: status), privacy: .public)), falling back to 8-bit")
         }
         let tex = chosen!
+        lambda_gl_worker_set_engine_samples(engineMSAA ? 4 : 1)
         AppLog.render.log("[LambdaVision] drawable physical=\(physW)x\(physH) → colorMap \(w)x\(h) \(tex.pixelFormat, privacy: .public) via ANGLE")
         tex.label = "AngleColorMap"
         colorMap = tex

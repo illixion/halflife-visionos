@@ -1,0 +1,85 @@
+diff --git a/src/libANGLE/renderer/metal/DisplayMtl.mm b/src/libANGLE/renderer/metal/DisplayMtl.mm
+index cdfd06b3f7..ca4c4ea2f4 100644
+--- a/src/libANGLE/renderer/metal/DisplayMtl.mm
++++ b/src/libANGLE/renderer/metal/DisplayMtl.mm
+@@ -969,6 +969,11 @@ void DisplayMtl::initializeExtensions() const
+          mFeatures.enableMultisampledRenderToTextureOnNonTilers.enabled) &&
+         mFeatures.hasShaderStencilOutput.enabled && mFeatures.hasDepthAutoResolve.enabled &&
+         mFeatures.hasStencilAutoResolve.enabled;
++    // Any attachment, depth and stencil included: TextureMtl gives each one a
++    // memoryless multisampled image and the render pass resolves it on tile,
++    // depth and stencil from sample 0 (the auto-resolve features above).
++    mNativeExtensions.multisampledRenderToTexture2EXT =
++        mNativeExtensions.multisampledRenderToTextureEXT;
+ 
+     // Enable EXT_blend_minmax
+     mNativeExtensions.blendMinmaxEXT = true;
+diff --git a/src/libANGLE/renderer/metal/FrameBufferMtl.mm b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
+index 2e24dd7bc6..87df6723cf 100644
+--- a/src/libANGLE/renderer/metal/FrameBufferMtl.mm
++++ b/src/libANGLE/renderer/metal/FrameBufferMtl.mm
+@@ -28,6 +28,9 @@
+ #include "libANGLE/renderer/metal/mtl_utils.h"
+ #include "libANGLE/renderer/renderer_utils.h"
+ 
++#include <atomic>
++extern std::atomic<unsigned long long> gRenderPassUnresolves;  // mtl_command_buffer.mm
++
+ namespace rx
+ {
+ namespace
+@@ -1897,6 +1900,7 @@ angle::Result FramebufferMtl::unresolveIfNeeded(const gl::Context *context,
+         colorBlitParams.filter       = GL_NEAREST;
+         colorBlitParams.dstLuminance = angleFormat.isLUMA();
+ 
++        gRenderPassUnresolves.fetch_add(1, std::memory_order_relaxed);
+         ANGLE_TRY(
+             display->getUtils().blitColorWithDraw(context, encoder, angleFormat, colorBlitParams));
+     }
+@@ -1934,6 +1938,7 @@ angle::Result FramebufferMtl::unresolveIfNeeded(const gl::Context *context,
+ 
+     if (dsBlitParams.src || dsBlitParams.srcStencil)
+     {
++        gRenderPassUnresolves.fetch_add(1, std::memory_order_relaxed);
+         ANGLE_TRY(contextMtl->getDisplay()->getUtils().blitDepthStencilWithDraw(context, encoder,
+                                                                                 dsBlitParams));
+     }
+diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+index b019051d74..b4f2987314 100644
+--- a/src/libANGLE/renderer/metal/mtl_command_buffer.mm
++++ b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
+@@ -28,6 +28,25 @@
+ #include "libANGLE/renderer/metal/mtl_resources.h"
+ #include "libANGLE/renderer/metal/mtl_utils.h"
+ 
++#include <atomic>
++
++// Render pass statistics for the embedding app (LambdaVision's engine MSAA
++// checks): render encoders started, and the multisampled attachments
++// FramebufferMtl had to unresolve (reload from their resolved image) because
++// a framebuffer's work was split across render passes.
++std::atomic<unsigned long long> gRenderPassesStarted{0};
++std::atomic<unsigned long long> gRenderPassUnresolves{0};
++
++extern "C" __attribute__((visibility("default"))) void ANGLE_GetRenderPassStats(
++    unsigned long long *passes,
++    unsigned long long *unresolves)
++{
++    if (passes)
++        *passes = gRenderPassesStarted.load(std::memory_order_relaxed);
++    if (unresolves)
++        *unresolves = gRenderPassUnresolves.load(std::memory_order_relaxed);
++}
++
+ // Use to compare the new values with the values already set in the command encoder:
+ static inline bool operator==(const MTLViewport &lhs, const MTLViewport &rhs)
+ {
+@@ -1723,6 +1742,8 @@ RenderCommandEncoder &RenderCommandEncoder::restart(const RenderPassDesc &desc,
+         return *this;
+     }
+ 
++    gRenderPassesStarted.fetch_add(1, std::memory_order_relaxed);
++
+     mSerial                   = cmdBuffer().cmdQueue().getNextRenderPassEncoderSerial();
+     mRenderPassDesc           = desc;
+     mRecording                = true;

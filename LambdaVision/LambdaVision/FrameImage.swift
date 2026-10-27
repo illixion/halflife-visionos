@@ -23,14 +23,16 @@ nonisolated enum FrameImage {
     /// How a texel is stored. The 8- and 10-bit formats are taken as already
     /// display-encoded (an sRGB drawable stores encoded bytes; the engine's
     /// colour map is gamma-space); half floats are linear light and are
-    /// sRGB-encoded here.
+    /// sRGB-encoded here, except `rgba16FloatEncoded`: the engine's colour
+    /// map with MSAA on, half-float but holding the engine's gamma-space
+    /// values.
     nonisolated enum Layout: String, Sendable {
-        case bgra8, rgba8, rgba16Unorm, rgba16Float, bgr10a2, rgb10a2
+        case bgra8, rgba8, rgba16Unorm, rgba16Float, rgba16FloatEncoded, bgr10a2, rgb10a2
 
         var bytesPerPixel: Int {
             switch self {
             case .bgra8, .rgba8, .bgr10a2, .rgb10a2: 4
-            case .rgba16Unorm, .rgba16Float: 8
+            case .rgba16Unorm, .rgba16Float, .rgba16FloatEncoded: 8
             }
         }
     }
@@ -109,6 +111,16 @@ nonisolated enum FrameImage {
                         for c in 0..<3 {
                             let f = Float(Float16(bitPattern: p[s + c]))
                             o[d + c] = f.isFinite && f > 0 ? lut[Int(min(f, 1) * 4095 + 0.5)] : 0
+                        }
+                        d += 4
+                    }
+                case .rgba16FloatEncoded:
+                    let p = srcRow.assumingMemoryBound(to: UInt16.self)
+                    for x in 0..<width {
+                        let s = x * 4
+                        for c in 0..<3 {
+                            let f = Float(Float16(bitPattern: p[s + c]))
+                            o[d + c] = f.isFinite && f > 0 ? UInt8((min(f, 1) * 255).rounded()) : 0
                         }
                         d += 4
                     }

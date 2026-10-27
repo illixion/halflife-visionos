@@ -48,9 +48,11 @@ final class LoadSnapshot {
     private var pendingViews: [(projection: float4x4, view: float4x4)] = []
     private var dump: (views: [(projection: float4x4, view: float4x4)],
                        color: MTLBuffer, depth: MTLBuffer, width: Int, height: Int, frame: UInt64,
-                       wide: Bool)?
+                       format: MTLPixelFormat)?
     /// Bytes per pixel of the engine colour map as the dump copies it.
-    private static func colorBytes(_ t: MTLTexture) -> Int { t.pixelFormat == .rgba16Unorm ? 8 : 4 }
+    private static func colorBytes(_ t: MTLTexture) -> Int {
+        t.pixelFormat == .rgba16Unorm || t.pixelFormat == .rgba16Float ? 8 : 4
+    }
     /// Debug: write the next capture to Caches/snapshot-eyeN.bin, for
     /// `Tools/SnapshotProbe --metres --reverse-z`. Off: ~280 MB of readback.
     static var dumpFirstCapture = false
@@ -245,7 +247,7 @@ final class LoadSnapshot {
                              destinationBytesPerRow: w * 4, destinationBytesPerImage: image,
                              options: .depthFromDepthStencil)
                 }
-                dump = (pendingViews, cb, db, w, h, frame, colorMap.pixelFormat == .rgba16Unorm)
+                dump = (pendingViews, cb, db, w, h, frame, colorMap.pixelFormat)
             }
         }
         enc.barrier(afterStages: .blit, beforeQueueStages: .all, visibilityOptions: .device)
@@ -269,12 +271,19 @@ final class LoadSnapshot {
                 out.append(Data(count: 24))   // view origin + angles: unused
                 // The probe reads RGBA8: narrow a 16-bit map, swizzle a BGRA one.
                 var rgba: Data
-                if d.wide {
+                if d.format == .rgba16Unorm {
                     let w16 = (d.color.contents() + eye * pixels * 8).bindMemory(to: UInt16.self, capacity: pixels * 4)
                     rgba = Data(count: image)
                     rgba.withUnsafeMutableBytes { p in
                         let b = p.bindMemory(to: UInt8.self)
                         for i in 0..<(pixels * 4) { b[i] = UInt8((UInt32(w16[i]) * 255 + 32767) / 65535) }
+                    }
+                } else if d.format == .rgba16Float {
+                    let h16 = (d.color.contents() + eye * pixels * 8).bindMemory(to: Float16.self, capacity: pixels * 4)
+                    rgba = Data(count: image)
+                    rgba.withUnsafeMutableBytes { p in
+                        let b = p.bindMemory(to: UInt8.self)
+                        for i in 0..<(pixels * 4) { b[i] = UInt8((min(max(Float(h16[i]), 0), 1) * 255).rounded()) }
                     }
                 } else {
                     rgba = Data(bytes: d.color.contents() + eye * image, count: image)
