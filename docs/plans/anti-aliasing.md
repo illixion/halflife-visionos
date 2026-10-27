@@ -255,19 +255,22 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   pass, and the standalone test (`stencilres4.swift` in the session's
   scratchpad: the nested-view case alone fails).
   - MSAA stays off by default until the clean timing A/B is done.
-- **Open: the tram ride turns MSAA off (2026-10-27).** On c0a0 the
+- **Fixed: the tram ride turned MSAA off (2026-10-27).** On c0a0 the
   safety net tripped within 20 s of the load: three 2-pass frames in 180,
   each ending at `mtl::BufferPool::allocateNewBuffer` under
   `VertexArrayMtl::updateClientAttribs` from `R_StudioDrawPoints`. The
-  studio renderer streams client-side vertex arrays, ANGLE's streaming
-  pool is capped at 10 × 16 buffers, and when the oldest is still in
-  flight it flushes the command buffer (ending the eye's pass) and stalls
-  until the GPU frees it. The break room never fills the pool; a tram full
-  of scientists does. Fix candidates: a bigger pool (`maxBuffers`, or an
-  initial size so one buffer serves many draws) in the msrtt2 patch, or
-  studio meshes through VBOs in the engine. Until then the net's "one
-  sample from now on" is sticky for the process, so the tram leaves the
-  rest of the session at one sample.
+  studio renderer streams client-side vertex arrays into ANGLE's streaming
+  pool (capped at 10 × 16 buffers). That pool had no initial size, so each
+  buffer was only as big as the request that made it and the tram's
+  scientists went through all 160 within a few frames; the pool then
+  flushed the command buffer (ending the eye's pass) and stalled until the
+  GPU freed the oldest. Fix in the msrtt2 patch: a 256 KB initial size, so
+  streamed arrays pack into shared buffers from the first draw. The patch
+  also exports `ANGLE_GetBufferPoolStats` (stalls, peak buffers), printed
+  with each split the net counts. Verified on device: c0a0 from the load
+  through the arrival at c0a0b (155 s) held 4 samples with no split after
+  the loading frames, where it used to trip within 20 s. The net's "one
+  sample from now on" is still sticky for the process.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

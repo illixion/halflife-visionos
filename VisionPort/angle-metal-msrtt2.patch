@@ -44,6 +44,78 @@ index 2e24dd7bc6..87df6723cf 100644
          ANGLE_TRY(contextMtl->getDisplay()->getUtils().blitDepthStencilWithDraw(context, encoder,
                                                                                  dsBlitParams));
      }
+diff --git a/src/libANGLE/renderer/metal/VertexArrayMtl.mm b/src/libANGLE/renderer/metal/VertexArrayMtl.mm
+index 3c1baf6ca7..aae08cb60a 100644
+--- a/src/libANGLE/renderer/metal/VertexArrayMtl.mm
++++ b/src/libANGLE/renderer/metal/VertexArrayMtl.mm
+@@ -218,7 +218,12 @@ VertexArrayMtl::VertexArrayMtl(const gl::VertexArrayState &state,
+ {
+     reset(context);
+ 
+-    mDynamicVertexData.initialize(context, 0, mtl::kVertexAttribBufferStrideAlignment,
++    // An initial size, so streamed client arrays pack into shared buffers from the first draw. At
++    // 0 each buffer is as big as the first request that made it, so a scene drawing many small
++    // client-array meshes (the engine's studio models) ran through all 160 buffers within a few
++    // frames and the pool then flushed the command buffer to wait for the oldest, splitting the
++    // render pass the frame was drawing in.
++    mDynamicVertexData.initialize(context, 256 * 1024, mtl::kVertexAttribBufferStrideAlignment,
+                                   /** maxBuffers */ 10 * mtl::kMaxVertexAttribs);
+ 
+     mDynamicIndexData.initialize(context, kDynamicIndexDataSize, mtl::kIndexBufferOffsetAlignment,
+diff --git a/src/libANGLE/renderer/metal/mtl_buffer_pool.mm b/src/libANGLE/renderer/metal/mtl_buffer_pool.mm
+index e156512c37..74e319b743 100644
+--- a/src/libANGLE/renderer/metal/mtl_buffer_pool.mm
++++ b/src/libANGLE/renderer/metal/mtl_buffer_pool.mm
+@@ -16,6 +16,8 @@
+ #include "libANGLE/renderer/metal/ContextMtl.h"
+ #include "libANGLE/renderer/metal/DisplayMtl.h"
+ 
++#include <atomic>
++
+ namespace rx
+ {
+ 
+@@ -112,6 +114,23 @@ MTLStorageMode BufferPool::storageMode(ContextMtl *contextMtl) const
+     return Buffer::getStorageModeForSharedBuffer(contextMtl);
+ }
+ 
++// Pool statistics for the embedding app (LambdaVision's engine MSAA checks):
++// how many times a pool at its buffer cap had to flush the command buffer and
++// wait for the GPU (which splits the frame's render pass), and the most buffers
++// any pool has held.
++static std::atomic<unsigned long long> gBufferPoolStalls{0};
++static std::atomic<unsigned long long> gBufferPoolPeak{0};
++
++extern "C" __attribute__((visibility("default"))) void ANGLE_GetBufferPoolStats(
++    unsigned long long *stalls,
++    unsigned long long *peak)
++{
++    if (stalls)
++        *stalls = gBufferPoolStalls.load(std::memory_order_relaxed);
++    if (peak)
++        *peak = gBufferPoolPeak.load(std::memory_order_relaxed);
++}
++
+ angle::Result BufferPool::allocateNewBuffer(ContextMtl *contextMtl)
+ {
+     if (mMaxBuffers > 0 && mBuffersAllocated >= mMaxBuffers)
+@@ -131,6 +150,7 @@ angle::Result BufferPool::allocateNewBuffer(ContextMtl *contextMtl)
+         // Reuse the buffer in free list:
+         if (mBufferFreeList.front()->isBeingUsedByGPU(contextMtl))
+         {
++            gBufferPoolStalls.fetch_add(1, std::memory_order_relaxed);
+             contextMtl->flushCommandBuffer(mtl::NoWait);
+             // Force the GPU to finish its rendering and make the old buffer available.
+             contextMtl->cmdQueue().ensureResourceReadyForCPU(mBufferFreeList.front());
+@@ -148,6 +168,8 @@ angle::Result BufferPool::allocateNewBuffer(ContextMtl *contextMtl)
+     ASSERT(mBuffer);
+ 
+     mBuffersAllocated++;
++    if (mBuffersAllocated > gBufferPoolPeak.load(std::memory_order_relaxed))
++        gBufferPoolPeak.store(mBuffersAllocated, std::memory_order_relaxed);
+ 
+     return angle::Result::Continue;
+ }
 diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
 index b019051d74..81a3ecc4b7 100644
 --- a/src/libANGLE/renderer/metal/mtl_command_buffer.mm

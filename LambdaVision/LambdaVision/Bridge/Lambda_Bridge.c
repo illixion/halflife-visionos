@@ -3511,6 +3511,9 @@ int lambda_gl_engine_samples(void) { return g_engine_samples_now; }
 // an eye stays in one pass: each split reloads every attachment with a
 // full-screen draw.
 extern void ANGLE_GetRenderPassStats(unsigned long long *passes, unsigned long long *unresolves);
+// Buffer pool flushes that waited on the GPU (each splits a pass), and the most
+// buffers a pool has held.
+extern void ANGLE_GetBufferPoolStats(unsigned long long *stalls, unsigned long long *peak);
 // gl_rsurf.c: the lightmaps whose light styles changed, uploaded before the
 // eye's pass opens (an upload into a lightmap the pass already drew with ends
 // it), and the dynamic lightmap ring started over.
@@ -3590,8 +3593,10 @@ static void pass_stats_end(int eye) {
         g_ms_split_frames[1] = g_ms_split_frames[0];
         g_ms_split_frames[0] = g_pass_frame;
         int recurs = g_ms_split_frames[2] && g_pass_frame - g_ms_split_frames[2] <= 180;
-        fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map%s\n",
-                eye, passes, unresolves, recurs ? ", the third in 180 frames: one sample from now on" : "");
+        unsigned long long stalls, peak;
+        ANGLE_GetBufferPoolStats(&stalls, &peak);
+        fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map; buffer pool stalls %llu, peak %llu%s\n",
+                eye, passes, unresolves, stalls, peak, recurs ? ", the third in 180 frames: one sample from now on" : "");
         if (recurs) g_engine_msrtt2 = 0;
     }
 }
