@@ -5,8 +5,9 @@
 //  Settings › Graphics (resolution, edge smoothing, colour, depth) and
 //  Settings › Reflections & Water (the modern-lighting prototypes).
 //
-//  Foveated rendering and render scale size the render targets, so they take
-//  effect when the immersive space reopens; SettingsView offers the reload.
+//  Foveated rendering, render scale and MSAA size or format the render
+//  targets, so they take effect when the immersive space reopens;
+//  SettingsView offers the reload.
 //  Everything else here is read per frame and applies live.
 //
 
@@ -41,12 +42,14 @@ struct GraphicsSettingsPage: View {
                 // upsampling. GameSettings.metalFXEnabled forces it off
                 // at startup; the scaler code stays compiled in case a
                 // cheaper configuration brings it back. Edge smoothing is
-                // the toggle below, folded into the composite pass.
-                Toggle("Edge smoothing (FXAA)", isOn: $settings.fxaaEnabled)
+                // the FXAA choice below, folded into the composite pass.
+                Picker("Edge smoothing", selection: $settings.edgeSmoothing) {
+                    ForEach(EdgeSmoothing.allCases) { Text($0.label).tag($0) }
+                }
             } header: {
                 Text("Edge smoothing")
             } footer: {
-                Text("Edge smoothing runs inside the pass that already draws the game to the display, so it applies immediately and costs no extra pass; turn it off if distant HUD or console text looks soft.")
+                Text("4× MSAA smooths the edges of the geometry itself, thin wires, rails and grates included, at a small GPU cost; it applies when the immersive space restarts. FXAA runs inside the pass that already draws the game to the display, softens the stair-steps that remain and applies immediately; turn it off if distant HUD or console text looks soft.")
             }
 
             Section {

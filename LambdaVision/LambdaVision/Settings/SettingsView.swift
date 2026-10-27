@@ -34,6 +34,7 @@ struct SettingsView: View {
     // changed.
     @State private var snapScale = 0.0
     @State private var snapFoveated = true
+    @State private var snapMSAA = false
     @State private var showReloadPrompt = false
 
     enum Page: Hashable {
@@ -137,12 +138,14 @@ struct SettingsView: View {
     private var reloadPending: Bool {
         let s = appModel.gameSettings
         let changed = s.renderScale != snapScale || s.foveatedEngine != snapFoveated
+            || s.engineMSAA != snapMSAA
         return changed && appModel.immersiveSpaceState == .open
     }
 
     private func takeSnapshot() {
         snapScale = appModel.gameSettings.renderScale
         snapFoveated = appModel.gameSettings.foveatedEngine
+        snapMSAA = appModel.gameSettings.engineMSAA
     }
 
     private func done() {

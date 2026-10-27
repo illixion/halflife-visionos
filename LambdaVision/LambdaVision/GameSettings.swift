@@ -170,6 +170,21 @@ final class GameSettings {
         didSet { AppSettingsStore.engineMSAA = engineMSAA
                  Renderer.engineMSAA = engineMSAA }
     }
+    /// The Settings picker's view of the two above.
+    var edgeSmoothing: EdgeSmoothing {
+        get {
+            switch (engineMSAA, fxaaEnabled) {
+            case (false, false): .off
+            case (false, true): .fxaa
+            case (true, false): .msaa
+            case (true, true): .both
+            }
+        }
+        set {
+            engineMSAA = newValue == .msaa || newValue == .both
+            fxaaEnabled = newValue == .fxaa || newValue == .both
+        }
+    }
     /// The drawable is linear light; the engine's image is gamma-encoded.
     /// On, every game colour is decoded before it lands there (true darks);
     /// off writes the engine's values as they are, which lifts everything
@@ -721,6 +736,21 @@ enum WaterMirrorView: Int, CaseIterable, Identifiable {
         case .onWater: "Mirror on water"
         case .confidence: "Mirror confidence"
         case .whole: "Whole mirror"
+        }
+    }
+}
+
+/// Settings › Graphics › Edge smoothing: the two techniques as one choice
+/// (GameSettings.edgeSmoothing, over fxaaEnabled and engineMSAA).
+enum EdgeSmoothing: String, CaseIterable, Identifiable {
+    case off, fxaa, msaa, both
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .off: "Off"
+        case .fxaa: "FXAA"
+        case .msaa: "4× MSAA"
+        case .both: "4× MSAA + FXAA"
         }
     }
 }
