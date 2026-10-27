@@ -327,8 +327,21 @@ void lambda_gl_worker_set_engine_samples(int samples);
 int lambda_gl_engine_samples(void);
 // Per eye for the last frame: render passes ANGLE started for the eye's own
 // drawing, then multisampled attachments it reloaded after a split
-// (out[0..1] eye 0, out[2..3] eye 1).
-void lambda_gl_engine_pass_stats(int out[4]);
+// (out[0..1] eye 0, out[2..3] eye 1); out[4..5]: frames since launch each
+// eye took more than one pass.
+void lambda_gl_engine_pass_stats(int out[6]);
+// Of those split frames, how many fell under the loading plaque (never shown).
+int lambda_gl_engine_split_loading_frames(void);
+// One eye's frame that took more than one render pass.
+typedef struct {
+    double uptime_ms;   // CLOCK_UPTIME_RAW
+    int frame;          // eye-0 frames since launch
+    int eye, passes, unresolves, loading, samples;
+    int depth;            // return addresses in bt: where the eye's first pass ended
+    uintptr_t bt[24];
+} lambda_split_event_t;
+// The last splits (up to 8), oldest first; returns how many it wrote.
+int lambda_gl_engine_split_log(lambda_split_event_t *out, int max);
 
 // The player's body in the engine's mirrors: the avatar's bones for the next
 // frame's eyes (count 3x4 row-major bone-to-room matrices, GoldSrc axes and

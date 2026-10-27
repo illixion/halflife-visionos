@@ -3539,7 +3539,7 @@ index d54ee49..302b1a4 100644
  
  // cull methods
 diff --git a/ref/gl/gl_image.c b/ref/gl/gl_image.c
-index 216039f..64f4303 100644
+index 216039f..256f42e 100644
 --- a/ref/gl/gl_image.c
 +++ b/ref/gl/gl_image.c
 @@ -594,6 +594,22 @@ static void GL_SetTextureFormat( gl_texture_t *tex, pixformat_t format, int chan
@@ -3612,11 +3612,93 @@ index 216039f..64f4303 100644
  	if( FBitSet( tex->flags, TF_DEPTHMAP ))
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
+@@ -1881,6 +1920,50 @@ void R_InitDlightTexture( void )
+ 		update = true;
+ 
+ 	tr.dlightTexture = GL_LoadTextureFromBuffer( "*dlight", &r_image, TF_NOMIPMAP|TF_CLAMP|TF_ATLAS_PAGE, update );
++
++	// the ring's other textures are remade at this block size as they are needed
++	tr.dlightRing[0] = tr.dlightTexture;
++	tr.dlightRingCount = 1;
++	tr.dlightRingUsed = 0;
++}
++
++/*
++==================
++R_VRNextDlightTexture
++
++LambdaVision: the texture the next fill of the dynamic lightmap block goes to.
++Uploading into a texture the open render pass has already drawn with makes
++ANGLE end the pass for the copy, and with the engine's tile MSAA under a
++rasterization rate map the pass that follows reloads its samples wrongly
++(scrambled tiles, docs/plans/anti-aliasing.md Phase 1). So each fill within an
++eye takes a texture nothing has drawn with since the eye began, made on first
++use; R_VRBeginEyeLightmaps starts the ring over, once the previous eye's work
++is committed. Past VR_DLIGHT_RING fills it reuses them (and the pass splits).
++==================
++*/
++int R_VRNextDlightTexture( void )
++{
++	int i = tr.dlightRingUsed % VR_DLIGHT_RING;
++
++	if( i >= tr.dlightRingCount )
++	{
++		rgbdata_t r_image =
++		{
++			.width = BLOCK_SIZE,
++			.height = BLOCK_SIZE,
++			.type = PF_RGBA_32,
++			.flags = IMAGE_HAS_COLOR,
++			.size = BLOCK_SIZE * BLOCK_SIZE * 4
++		};
++		string name;
++
++		Q_snprintf( name, sizeof( name ), "*dlight%d", i );
++		tr.dlightRing[i] = GL_LoadTextureFromBuffer( name, &r_image, TF_NOMIPMAP|TF_CLAMP|TF_ATLAS_PAGE, tr.dlightRing[i] != 0 );
++		tr.dlightRingCount = i + 1;
++	}
++	tr.dlightRingUsed++;
++	tr.dlightTexture = tr.dlightRing[i];
++	return tr.dlightTexture;
+ }
+ 
+ /*
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..d29911e 100644
+index e6e7712..ae3ef1f 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,57 @@ extern convar_t	r_lighting_ambient;
+@@ -58,6 +58,9 @@ void VGL_ShimEndFrame( void );
+ #define BLOCK_SIZE		tr.block_size	// lightmap blocksize
+ #define BLOCK_SIZE_DEFAULT	128		// for keep backward compatibility
+ #define BLOCK_SIZE_MAX	1024
++// LambdaVision: most dynamic lightmap uploads one eye makes into fresh textures
++// before reusing them (R_VRNextDlightTexture)
++#define VR_DLIGHT_RING	16
+ 
+ #define MAX_TEXTURES            8192	// a1ba: increased by users request
+ #define MAX_DETAIL_TEXTURES	256
+@@ -186,6 +189,11 @@ typedef struct
+ 	int		alphaskyTexture;	// quake1 alpha-sky layer
+ 	int		lightmapTextures[MAX_LIGHTMAPS];
+ 	int		dlightTexture;	// custom dlight texture
++	// LambdaVision: the dynamic lightmap block's textures, one per upload
++	// within an eye (R_VRNextDlightTexture)
++	int		dlightRing[VR_DLIGHT_RING];
++	int		dlightRingCount;	// made at the current block size
++	int		dlightRingUsed;		// taken since the eye began
+ 	int		skyboxTextures[SKYBOX_MAX_SIDES];	// skybox sides
+ 	int		skytexturenum;	// this not a gl_texturenum!
+ 	int		skyboxbasenum;	// start with 5800
+@@ -336,6 +344,8 @@ void GL_ApplyTextureParams( gl_texture_t *tex );
+ int GL_FindTexture( const char *name );
+ void GL_FreeTexture( unsigned int texnum );
+ void R_InitDlightTexture( void );
++int R_VRNextDlightTexture( void );
++void R_VRBeginEyeLightmaps( void );
+ void R_TextureList_f( void );
+ void R_InitImages( void );
+ void R_ShutdownImages( void );
+@@ -726,6 +736,57 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3709,7 +3791,7 @@ index 05a130f..842e422 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..3881294 100644
+index 0568486..ecc3f06 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3880,7 +3962,28 @@ index 0568486..3881294 100644
  
  	R_SetupFrustum();
  	R_SetupFrame();
-@@ -1087,6 +1139,135 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -1042,10 +1094,20 @@ static void R_CheckCvars( void )
+ /*
+ ===============
+ R_BeginFrame
++
++vr_begin_frame_hook: visionOS, the platform's first clear of the eye, put
++off until the tick has run the light styles (CL_EmitEntities) and loaded
++what it needed: an upload once the eye's render pass is open ends it, and a
++multisampled eye then reloads every attachment.
+ ===============
+ */
++__attribute__((visibility("default"))) void (*vr_begin_frame_hook)( void ) = NULL;
++
+ void R_BeginFrame( qboolean clearScene )
+ {
++	if( vr_begin_frame_hook )
++		vr_begin_frame_hook();
++
+ 	glConfig.softwareGammaUpdate = false;	// in case of possible fails
+ 
+ 	if(( gl_clear->value || ENGINE_GET_PARM( PARM_DEV_OVERVIEW )) &&
+@@ -1087,6 +1149,135 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -4016,7 +4119,7 @@ index 0568486..3881294 100644
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1095,6 +1276,13 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1095,6 +1286,13 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	// setup the initial render params
  	R_SetupRefParams( rvp );
  
@@ -4030,7 +4133,7 @@ index 0568486..3881294 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1113,11 +1301,42 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1113,11 +1311,42 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	}
  
  	tr.fCustomRendering = false;
@@ -4074,7 +4177,7 @@ index 0568486..3881294 100644
  
  	return;
  }
-@@ -1167,6 +1386,363 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1396,363 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4439,7 +4542,7 @@ index 0568486..3881294 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..54ea1a1 100644
+index df6f012..bfc2dac 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4575,15 +4678,147 @@ index df6f012..54ea1a1 100644
  		for( t = 0; t < tmax; t++ )
  		{
  			int td = (tl - sample_size * t) * sample_frac;
-@@ -1497,6 +1606,7 @@ static qboolean R_CheckLightMap( msurface_t *fa )
- 		GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
- #endif
- 		pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
-+		R_VRSceneLightmapChanged( fa->lightmaptexturenum );
+@@ -713,7 +822,7 @@ static void LM_UploadBlock( qboolean dynamic )
+ {
+ 	if( dynamic )
+ 	{
+-		GL_Bind( XASH_TEXTURE0, tr.dlightTexture );
++		GL_Bind( XASH_TEXTURE0, R_VRNextDlightTexture( ));
+ 		LM_UploadDynamicBlock();
+ 	}
+ 	else
+@@ -1450,6 +1559,8 @@ static void R_RenderDecalsForSurface( msurface_t *fa, int cull_type )
+ 	}
+ }
+ 
++static void R_UpdateStyledLightmap( msurface_t *fa );
++
+ static qboolean R_CheckLightMap( msurface_t *fa )
+ {
+ 	int maps;
+@@ -1472,39 +1583,98 @@ static qboolean R_CheckLightMap( msurface_t *fa )
+ 		if( !( style >= 32 || style == 0 || style == 20 ))
+ 			return true;
+ 
+-		byte temp[132*132*4];
+-		mextrasurf_t *info = fa->info;
+-		int sample_size = gEngfuncs.Mod_SampleSizeForFace( fa );
+-		int smax = ( info->lightextents[0] / sample_size ) + 1;
+-		int tmax = ( info->lightextents[1] / sample_size ) + 1;
++		R_UpdateStyledLightmap( fa );
++		return false;
++	}
+ 
+-		if( smax < 132 && tmax < 132 )
+-			R_BuildLightMap( fa, temp, smax * 4, true );
+-		else
+-		{
+-			smax = Q_min( smax, 132 );
+-			tmax = Q_min( tmax, 132 );
+-			memset( temp, 255, sizeof( temp ));
+-			//Host_MapDesignError( "%s: bad surface extents: %d %d", __func__, fa->extents[0], fa->extents[1] );
+-		}
++	return false; // no change
++}
++
++/*
++=================
++R_UpdateStyledLightmap
++
++A surface's lightmap rebuilt for its light styles' current values and
++uploaded in place. For the styles that don't flicker; R_CheckLightMap sends
++flickering ones, and dlit surfaces, to the dynamic chain instead.
++=================
++*/
++static void R_UpdateStyledLightmap( msurface_t *fa )
++{
++	byte temp[132*132*4];
++	mextrasurf_t *info = fa->info;
++	int sample_size = gEngfuncs.Mod_SampleSizeForFace( fa );
++	int smax = ( info->lightextents[0] / sample_size ) + 1;
++	int tmax = ( info->lightextents[1] / sample_size ) + 1;
++
++	if( smax < 132 && tmax < 132 )
++		R_BuildLightMap( fa, temp, smax * 4, false );
++	else
++	{
++		smax = Q_min( smax, 132 );
++		tmax = Q_min( tmax, 132 );
++		memset( temp, 255, sizeof( temp ));
++		//Host_MapDesignError( "%s: bad surface extents: %d %d", __func__, fa->extents[0], fa->extents[1] );
++	}
+ 
+-		R_UpdateSurfaceCachedLight( fa );
++	R_UpdateSurfaceCachedLight( fa );
  
  #if XASH_WES
- 		GL_SelectTexture( XASH_TEXTURE0 );
-@@ -1529,6 +1639,9 @@ static void R_RenderLightmapForSurface( msurface_t *fa )
+-		GL_Bind( XASH_TEXTURE1, tr.lightmapTextures[fa->lightmaptexturenum] );
+-		pglTexParameteri( GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE );
++	GL_Bind( XASH_TEXTURE1, tr.lightmapTextures[fa->lightmaptexturenum] );
++	pglTexParameteri( GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE );
+ #else
+-		GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
++	GL_Bind( XASH_TEXTURE0, tr.lightmapTextures[fa->lightmaptexturenum] );
+ #endif
+-		pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
++	pglTexSubImage2D( GL_TEXTURE_2D, 0, fa->light_s, fa->light_t, smax, tmax, GL_RGBA, GL_UNSIGNED_BYTE, temp );
++	R_VRSceneLightmapChanged( fa->lightmaptexturenum );
+ 
+ #if XASH_WES
+-		GL_SelectTexture( XASH_TEXTURE0 );
++	GL_SelectTexture( XASH_TEXTURE0 );
+ #endif
+-		return false;
+-	}
++}
+ 
+-	return false; // no change
++/*
++=================
++R_VRBeginEyeLightmaps
++
++LambdaVision: called before each eye's render pass opens. Brings every
++lightmap whose light styles changed up to date first, so no upload lands in a
++lightmap the pass has already drawn with: ANGLE would end the pass for the
++copy, and with the engine's tile MSAA under a rasterization rate map the next
++pass reloads its samples wrongly (scrambled tiles at the beat of a flickering
++light, docs/plans/anti-aliasing.md Phase 1). The first eye of a frame does the
++work; the second, and the mirror and probe views after it, find nothing left.
++Also starts the dynamic lightmap ring over (R_VRNextDlightTexture).
++=================
++*/
++__attribute__((visibility("default"))) void R_VRBeginEyeLightmaps( void )
++{
++	model_t	*world = WORLDMODEL;
++	int	i, maps;
++
++	tr.dlightRingUsed = 0;
++	if( !world || !world->surfaces || !r_dynamic->value )
++		return;
++
++	for( i = 0; i < world->numsurfaces; i++ )
++	{
++		msurface_t *fa = &world->surfaces[i];
++
++		if( !fa->polys || FBitSet( fa->flags, SURF_DRAWTILED ) || !fa->info )
++			continue;
++
++		for( maps = 0; maps < MAXLIGHTMAPS && fa->styles[maps] != 255; maps++ )
++		{
++			const int style = fa->styles[maps];
++
++			if( g_lightstylevalue[style] == fa->cached_light[maps] )
++				continue;
++			// flickering styles: the dynamic chain, as R_CheckLightMap does
++			if( style >= 32 || style == 0 || style == 20 )
++				R_UpdateStyledLightmap( fa );
++			break;
++		}
++	}
+ }
+ 
+ static void R_RenderLightmapForSurface( msurface_t *fa )
+@@ -1529,6 +1699,9 @@ static void R_RenderLightmapForSurface( msurface_t *fa )
  R_RenderBrushPoly
  ================
  */
@@ -4593,7 +4828,7 @@ index df6f012..54ea1a1 100644
  static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  {
  	texture_t	*t;
-@@ -1542,6 +1655,12 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+@@ -1542,6 +1715,12 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  
  	if( FBitSet( fa->flags, SURF_DRAWTURB ))
  	{
@@ -4606,7 +4841,7 @@ index df6f012..54ea1a1 100644
  		// warp texture
  		EmitWaterPolys( fa, cull_type == CULL_BACKSIDE, R_UploadRipples( t ));
  
-@@ -1549,6 +1668,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
+@@ -1549,6 +1728,8 @@ static void R_RenderBrushPoly( msurface_t *fa, int cull_type )
  		if( Mod_HaveLightmappedWater( ))
  			R_RenderLightmapForSurface( fa );
  
@@ -4615,7 +4850,7 @@ index df6f012..54ea1a1 100644
  		return;
  	}
  	else GL_Bind( XASH_TEXTURE0, t->gl_texturenum );
-@@ -1696,7 +1817,7 @@ void R_DrawWaterSurfaces( void )
+@@ -1696,7 +1877,7 @@ void R_DrawWaterSurfaces( void )
  	msurface_t	*s;
  	texture_t		*t;
  
@@ -4624,7 +4859,7 @@ index df6f012..54ea1a1 100644
  		return;
  
  	// non-transparent water is already drawed
-@@ -1730,7 +1851,11 @@ void R_DrawWaterSurfaces( void )
+@@ -1730,7 +1911,11 @@ void R_DrawWaterSurfaces( void )
  
  		for( ; s; s = s->texturechain )
  		{
@@ -4636,7 +4871,7 @@ index df6f012..54ea1a1 100644
  
  			if( Mod_HaveLightmappedWater( ))
  				R_RenderLightmapForSurface( s );
-@@ -1830,6 +1955,204 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1830,6 +2015,204 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -4841,7 +5076,7 @@ index df6f012..54ea1a1 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1946,7 +2269,8 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1946,7 +2329,8 @@ void R_DrawBrushModel( cl_entity_t *e )
  	e->visframe = tr.realframecount; // visible
  
  	// calculate dynamic lighting for bmodel
@@ -4851,7 +5086,7 @@ index df6f012..54ea1a1 100644
  
  	// setup the rendermode
  	R_SetRenderMode( e );
-@@ -1959,6 +2283,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2343,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
@@ -4864,7 +5099,7 @@ index df6f012..54ea1a1 100644
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2302,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2362,16 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
@@ -4883,7 +5118,16 @@ index df6f012..54ea1a1 100644
  	}
  
  	R_DrawVBO( R_HasLightmap(), true );
-@@ -3855,6 +4193,10 @@ void R_MarkLeaves( void )
+@@ -2905,7 +3303,7 @@ static void R_FlushDlights( vboarray_t *vbo, int min_index, int max_index, int d
+ 
+ 	}
+ 	//GL_SelectTexture( mtst.tmu_lm );
+-	GL_Bind( mtst.tmu_lm, tr.dlightTexture );
++	GL_Bind( mtst.tmu_lm, R_VRNextDlightTexture( ));
+ #ifdef DISCARD_DLIGHTS
+ 	pglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, BLOCK_SIZE, BLOCK_SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0 );
+ #endif
+@@ -3855,6 +4253,10 @@ void R_MarkLeaves( void )
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		return;
  
@@ -4894,7 +5138,7 @@ index df6f012..54ea1a1 100644
  	if( FBitSet( r_novis.flags, FCVAR_CHANGED ) || tr.fResetVis )
  	{
  		// force recalc viewleaf
-@@ -3982,6 +4324,7 @@ void GL_RebuildLightmaps( void )
+@@ -3982,6 +4384,7 @@ void GL_RebuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();
@@ -4902,7 +5146,7 @@ index df6f012..54ea1a1 100644
  
  	for( i = 0; i < gp_cl->nummodels; i++ )
  	{
-@@ -4045,6 +4388,7 @@ void GL_BuildLightmaps( void )
+@@ -4045,6 +4448,7 @@ void GL_BuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();

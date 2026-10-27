@@ -701,6 +701,35 @@ enum DebugEndpoints {
 
     // MARK: Perf and diagnostics
 
+    /// The engine's last split eye frames, oldest first, ages in seconds.
+    private static func splitLog() -> [JSONValue] {
+        var events = [lambda_split_event_t](repeating: lambda_split_event_t(), count: 8)
+        let n = Int(lambda_gl_engine_split_log(&events, Int32(events.count)))
+        let nowMs = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) * 1e-6
+        return events.prefix(n).map { e in
+            .object(["agoSeconds": .double(((nowMs - e.uptime_ms) / 100).rounded() / 10),
+                     "frame": .int(Int(e.frame)), "eye": .int(Int(e.eye)),
+                     "passes": .int(Int(e.passes)), "unresolves": .int(Int(e.unresolves)),
+                     "loading": .bool(e.loading != 0), "samples": .int(Int(e.samples)),
+                     "endedAt": .array(splitBacktrace(e))])
+        }
+    }
+
+    /// A split's backtrace as image+offset (atos -l against the dSYM).
+    private static func splitBacktrace(_ e: lambda_split_event_t) -> [JSONValue] {
+        var bt = e.bt
+        return withUnsafeBytes(of: &bt) { raw in
+            raw.bindMemory(to: UInt.self).prefix(Int(e.depth)).map { addr in
+                var info = Dl_info()
+                guard dladdr(UnsafeRawPointer(bitPattern: addr), &info) != 0, let base = info.dli_fbase else {
+                    return .string(String(format: "0x%lx", addr))
+                }
+                let image = info.dli_fname.map { (String(cString: $0) as NSString).lastPathComponent } ?? "?"
+                return .string(String(format: "%@+0x%lx", image, addr - UInt(bitPattern: base)))
+            }
+        }
+    }
+
     private static func foveationReply() -> JSONValue {
         let r = EngineFoveation.report
         func size(_ s: MTLSize) -> JSONValue { .array([.int(s.width), .int(s.height)]) }
@@ -716,10 +745,13 @@ enum DebugEndpoints {
             "angleTookMap": .bool(lambda_gl_rate_map_ok() != 0),
             "engineSamples": .int(Int(lambda_gl_engine_samples())),
             "engineRenderPasses": {
-                var s = [Int32](repeating: 0, count: 4)
+                var s = [Int32](repeating: 0, count: 6)
                 lambda_gl_engine_pass_stats(&s)
                 return .object(["eye0": .int(Int(s[0])), "eye0Unresolves": .int(Int(s[1])),
-                                "eye1": .int(Int(s[2])), "eye1Unresolves": .int(Int(s[3]))])
+                                "eye1": .int(Int(s[2])), "eye1Unresolves": .int(Int(s[3])),
+                                "eye0SplitFrames": .int(Int(s[4])), "eye1SplitFrames": .int(Int(s[5])),
+                                "splitFramesLoading": .int(Int(lambda_gl_engine_split_loading_frames())),
+                                "recentSplits": .array(splitLog())])
             }(),
             "compositor": .object([
                 "layers": .int(r.compositorLayers),

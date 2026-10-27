@@ -45,10 +45,10 @@ index 2e24dd7bc6..87df6723cf 100644
                                                                                  dsBlitParams));
      }
 diff --git a/src/libANGLE/renderer/metal/mtl_command_buffer.mm b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
-index b019051d74..b4f2987314 100644
+index b019051d74..81a3ecc4b7 100644
 --- a/src/libANGLE/renderer/metal/mtl_command_buffer.mm
 +++ b/src/libANGLE/renderer/metal/mtl_command_buffer.mm
-@@ -28,6 +28,25 @@
+@@ -28,6 +28,34 @@
  #include "libANGLE/renderer/metal/mtl_resources.h"
  #include "libANGLE/renderer/metal/mtl_utils.h"
  
@@ -71,10 +71,28 @@ index b019051d74..b4f2987314 100644
 +        *unresolves = gRenderPassUnresolves.load(std::memory_order_relaxed);
 +}
 +
++// Called as a render encoder ends, on the thread ending it, so the embedding
++// app can take a backtrace of whatever split a pass it meant to keep whole.
++static std::atomic<void (*)(void)> gRenderPassEndHook{nullptr};
++
++extern "C" __attribute__((visibility("default"))) void ANGLE_SetRenderPassEndHook(void (*hook)(void))
++{
++    gRenderPassEndHook.store(hook, std::memory_order_relaxed);
++}
++
  // Use to compare the new values with the values already set in the command encoder:
  static inline bool operator==(const MTLViewport &lhs, const MTLViewport &rhs)
  {
-@@ -1723,6 +1742,8 @@ RenderCommandEncoder &RenderCommandEncoder::restart(const RenderPassDesc &desc,
+@@ -1501,6 +1529,8 @@ void RenderCommandEncoder::endEncodingImpl(bool considerDiscardSimulation)
+ {
+     if (!valid())
+         return;
++    if (void (*hook)(void) = gRenderPassEndHook.load(std::memory_order_relaxed))
++        hook();
+ 
+     bool hasAttachment = false;
+ 
+@@ -1723,6 +1753,8 @@ RenderCommandEncoder &RenderCommandEncoder::restart(const RenderPassDesc &desc,
          return *this;
      }
  

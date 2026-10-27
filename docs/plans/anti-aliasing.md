@@ -204,12 +204,36 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   1.0 + 1.3 ms at one sample, 1.2 + 1.8 ms at four. frameGPU was 4.6 ms both
   ways, so the GPU clock may hide or inflate part of the difference. Repeat
   the A/B with the wearer settled before calling it.
-- **Latent bug, foveated only:** ANGLE's unresolve
+- **Splits garble the foveated eye.** ANGLE's unresolve
   (`FramebufferMtl::unresolveIfNeeded`) draws the resolved image back at
   screen-normalized coordinates, while that image is stored in the rate
-  map's physical layout. Any split inside an eye would garble it. Splits
-  haven't happened yet, but watch `engineRenderPasses` in scenes with dynamic
-  lights (lightmap uploads) before turning MSAA on by default.
+  map's physical layout. Each split frame shows black tiles and ghosting.
+  On c1a1 this beat with the light styles: two flashes, a pause, one flash.
+  The sources found so far, and what keeps each one out of the eye's pass:
+  - A GPU timer query begun after the clear (gpuPassTiming). The timers now
+    start before it.
+  - Light-style lightmaps (`R_CheckLightMap`), uploaded mid-pass into
+    textures the pass had drawn with. `R_VRBeginEyeLightmaps` uploads the
+    changed ones before the pass. On the eye that ticks, the bridge's clear,
+    which opens the pass, waits for the engine's `R_BeginFrame`
+    (`vr_begin_frame_hook`). By then `CL_EmitEntities` has run the styles,
+    so the prepass goes there. A prepass before the tick missed every style
+    step, so eye 0 kept splitting from `R_DrawBrushModel`.
+  - Dynamic lightmap blocks (flicker styles, dlights). Each fill goes into a
+    fresh texture from a 16-deep ring (`R_VRNextDlightTexture`).
+- Still splitting:
+  - A level's first frames: about 20 passes an eye at launch and a few
+    2-pass frames after a map load.
+  - The dropped-down console with a screen of text. `CL_DrawCharacter`
+    flushes one draw per character through the GL2 shim, and the stream
+    exhausts ANGLE's vertex buffer pool, which flushes the command buffer.
+- **The safety net.** Three split frames under multisampling within 180
+  frames mean one sample for the rest of the run. Only frames of a level
+  that has been in play for 180 frames count. `/foveation` lists the last
+  eight splits (`recentSplits`), each with a backtrace taken where the
+  pass ended (`ANGLE_SetRenderPassEndHook` in the msrtt2 patch). To
+  symbolicate, run `atos -o <dSYM> -l 0x100000000` on 0x100000000 plus
+  each offset.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

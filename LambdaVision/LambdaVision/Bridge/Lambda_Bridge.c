@@ -3511,22 +3511,109 @@ int lambda_gl_engine_samples(void) { return g_engine_samples_now; }
 // an eye stays in one pass: each split reloads every attachment with a
 // full-screen draw.
 extern void ANGLE_GetRenderPassStats(unsigned long long *passes, unsigned long long *unresolves);
+// gl_rsurf.c: the lightmaps whose light styles changed, uploaded before the
+// eye's pass opens (an upload into a lightmap the pass already drew with ends
+// it), and the dynamic lightmap ring started over.
+extern void R_VRBeginEyeLightmaps(void);
 static unsigned long long g_pass_mark[2];
 static _Atomic int g_eye_passes[2], g_eye_unresolves[2];
+static _Atomic int g_eye_split_frames[2];   // frames since launch an eye took more than one pass
+static _Atomic int g_split_loading_frames = 0;  // of those, while the loading plaque held the view
+// The last splits, for /foveation: which eye, how, and when.
+#define SPLIT_LOG 8
+static lambda_split_event_t g_split_log[SPLIT_LOG];
+static int g_split_log_n = 0;                   // events since launch
+static pthread_mutex_t g_split_log_mtx = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_pass_frame = 0;               // eye-0 frames since launch
+static unsigned g_ms_split_frames[3];           // when multisampling last split, newest first
+static unsigned g_unsettled_frame = 0;          // the last frame loading or out of a level
+extern int SCR_VRLoading(void);
+extern int CL_IsInGame(void);
+static double ft_now_ms(void);
 
-static void pass_stats_begin(void) { ANGLE_GetRenderPassStats(&g_pass_mark[0], &g_pass_mark[1]); }
-static void pass_stats_end(int eye) {
-    unsigned long long p, u;
-    ANGLE_GetRenderPassStats(&p, &u);
-    atomic_store(&g_eye_passes[eye], (int)(p - g_pass_mark[0]));
-    atomic_store(&g_eye_unresolves[eye], (int)(u - g_pass_mark[1]));
+// Where an eye's pass first ended early: a backtrace from ANGLE's encoder
+// end (angle-metal-msrtt2.patch), taken only for a pass the eye started.
+#include <execinfo.h>
+extern void ANGLE_SetRenderPassEndHook(void (*hook)(void));
+static _Atomic int g_pass_armed = 0;
+static void *g_split_bt[24];
+static int g_split_bt_n = 0;
+static void pass_end_hook(void) {
+    if (!atomic_load(&g_pass_armed) || g_split_bt_n) return;
+    unsigned long long p;
+    ANGLE_GetRenderPassStats(&p, NULL);
+    if (p == g_pass_mark[0]) return;   // a pass from before the eye
+    g_split_bt_n = backtrace(g_split_bt, 24);
 }
 
-void lambda_gl_engine_pass_stats(int out[4]) {
+static void pass_stats_begin(void) {
+    static int hooked = 0;
+    if (!hooked) { ANGLE_SetRenderPassEndHook(pass_end_hook); hooked = 1; }
+    ANGLE_GetRenderPassStats(&g_pass_mark[0], &g_pass_mark[1]);
+    g_split_bt_n = 0;
+    atomic_store(&g_pass_armed, 1);
+}
+static void pass_stats_end(int eye) {
+    unsigned long long p, u;
+    atomic_store(&g_pass_armed, 0);
+    ANGLE_GetRenderPassStats(&p, &u);
+    int passes = (int)(p - g_pass_mark[0]), unresolves = (int)(u - g_pass_mark[1]);
+    int loading = SCR_VRLoading() ? 1 : 0;
+    if (eye == 0) g_pass_frame++;
+    if (loading || !CL_IsInGame()) g_unsettled_frame = g_pass_frame;
+    atomic_store(&g_eye_passes[eye], passes);
+    atomic_store(&g_eye_unresolves[eye], unresolves);
+    if (passes <= 1) return;
+    atomic_fetch_add(&g_eye_split_frames[eye], 1);
+    if (loading) atomic_fetch_add(&g_split_loading_frames, 1);
+    pthread_mutex_lock(&g_split_log_mtx);
+    g_split_log[g_split_log_n % SPLIT_LOG] = (lambda_split_event_t){
+        .uptime_ms = ft_now_ms(), .frame = (int)g_pass_frame, .eye = eye, .passes = passes,
+        .unresolves = unresolves, .loading = loading, .samples = g_frame_ms ? g_frame_ms->samples : 1,
+        .depth = g_split_bt_n };
+    for (int i = 0; i < g_split_bt_n; i++) g_split_log[g_split_log_n % SPLIT_LOG].bt[i] = (uintptr_t)g_split_bt[i];
+    g_split_log_n++;
+    pthread_mutex_unlock(&g_split_log_mtx);
+    // ANGLE's unresolve draws the resolved image back at screen coordinates,
+    // but under a rate map that image holds the physical layout: the rest of
+    // the eye lands on scrambled tiles (black blocks, ghosting). Seen when a
+    // GPU timer query began between the clear and the first draw, and on
+    // every light-style step before R_VRBeginEyeLightmaps. Only frames of a
+    // level settled in play count: frames under the loading plaque are never
+    // shown, and a level's first frames upload as they draw (20 passes an
+    // eye at launch, a few 2-pass frames a second after a map load). A model
+    // loaded mid-level is a lone bad frame; three within two seconds or so
+    // beat like the light-style flicker did, and aliasing beats that, so
+    // they end multisampling.
+    if (unresolves && g_pass_frame - g_unsettled_frame > 180 && g_frame_ms && g_frame_rate_map_ok && g_engine_msrtt2) {
+        g_ms_split_frames[2] = g_ms_split_frames[1];
+        g_ms_split_frames[1] = g_ms_split_frames[0];
+        g_ms_split_frames[0] = g_pass_frame;
+        int recurs = g_ms_split_frames[2] && g_pass_frame - g_ms_split_frames[2] <= 180;
+        fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map%s\n",
+                eye, passes, unresolves, recurs ? ", the third in 180 frames: one sample from now on" : "");
+        if (recurs) g_engine_msrtt2 = 0;
+    }
+}
+
+void lambda_gl_engine_pass_stats(int out[6]) {
     for (int eye = 0; eye < 2; eye++) {
         out[eye * 2] = atomic_load(&g_eye_passes[eye]);
         out[eye * 2 + 1] = atomic_load(&g_eye_unresolves[eye]);
+        out[4 + eye] = atomic_load(&g_eye_split_frames[eye]);
     }
+}
+
+int lambda_gl_engine_split_loading_frames(void) { return atomic_load(&g_split_loading_frames); }
+
+int lambda_gl_engine_split_log(lambda_split_event_t *out, int max) {
+    pthread_mutex_lock(&g_split_log_mtx);
+    int n = g_split_log_n < SPLIT_LOG ? g_split_log_n : SPLIT_LOG;
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++)   // oldest first
+        out[i] = g_split_log[(g_split_log_n - n + i) % SPLIT_LOG];
+    pthread_mutex_unlock(&g_split_log_mtx);
+    return n;
 }
 
 static void engine_ms_release(engine_ms_fbo_t *f) {
@@ -3613,6 +3700,37 @@ static engine_ms_fbo_t *engine_ms_fbo_for(void *color, void *depth) {
     return f;
 }
 
+// The eye's first clear opens its render pass. For the eye that ticks, it
+// waits for the engine's R_BeginFrame (vr_begin_frame_hook), after the tick
+// has run the light styles and loaded what it needed, so their uploads land
+// before the pass instead of splitting it; the style prepass goes with it.
+// A tick that never begins a frame is cleared after it (frame_clear_flush).
+static int   g_defer_clear = 0;      // set around the ticking eye's begin
+static int   g_clear_pending = 0;
+static float g_clear_rgb[3];
+extern void (*vr_begin_frame_hook)(void);
+
+static void frame_clear_now(void) {
+    g_clear_pending = 0;
+    glClearColor(g_clear_rgb[0], g_clear_rgb[1], g_clear_rgb[2], 1.0f);
+    glClearDepthf(1.0f);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+}
+static void frame_clear(float r, float g, float b) {
+    g_clear_rgb[0] = r; g_clear_rgb[1] = g; g_clear_rgb[2] = b;
+    g_clear_pending = 1;
+    if (!g_defer_clear) frame_clear_now();
+}
+static void frame_begin_hook(void) {
+    if (!g_clear_pending) return;
+    R_VRBeginEyeLightmaps();
+    frame_clear_now();
+}
+static void frame_clear_flush(void) {
+    if (g_clear_pending) frame_clear_now();
+}
+
 int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
                                            int width, int height,
                                            float r, float g, float b) {
@@ -3633,10 +3751,7 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
         g_frame_w = width;
         g_frame_h = height;
         glViewport(0, 0, width, height);
-        glClearColor(r, g, b, 1.0f);
-        glClearDepthf(1.0f);
-        glClearStencil(0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        frame_clear(r, g, b);
         return 0;
     }
     g_engine_samples_now = 1;
@@ -3761,10 +3876,7 @@ int lambda_gl_begin_frame_into_mtl_texture(void *mtl_texture,
     g_frame_w = width;
     g_frame_h = height;
     glViewport(0, 0, width, height);
-    glClearColor(r, g, b, 1.0f);
-    glClearDepthf(1.0f);
-    glClearStencil(0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    frame_clear(r, g, b);
     return 0;
 }
 
@@ -4852,9 +4964,18 @@ static int worker_engine_frame(void) {
     g_frame_rate_map = g_w_rate_map;
     g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
     pass_stats_begin();
+    // The GPU timer starts before the clear: a query begun once the eye's
+    // render pass is open ends that pass, and with MSAA the next one has to
+    // reload (unresolve) every attachment. The clear itself, and the light
+    // style prepass, wait for the tick's R_BeginFrame (frame_begin_hook).
+    gt_begin(0);
+    vr_begin_frame_hook = frame_begin_hook;
+    g_defer_clear = 1;
     int br = lambda_gl_begin_frame_into_mtl_texture(
         g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
+    g_defer_clear = 0;
     int er = 0;
+    if (br != 0) gt_end();
     if (br == 0) {
         lambda_engine_set_stereo_offset(g_w_eye_offset);
         if (g_w_have_tangents)
@@ -4884,7 +5005,6 @@ static int worker_engine_frame(void) {
         // engine routes to the menu) lands where the mouse moved it.
         lambda_menu_input_apply();
         lambda_key_queue_apply();
-        gt_begin(0);
         double t0 = ft_now_ms();
         // the ray-traced mirror's studio models: what this eye draws, and
         // the player's body
@@ -4892,6 +5012,7 @@ static int worker_engine_frame(void) {
         int capture = atomic_load(&g_rt_on);
         if (capture) R_VRSceneBeginCapture();
         lambda_engine_frame();
+        frame_clear_flush();
         if (capture) {
             R_VRAvatarCapture();
             R_VRSceneEndCapture();
@@ -5010,10 +5131,13 @@ static void *gl_worker_main(void *arg) {
             g_frame_depth_mtl = g_w_depth;
             g_frame_rate_map = g_w_rate_map;
             g_frame_phys_w = g_w_phys_w; g_frame_phys_h = g_w_phys_h;
+            R_VRBeginEyeLightmaps();
             pass_stats_begin();
+            gt_begin(1);   // before the clear, as for eye 0
             int br = lambda_gl_begin_frame_into_mtl_texture(
                 g_w_mtl, g_w_w, g_w_h, g_w_r, g_w_g, g_w_b);
             int er = 0;
+            if (br != 0) gt_end();
             if (br == 0) {
                 lambda_engine_set_stereo_offset(g_w_eye_offset);
                 if (g_w_have_tangents)
@@ -5027,7 +5151,6 @@ static void *gl_worker_main(void *arg) {
                                                   g_w_view_offset[2]);
                 }
                 lambda_engine_set_2d_viewport(g_w_have_2d_rect ? g_w_2d_rect : NULL);
-                gt_begin(1);
                 double t0 = ft_now_ms();
                 lambda_engine_render_view_only();
                 double t1 = ft_now_ms();
