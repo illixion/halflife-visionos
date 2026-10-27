@@ -1,0 +1,22 @@
+device: Apple M2 Max   ProcessInfo: Version 27.0.1 (Build 26A434)
+--- headline: depth32Float_stencil8 2D array, 1 sample, plain render pass (no MSAA, no resolve)
+[PASS] direct slice view V1, slice 0, 1 sample              all planes of both slices as expected
+[PASS] direct slice view V1, slice 1, 1 sample              all planes of both slices as expected
+[FAIL] NESTED view V2 of V1, slice 0, 1 sample              stencil slice0: 65536/65536 px wrong; depth slice1: 16384/65536 px wrong; stencil slice1: 2048/65536 px wrong
+       (stencil read back through the written view: correct)
+[FAIL] NESTED view V2 of V1, slice 1, 1 sample              stencil slice0: 65536/65536 px wrong; stencil slice1: 65536/65536 px wrong
+       (stencil read back through the written view: correct)
+--- 4x multisample render, resolve into the view
+[PASS] direct slice view V1, slice 0, 4x resolve            all planes of both slices as expected
+[PASS] direct slice view V1, slice 1, 4x resolve            all planes of both slices as expected
+[FAIL] NESTED view V2 of V1, slice 0, 4x resolve            stencil slice0: 65536/65536 px wrong; depth slice1: 16384/65536 px wrong; stencil slice1: 2048/65536 px wrong
+       (stencil read back through the written view: correct)
+[FAIL] NESTED view V2 of V1, slice 1, 4x resolve            stencil slice0: 65536/65536 px wrong; stencil slice1: 65536/65536 px wrong
+       (stencil read back through the written view: correct)
+--- controls: nested views of other formats
+[PASS] depth32Float only, NESTED, slice 1, 1 sample(s)      all planes of both slices as expected
+[PASS] rgba8Unorm colour, NESTED, slice 1, 1 sample(s)      all planes of both slices as expected
+[PASS] depth32Float only, NESTED, slice 1, 4 sample(s)      all planes of both slices as expected
+[PASS] rgba8Unorm colour, NESTED, slice 1, 4 sample(s)      all planes of both slices as expected
+
+RESULT: FAIL - at least one configuration produced wrong data
