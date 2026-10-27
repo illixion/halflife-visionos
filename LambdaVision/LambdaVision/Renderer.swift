@@ -238,6 +238,13 @@ actor Renderer {
     private var avatarSuitSeenSince: Double = 0
     private var avatarMesh: StudioMesh?
     private var avatarMeshLegs = false
+    /// This frame's body, posed before the eyes (renderFrame) so the engine's
+    /// mirrors show the pose the weapon pass draws.
+    private var frameBody: WeaponPass.BodyDraw?
+    /// The pose for the engine's mirrors: bone → room matrices, 3×4 row-major
+    /// (GoldSrc axes, inches; hidden bones collapsed), and the pelvis, where
+    /// the engine samples its light. Nil when no body is drawn.
+    private var avatarMirror: (bones: [Float], origin: SIMD3<Float>)?
     private var avatarBodyYaw: Float? = nil
     private var avatarLastTime: Double? = nil
     // The legs: planted feet carried between frames, and the freshness of
@@ -1270,6 +1277,7 @@ actor Renderer {
     /// never leaves GoldSrc space; only the root does.
     private func avatarBodyDraw(deviceAnchor: DeviceAnchor?, time: Double,
                                 gripFingers: [String: simd_quatf]? = nil) -> WeaponPass.BodyDraw? {
+        avatarMirror = nil
         guard Renderer.avatarBodyEnabled, Renderer.avatarAvailable, let deviceAnchor else { return nil }
         // A look-pitch tilts the game world off the room, which the body
         // (posed in the room) cannot follow: leave it out while one is set.
@@ -1357,9 +1365,69 @@ actor Renderer {
         } else {
             pose = rig.pose(targets)
         }
+        avatarMirror = Self.mirrorBones(pose, pelvis: rig.pelvis,
+                                        hidden: rig.mirrorHiddenBones(legs: Renderer.avatarLegsVisible))
         return WeaponPass.BodyDraw(mesh: mesh, palette: pose.palette, model: studioToWorld * pose.root,
                                    leftHand: rig.handMatrix(pose, left: true),
                                    rightHand: rig.handMatrix(pose, left: false))
+    }
+
+    /// A pose as the engine's mirrors take it (`avatarMirror`): each bone's
+    /// placement in the room, the hidden ones scaled to nothing at their joint.
+    static func mirrorBones(_ pose: AvatarRig.Pose, pelvis: Int, hidden: Set<Int>)
+        -> (bones: [Float], origin: SIMD3<Float>) {
+        var bones = [Float]()
+        bones.reserveCapacity(pose.palette.count * 12)
+        for (i, palette) in pose.palette.enumerated() {
+            var m = pose.root * palette
+            if hidden.contains(i) { m.columns.0 = .zero; m.columns.1 = .zero; m.columns.2 = .zero }
+            for row in 0..<3 {
+                bones += [m.columns.0[row], m.columns.1[row], m.columns.2[row], m.columns.3[row]]
+            }
+        }
+        let p = (pose.root * pose.palette[min(pelvis, pose.palette.count - 1)]).columns.3
+        return (bones, SIMD3(p.x, p.y, p.z))
+    }
+
+    /// The fingers of the hand holding the gun, closed the way the
+    /// viewmodel's own hand holds it, from the weapon pass as of its last
+    /// update; nil when no gun sits in the body's hand (none held, or the
+    /// viewmodel drawn flat with its own hands).
+    private func avatarGripFingers() -> [String: simd_quatf]? {
+        guard let weaponPass else { return nil }
+        let handsMode = InputModeState.current == .hands
+        let flatViewmodel = (weaponPass.drawsFlat || !handsMode) && !weaponPass.showsWorldModel
+        guard weaponPass.isReady, lambda_weapon_active() != 0, !flatViewmodel,
+              let grip = weaponPass.grip, !weaponPass.palette.isEmpty else { return nil }
+        return ViewmodelGrip.fingerPose(boneNames: weaponPass.boneNames, palette: weaponPass.palette,
+                                        grip: grip, handIsLeft: Renderer.dominantHandIsLeft)
+    }
+
+    /// Hands the engine this frame's body for its mirrors, with each eye's
+    /// room origin and right axis (the eye as the engine places it: the
+    /// head, moved along its right by the eye's offset), or no body.
+    private func avatarMirrorPublish(deviceAnchor: DeviceAnchor?, views: [LayerRenderer.Drawable.View]) {
+        guard let mirror = avatarMirror, let deviceAnchor, views.count >= 2 else {
+            lambda_gl_worker_set_avatar(nil, 0, nil, nil)
+            return
+        }
+        let h = deviceAnchor.originFromAnchorTransform
+        let right = SIMD3(h.columns.0.x, h.columns.0.y, h.columns.0.z)
+        let head = SIMD3(h.columns.3.x, h.columns.3.y, h.columns.3.z)
+        var eyes = [Float]()
+        for eye in 0..<2 {
+            let origin = studioPoint(head + right * views[eye].transform.columns.3.x)
+            let r = studioDirection(right)
+            eyes += [origin.x, origin.y, origin.z, r.x, r.y, r.z]
+        }
+        var origin = mirror.origin
+        mirror.bones.withUnsafeBufferPointer { b in
+            withUnsafePointer(to: &origin) { o in
+                o.withMemoryRebound(to: Float.self, capacity: 3) { op in
+                    lambda_gl_worker_set_avatar(b.baseAddress, Int32(mirror.bones.count / 12), op, eyes)
+                }
+            }
+        }
     }
 
     /// Changes Gordon into or out of the HEV suit when the HUD's suit flag has
@@ -3045,6 +3113,13 @@ actor Renderer {
         lambda_gl_worker_set_rt(rtOn ? 1 : 0)
         var secondEyeRan = false
 
+        // The first-person body, posed before the eyes so the engine's
+        // mirrors show it as the weapon pass draws it. Its grip and the
+        // game's ground under it are as of the last tick.
+        frameBody = avatarBodyDraw(deviceAnchor: frameDeviceAnchor, time: presentTime,
+                                   gripFingers: avatarGripFingers())
+        avatarMirrorPublish(deviceAnchor: frameDeviceAnchor, views: primary.views)
+
         for eye in 0..<2 where !engineHeld {
             // GPU-side fence for this eye: the bridge signals angleFenceEvent
             // with this value on ANGLE's queue when the eye's render
@@ -3278,16 +3353,9 @@ actor Renderer {
         weaponPass.update()
         let weaponActive = weaponPass.isReady && lambda_weapon_active() != 0
         let joystickVisible = HandMovement.joystickVisualization != nil
-        var gripFingers: [String: simd_quatf]? = nil
         let flatViewmodel = (weaponPass.drawsFlat || !handsMode) && !weaponPass.showsWorldModel
-        if weaponActive, !flatViewmodel, let grip = weaponPass.grip, !weaponPass.palette.isEmpty {
-            gripFingers = ViewmodelGrip.fingerPose(boneNames: weaponPass.boneNames,
-                                                   palette: weaponPass.palette, grip: grip,
-                                                   handIsLeft: Renderer.dominantHandIsLeft)
-        }
-        let body = avatarBodyDraw(deviceAnchor: deviceAnchor,
-                                  time: drawable.frameTiming.presentationTime.timeInterval,
-                                  gripFingers: gripFingers)
+        // Posed before the eyes (renderFrame).
+        let body = frameBody
         // The body's hands replace the viewmodel's: its gloves, floating off
         // hand and sleeve are cut, and the gun alone goes into the avatar's
         // hand. Without a grip there is nothing to pin the gun by, so the

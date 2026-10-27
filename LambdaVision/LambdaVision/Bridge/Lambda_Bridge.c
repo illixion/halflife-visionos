@@ -4282,6 +4282,64 @@ static void worker_render_mirror(int eye) {
     if (eye == 1) atomic_store(&g_mirror_cpu_fresh, 1);
 }
 
+// ---- The player's body in the mirrors --------------------------------------
+// The app draws the first-person body (its IK avatar) after the engine, so
+// neither mirror would show it. The engine gets the same model, copied from
+// the body slot whenever that changes (gl_studio.c R_VRAvatarModel), its
+// bones in the room each frame (posed before the eyes, R_VRAvatarPose) and,
+// before each eye, where that eye is in the room (R_VRAvatarEye); the
+// rendered mirror draws it, and eye 0's capture adds its triangles to the
+// ray-traced mirror's scene (R_VRAvatarCapture).
+extern int  R_VRAvatarModel(const void *data, const void *texdata, int body, const char *name);
+extern void R_VRAvatarPose(const float *bones, int count, const float *origin);
+extern void R_VRAvatarEye(const float *origin, const float *right);
+extern void R_VRAvatarCapture(void);
+#define AVATAR_MAX_BONES 128   // = MAXSTUDIOBONES
+static pthread_mutex_t g_avatar_mtx = PTHREAD_MUTEX_INITIALIZER;
+static float  g_avatar_bones[AVATAR_MAX_BONES * 12];
+static int    g_avatar_count = 0;
+static float  g_avatar_origin[3];
+static float  g_avatar_eyes[2][6];
+static uint32_t    g_avatar_engine_gen = 0;      // worker only: the body slot's
+static const void *g_avatar_engine_hdr = NULL;   // model the engine copied
+
+void lambda_gl_worker_set_avatar(const float *bones, int count, const float *origin, const float *eyes) {
+    pthread_mutex_lock(&g_avatar_mtx);
+    g_avatar_count = (bones && origin && eyes && count > 0 && count <= AVATAR_MAX_BONES) ? count : 0;
+    if (g_avatar_count) {
+        memcpy(g_avatar_bones, bones, sizeof(float) * 12 * (size_t)count);
+        memcpy(g_avatar_origin, origin, sizeof(g_avatar_origin));
+        memcpy(g_avatar_eyes, eyes, sizeof(g_avatar_eyes));
+    }
+    pthread_mutex_unlock(&g_avatar_mtx);
+}
+
+// Eye 0, before the frame: the model when the body slot changed, the pose,
+// the eye. Every later view of the frame keeps that pose.
+static void worker_avatar_frame(void) {
+    const void *hdr = NULL, *tex = NULL;
+    const char *path = NULL;
+    int body = 0;
+    uint32_t gen = lambda_body_studio(&hdr, &tex, &body, &path);
+    if (gen != g_avatar_engine_gen || hdr != g_avatar_engine_hdr) {
+        int ok = R_VRAvatarModel(hdr, tex, body, path);
+        fprintf(stderr, "[avatar] mirror model gen=%u %s\n", gen, ok ? "loaded" : "none");
+        g_avatar_engine_gen = gen;
+        g_avatar_engine_hdr = hdr;
+    }
+    lambda_body_unlock();
+    pthread_mutex_lock(&g_avatar_mtx);
+    R_VRAvatarPose(g_avatar_count ? g_avatar_bones : NULL, g_avatar_count, g_avatar_origin);
+    R_VRAvatarEye(g_avatar_count ? g_avatar_eyes[0] : NULL, g_avatar_eyes[0] + 3);
+    pthread_mutex_unlock(&g_avatar_mtx);
+}
+
+static void worker_avatar_eye(int eye) {
+    pthread_mutex_lock(&g_avatar_mtx);
+    R_VRAvatarEye(g_avatar_count ? g_avatar_eyes[eye] : NULL, g_avatar_eyes[eye] + 3);
+    pthread_mutex_unlock(&g_avatar_mtx);
+}
+
 // ---- Ray-traced water mirror (Renderer.waterMirrorMethod .rayTraced) -------
 // The engine's world triangles (gl_vrscene.c) for the app's acceleration
 // structures (RTWaterScene.swift, RTWater.swift): a snapshot, taken on the
@@ -4652,11 +4710,16 @@ static int worker_engine_frame(void) {
         lambda_key_queue_apply();
         gt_begin(0);
         double t0 = ft_now_ms();
-        // the ray-traced mirror's studio models: what this eye draws
+        // the ray-traced mirror's studio models: what this eye draws, and
+        // the player's body
+        worker_avatar_frame();
         int capture = atomic_load(&g_rt_on);
         if (capture) R_VRSceneBeginCapture();
         lambda_engine_frame();
-        if (capture) R_VRSceneEndCapture();
+        if (capture) {
+            R_VRAvatarCapture();
+            R_VRSceneEndCapture();
+        }
         double t1 = ft_now_ms();
         lambda_glass_capture_eye(0);
         // The client (HUD_CreateEntities) just published the active
@@ -4797,6 +4860,7 @@ static void *gl_worker_main(void *arg) {
                     lambda_engine_clear_projection_override();
                 lambda_engine_set_stereo_offset(0.0f);
                 gt_end();
+                worker_avatar_eye(1);
                 worker_render_mirror(1);
                 worker_render_probe_face();
                 worker_scene_frame();

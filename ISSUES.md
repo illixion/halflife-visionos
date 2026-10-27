@@ -73,28 +73,40 @@ instead of deleting them.
   drawing the avatar, in the same pose, into the rendered mirror and adding
   its skinned triangles to the ray-traced scene. The screen-space method
   stays without it.
-  - Rendered mirror, the plan: draw it inside the mirror pass, after
-    `R_VRMirrorView`'s `R_RenderFrame` and before the pass resolves, so it
-    gets the mirror's depth (a catwalk over water still hides your feet's
-    reflection), samples and oblique near plane. Drawn from Metal afterwards
-    it would have no mirror depth (the mirror's depth is a memoryless ANGLE
-    renderbuffer). The engine's own third-person player is no substitute: it
-    stands at the physics origin, in the game's animation, not where the
-    player's head is.
-  - Pieces: the engine exports the mirror view's view-projection (and the eye
-    it mirrored); the app hands the bridge the avatar's bone matrices in room
-    space plus that eye's room pose each frame, and the bridge maps them into
-    the game world with the yaw and translation between the eye's room pose
-    and the engine's eye; a GLES3 skinning program in the bridge draws the
-    body slot's mesh and textures (uploaded once per bake), lit like the
-    weapon pass's body, saving and restoring the GL2 shim's program, vertex
-    array, buffers, texture bindings and depth, blend, cull and winding (the
-    pass draws clockwise). The head is drawn in the mirror (it is cut only
-    first person). The pose is currently made after the eyes are rendered,
-    so either it moves ahead of the eye loop or the reflection lags a frame.
-  - Ray traced: skin the body into a vertex buffer each frame (a compute
-    pass from the same palette), refit its acceleration structure, add it
-    as an instance with the body's textures.
+  - Built 2026-10-26, checked on the device 2026-10-27 (c1a0 window glass,
+    both engine mirrors; the owner: rendered good, ray traced good enough).
+    The engine draws the body itself, so both engine mirrors get it from one path:
+    - The engine holds a copy of the body slot's model, its skins uploaded as
+      engine textures (`gl_studio.c R_VRAvatarModel`, fed by the worker from
+      `lambda_body_studio` whenever the slot changes; the slot now keeps the
+      `T.mdl` whose pixels the skins need). Skins stay loaded under their
+      names, so the ray-traced mirror's per-index skin copies never go stale.
+    - The app poses the body before the eye loop (it was after it), so the
+      mirrors show this frame's pose; its grip and ground are as of the last
+      tick. Each frame it hands the bridge every bone's room placement
+      (`Renderer.mirrorBones`, hidden legs collapsed to their joint) and
+      each eye's room origin and right axis (`lambda_gl_worker_set_avatar`).
+    - The engine maps room to game by the yaw and translation that take the
+      room eye onto its own eye (`R_VRMirrorEye`; yaw from the right axes,
+      which stay level looking straight down), then runs the studio
+      renderer's own lighting and draw with those bones (`R_VRAvatarRender`).
+      The rendered mirror draws it after its solid entities
+      (`R_VRDrawAvatar`), with the mirror's depth, samples and oblique near
+      plane; eye 0's capture takes its triangles for the ray-traced scene
+      without drawing them (`R_VRAvatarCapture`). The head shows in both.
+    - The ray tracer culls studio models' back faces
+      (`RTWaterScene.studioCulling`, counterclockwise fronts): the lab coat
+      is double-sided, its inside the same polygons wound the other way, and
+      unculled the darker inside speckled through the coat.
+    - Left: the ray-traced reflection's edges step (one ray per mirror
+      texel, at the mirror's divisor); acceptable for now.
+    - Hanging arms (keyboard, mouse, gamepad) swing against the opposite
+      foot of the procedural gait (`AvatarRig.armSwing`), in first person
+      and the mirrors alike; the models' own walk cycles were passed over,
+      since they'd fight the planted feet and run too fast in first person.
+  - The screen-space method stays without it. The engine's own third-person
+    player is no substitute: it stands at the physics origin, in the game's
+    animation, not where the player's head is.
 
 - **Gordon in a lab coat before the HEV suit** (owner request, 2026-10-17).
   Blue Shift ships `models/gordon_scientist.mdl` (+`t.mdl` textures; also in

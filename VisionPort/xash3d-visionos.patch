@@ -3613,10 +3613,10 @@ index 216039f..64f4303 100644
  		inFormat = GL_DEPTH_COMPONENT;
  	else switch( rawformat )
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..107e296 100644
+index e6e7712..d29911e 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
-@@ -726,6 +726,50 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +726,57 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3646,6 +3646,13 @@ index e6e7712..107e296 100644
 +extern vec3_t	r_vrmirror_eye_origin;
 +int R_VRMirrorPick( int kinds, const float *hint, float *plane, int *kind );
 +int R_VRMirrorView( const float *plane, int kind, int width, int height );
++qboolean R_VRMirrorEye( vec3_t origin, vec3_t right );
++// visionOS: the player's body in the mirrors (gl_studio.c)
++int R_VRAvatarModel( const void *data, const void *texdata, int body, const char *name );
++void R_VRAvatarPose( const float *bones, int count, const float *origin );
++void R_VRAvatarEye( const float *origin, const float *right );
++void R_VRAvatarCapture( void );
++void R_VRDrawAvatar( void );
 +// visionOS ray-traced water mirror (gl_vrscene.c)
 +void R_VRSceneNewMap( void );
 +void R_VRSceneLightmapChanged( int page );
@@ -3702,7 +3709,7 @@ index 05a130f..842e422 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..f3872d7 100644
+index 0568486..3881294 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -3793,7 +3800,18 @@ index 0568486..f3872d7 100644
  	{
  		int x, x2, y, y2;
  
-@@ -873,14 +915,14 @@ static void R_DrawEntitiesOnList( void )
+@@ -847,6 +889,10 @@ static void R_DrawEntitiesOnList( void )
+ 		}
+ 	}
+ 
++	// the rendered mirror shows the player's body (the platform's avatar)
++	if( r_vrmirror_pass && !FBitSet( RI.rvp.flags, RF_ONLY_CLIENTDRAW ))
++		R_VRDrawAvatar();
++
+ 	GL_CheckForErrors();
+ 
+ 	// quake-specific feature
+@@ -873,14 +919,14 @@ static void R_DrawEntitiesOnList( void )
  
  	GL_CheckForErrors();
  
@@ -3810,7 +3828,7 @@ index 0568486..f3872d7 100644
  		gEngfuncs.pfnDrawNormalTriangles();
  
  	GL_CheckForErrors();
-@@ -922,7 +964,7 @@ static void R_DrawEntitiesOnList( void )
+@@ -922,7 +968,7 @@ static void R_DrawEntitiesOnList( void )
  
  	GL_CheckForErrors();
  
@@ -3819,7 +3837,7 @@ index 0568486..f3872d7 100644
  	{
  		pglTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
  		gEngfuncs.pfnDrawTransparentTriangles ();
-@@ -930,7 +972,7 @@ static void R_DrawEntitiesOnList( void )
+@@ -930,7 +976,7 @@ static void R_DrawEntitiesOnList( void )
  
  	GL_CheckForErrors();
  
@@ -3828,7 +3846,7 @@ index 0568486..f3872d7 100644
  	{
  		R_AllowFog( false );
  		gEngfuncs.CL_DrawEFX( tr.frametime, true );
-@@ -941,7 +983,7 @@ static void R_DrawEntitiesOnList( void )
+@@ -941,7 +987,7 @@ static void R_DrawEntitiesOnList( void )
  
  	pglDisable( GL_BLEND );	// Trinity Render issues
  
@@ -3837,7 +3855,7 @@ index 0568486..f3872d7 100644
  		R_DrawViewModel();
  	gEngfuncs.CL_ExtraUpdate();
  
-@@ -960,15 +1002,21 @@ void R_RenderScene( void )
+@@ -960,15 +1006,21 @@ void R_RenderScene( void )
  	if( !WORLDMODEL && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		gEngfuncs.Host_Error( "%s: NULL worldmodel\n", __func__ );
  
@@ -3862,7 +3880,7 @@ index 0568486..f3872d7 100644
  
  	R_SetupFrustum();
  	R_SetupFrame();
-@@ -1087,6 +1135,135 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
+@@ -1087,6 +1139,135 @@ void R_SetupRefParams( const ref_viewpass_t *rvp )
  R_RenderFrame
  ===============
  */
@@ -3998,7 +4016,7 @@ index 0568486..f3872d7 100644
  void R_RenderFrame( const ref_viewpass_t *rvp )
  {
  	if( r_norefresh->value )
-@@ -1095,6 +1272,13 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1095,6 +1276,13 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	// setup the initial render params
  	R_SetupRefParams( rvp );
  
@@ -4012,7 +4030,7 @@ index 0568486..f3872d7 100644
  	if( gl_finish.value && FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		pglFinish();
  
-@@ -1113,11 +1297,42 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
+@@ -1113,11 +1301,42 @@ void R_RenderFrame( const ref_viewpass_t *rvp )
  	}
  
  	tr.fCustomRendering = false;
@@ -4056,7 +4074,7 @@ index 0568486..f3872d7 100644
  
  	return;
  }
-@@ -1167,6 +1382,344 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1386,363 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4215,6 +4233,25 @@ index 0568486..f3872d7 100644
 +game renders its own frames.
 +===============
 +*/
++/*
++===============
++R_VRMirrorEye
++
++Where the eye the mirrors are of is, and its right axis: what places the
++player's body (gl_studio.c R_VRAvatarRender) in the game world.
++===============
++*/
++qboolean R_VRMirrorEye( vec3_t origin, vec3_t right )
++{
++	vec3_t forward, up;
++
++	if( !vr_mirror_eye_valid )
++		return false;
++	VectorCopy( vr_mirror_eye.vieworigin, origin );
++	AngleVectors( vr_mirror_eye.viewangles, forward, right, up );
++	return true;
++}
++
 +qboolean r_vrmirror_pass = false;
 +qboolean r_vrmirror_water = false;
 +vec3_t r_vrmirror_eye_origin;	// the eye's own origin, for traces
@@ -4889,10 +4926,19 @@ index 03f794b..5c2cacb 100644
  		if(( 1.0f - tr->fraction ) * dist > 8.0f )
  			return 0.0f;
 diff --git a/ref/gl/gl_studio.c b/ref/gl/gl_studio.c
-index 8ca2613..93d2228 100644
+index 8ca2613..8ffe44b 100644
 --- a/ref/gl/gl_studio.c
 +++ b/ref/gl/gl_studio.c
-@@ -1984,6 +1984,62 @@ R_StudioDrawPoints
+@@ -136,6 +136,8 @@ static studiohdr_t *m_pStudioHeader;
+ static float m_flGaitMovement;
+ static int g_nTopColor, g_nBottomColor;	// remap colors
+ static int g_nFaceFlags, g_nForceFaceFlags;
++// R_StudioDrawPoints only captures the player's body (R_VRAvatarCapture)
++static qboolean r_vravatar_capture_only = false;
+ 
+ /*
+ ====================
+@@ -1984,6 +1986,62 @@ R_StudioDrawPoints
  
  ===============
  */
@@ -4955,7 +5001,32 @@ index 8ca2613..93d2228 100644
  static void R_StudioDrawPoints( void )
  {
  	int		i, j, k, m_skinnum;
-@@ -2156,6 +2212,21 @@ static void R_StudioDrawPoints( void )
+@@ -2104,7 +2162,7 @@ static void R_StudioDrawPoints( void )
+ 	// backface culling through TriAPI call
+ 	//
+ 	// see https://github.com/FWGS/xash3d-fwgs/issues/2517
+-	if( glState.faceCull != GL_NONE )
++	if( glState.faceCull != GL_NONE && !r_vravatar_capture_only )
+ 	{
+ 		if( R_AllowFlipViewModel( RI.currententity ))
+ 		{
+@@ -2134,6 +2192,15 @@ static void R_StudioDrawPoints( void )
+ 		s = 1.0f / (float)ptexture[pskinref[pmesh->skinref]].width;
+ 		t = 1.0f / (float)ptexture[pskinref[pmesh->skinref]].height;
+ 
++		// the player's body for the ray-traced mirror: its triangles, no draw
++		if( r_vravatar_capture_only )
++		{
++			if( !FBitSet( g_nFaceFlags, STUDIO_NF_ADDITIVE ))
++				R_StudioCaptureMesh( ptricmds, pstudionorms, s, t, ptexture[pskinref[pmesh->skinref]].index,
++					FBitSet( g_nFaceFlags, STUDIO_NF_UV_COORDS ) ? true : false, FBitSet( g_nFaceFlags, STUDIO_NF_MASKED ) ? true : false );
++			continue;
++		}
++
+ 		if( FBitSet( g_nFaceFlags, STUDIO_NF_MASKED ))
+ 		{
+ 			pglEnable( GL_ALPHA_TEST );
+@@ -2156,6 +2223,21 @@ static void R_StudioDrawPoints( void )
  
  		R_StudioSetupSkin( m_pStudioHeader, pskinref[pmesh->skinref] );
  
@@ -4977,6 +5048,221 @@ index 8ca2613..93d2228 100644
  		if( r_studio_drawelements.value )
  		{
  			if( FBitSet( g_nFaceFlags, STUDIO_NF_CHROME ))
+@@ -3462,6 +3544,214 @@ void R_DrawViewModel( void )
+ 	pglDepthRange( gldepthmin, gldepthmax );
+ }
+ 
++/*
++=================
++visionOS: the player's body in the mirrors
++
++The platform draws the first-person body itself (its IK avatar, posed in the
++room from the tracked head and hands), so the engine never sees it and no
++mirror shows it. The bridge hands the engine the same model
++(R_VRAvatarModel: a copy, its skins uploaded as the engine's own textures),
++each frame the body's bones in the room (R_VRAvatarPose: bone to room,
++GoldSrc axes, inches) and, before each eye, where that eye is in the room
++(R_VRAvatarEye). The room maps into the game world by the yaw and translation
++that take the room eye onto the engine's eye (R_VRMirrorEye), the yaw read
++off the right axes, which stay level when the head looks straight down. The
++rendered mirror draws the body with its solid entities (R_VRDrawAvatar,
++gl_rmain.c), lit like any studio model at its pelvis, and eye 0's capture
++for the ray-traced mirror takes its triangles (R_VRAvatarCapture) without
++drawing them, since the eye's own body is the platform's.
++=================
++*/
++static struct
++{
++	byte		*hdr;		// own copy; its skins' index fields hold GL textures
++	model_t		model;
++	cl_entity_t	ent;
++	matrix3x4	bones[MAXSTUDIOBONES];	// bone to room
++	vec3_t		origin;			// the light's sample point, room
++	qboolean	posed;
++	vec3_t		eye_origin, eye_right;	// the eye being drawn, room
++	qboolean	eye_valid;
++} vr_avatar;
++__attribute__((visibility("default"))) int R_VRAvatarModel( const void *data, const void *texdata, int body, const char *name )
++{
++	const studiohdr_t *src = data;
++	const byte *pixels = texdata ? texdata : data;
++	mstudiotexture_t *ptexture;
++	studiohdr_t *phdr;
++	char base[64], skin[64], texname[160];
++	int i;
++
++	// the skins stay loaded under their names: the ray-traced mirror keeps a
++	// copy of each engine texture by index, which a freed index would make
++	// stale, and changing back into a model finds its skins again
++	free( vr_avatar.hdr );
++	vr_avatar.hdr = NULL;
++	vr_avatar.posed = false;
++	if( !src || src->ident != IDSTUDIOHEADER || src->numbones > MAXSTUDIOBONES || src->numtextures <= 0 )
++		return 0;
++	vr_avatar.hdr = malloc( src->length );
++	if( !vr_avatar.hdr )
++		return 0;
++	memcpy( vr_avatar.hdr, src, src->length );
++	phdr = (studiohdr_t *)vr_avatar.hdr;
++
++	COM_FileBase( name ? name : "avatar", base, sizeof( base ));
++	ptexture = (mstudiotexture_t *)( vr_avatar.hdr + phdr->textureindex );
++	for( i = 0; i < phdr->numtextures; i++ )
++	{
++		int flags = FBitSet( ptexture[i].flags, STUDIO_NF_NOMIPS ) ? TF_NOMIPMAP : 0;
++
++		// the image loader reads the pixels at the MDL pointer, the header
++		// (size, flags) from the buffer; index is still their offset
++		COM_FileBase( ptexture[i].name, skin, sizeof( skin ));
++		Q_snprintf( texname, sizeof( texname ), "#vravatar/%s/%s.mdl", base, skin );
++		gEngfuncs.Image_SetMDLPointer( (byte *)pixels + ptexture[i].index );
++		ptexture[i].index = GL_LoadTexture( texname, (byte *)&ptexture[i],
++			sizeof( mstudiotexture_t ) + ptexture[i].width * ptexture[i].height + 768, flags );
++		if( !ptexture[i].index )
++			ptexture[i].index = tr.defaultTexture;
++	}
++
++	memset( &vr_avatar.model, 0, sizeof( vr_avatar.model ));
++	Q_strncpy( vr_avatar.model.name, name ? name : "avatar", sizeof( vr_avatar.model.name ));
++	vr_avatar.model.type = mod_studio;
++	vr_avatar.model.flags = phdr->flags;
++	memset( &vr_avatar.ent, 0, sizeof( vr_avatar.ent ));
++	vr_avatar.ent.index = -1;	// no entity's lights follow it
++	vr_avatar.ent.model = &vr_avatar.model;
++	vr_avatar.ent.curstate.body = body;
++	vr_avatar.ent.curstate.rendermode = kRenderNormal;
++	vr_avatar.ent.curstate.renderamt = 255;
++	vr_avatar.ent.curstate.scale = 1.0f;
++	return 1;
++}
++
++__attribute__((visibility("default"))) void R_VRAvatarPose( const float *bones, int count, const float *origin )
++{
++	if( !vr_avatar.hdr || !bones || count != ((studiohdr_t *)vr_avatar.hdr)->numbones )
++	{
++		vr_avatar.posed = false;
++		return;
++	}
++	memcpy( vr_avatar.bones, bones, sizeof( matrix3x4 ) * count );
++	VectorCopy( origin, vr_avatar.origin );
++	vr_avatar.posed = true;
++}
++
++__attribute__((visibility("default"))) void R_VRAvatarEye( const float *origin, const float *right )
++{
++	vr_avatar.eye_valid = origin && right;
++	if( !vr_avatar.eye_valid )
++		return;
++	VectorCopy( origin, vr_avatar.eye_origin );
++	VectorCopy( right, vr_avatar.eye_right );
++}
++
++static void R_VRAvatarRender( void )
++{
++	cl_entity_t *saveent = RI.currententity;
++	model_t *savemodel = RI.currentmodel;
++	studiohdr_t *phdr = (studiohdr_t *)vr_avatar.hdr;
++	vec3_t eo, er, dir;
++	matrix3x4 room;
++	alight_t lighting;
++	float yaw, c, s;
++	int i;
++
++	if( !phdr || !vr_avatar.posed || !vr_avatar.eye_valid || !R_VRMirrorEye( eo, er ))
++		return;
++
++	// room to game: about z, then onto the engine's eye
++	yaw = atan2( er[1], er[0] ) - atan2( vr_avatar.eye_right[1], vr_avatar.eye_right[0] );
++	c = cos( yaw );
++	s = sin( yaw );
++	memset( room, 0, sizeof( room ));
++	room[0][0] = c; room[0][1] = -s;
++	room[1][0] = s; room[1][1] = c;
++	room[2][2] = 1.0f;
++	for( i = 0; i < 3; i++ )
++		room[i][3] = eo[i] - DotProduct( room[i], vr_avatar.eye_origin );
++
++	R_StudioSetupTimings();
++	RI.currententity = &vr_avatar.ent;
++	RI.currentmodel = &vr_avatar.model;
++	R_StudioSetHeader( phdr );
++	for( i = 0; i < phdr->numbones; i++ )
++	{
++		Matrix3x4_ConcatTransforms( g_studio.bonestransform[i], room, vr_avatar.bones[i] );
++		Matrix3x4_Copy( g_studio.lighttransform[i], g_studio.bonestransform[i] );
++	}
++	Matrix3x4_VectorTransform( room, vr_avatar.origin, vr_avatar.ent.origin );
++	// R_StudioEntityLight measures the dynamic lights from here
++	Matrix3x4_Copy( g_studio.rotationmatrix, room );
++	for( i = 0; i < 3; i++ )
++		g_studio.rotationmatrix[i][3] = vr_avatar.ent.origin[i];
++	g_studio.framecount++;	// the lights' per-bone cache
++
++	lighting.plightvec = dir;
++	R_EntityDynamicLight( RI.currententity, &lighting, FBitSet( RI.rvp.flags, RF_DRAW_WORLD ), g_studio.time, g_studio.lightspot, g_studio.lightvec );
++	R_StudioEntityLight( &lighting );
++	R_StudioSetupLighting( &lighting );
++	tr.blend = 1.0f;
++
++	if( r_vravatar_capture_only )
++	{
++		for( i = 0; i < phdr->numbodyparts; i++ )
++		{
++			R_StudioSetupModel( i, (void**)&m_pBodyPart, (void**)&m_pSubModel );
++			R_StudioDrawPoints();
++		}
++	}
++	else
++	{
++		R_StudioSetChromeOrigin();
++		R_StudioSetForceFaceFlags( 0 );
++		R_StudioSetupRenderer( kRenderNormal );
++		for( i = 0; i < phdr->numbodyparts; i++ )
++		{
++			R_StudioSetupModel( i, (void**)&m_pBodyPart, (void**)&m_pSubModel );
++			GL_StudioSetRenderMode( kRenderNormal );
++			R_StudioDrawPoints();
++		}
++		R_StudioRestoreRenderer();
++	}
++
++	RI.currententity = saveent;
++	RI.currentmodel = savemodel;
++}
++
++/*
++=================
++R_VRDrawAvatar
++
++The rendered mirror's body, with the pass's solid entities.
++=================
++*/
++void R_VRDrawAvatar( void )
++{
++	if( r_vrmirror_pass )
++		R_VRAvatarRender();
++}
++
++/*
++=================
++R_VRAvatarCapture
++
++The body's triangles for the ray-traced mirror, between the platform's
++R_VRSceneBeginCapture and R_VRSceneEndCapture around eye 0, drawing nothing.
++=================
++*/
++__attribute__((visibility("default"))) void R_VRAvatarCapture( void )
++{
++	if( !vr_scene_capturing )
++		return;
++	r_vravatar_capture_only = true;
++	R_VRAvatarRender();
++	r_vravatar_capture_only = false;
++}
++
+ /*
+ ====================
+ R_StudioLoadTexture
 diff --git a/ref/gl/gl_vrscene.c b/ref/gl/gl_vrscene.c
 new file mode 100644
 index 0000000..b5c713d

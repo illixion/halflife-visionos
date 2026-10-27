@@ -211,6 +211,12 @@ int      lambda_body_load(const char *path, int body);
 uint32_t lambda_body_generation(void);
 uint32_t lambda_body_lock(lambda_weapon_mesh_t *out);
 void     lambda_body_unlock(void);
+// The body's model file as loaded (studiohdr_t, the T file's skin headers
+// merged in), the T file holding the skins' pixels or NULL when they are
+// embedded, the body value and the path: what the engine copies to show the
+// body in its mirrors. Returns the generation (0 = no model) holding the
+// slot's lock: release with lambda_body_unlock.
+uint32_t lambda_body_studio(const void **hdr, const void **tex, int *body, const char **path);
 uint32_t lambda_body_copy_pose(lambda_weapon_pose_t *out);
 // The body slot's model posed at any sequence and frame, and a sequence's
 // label and length — for the Mac probe, which loads viewmodels into this

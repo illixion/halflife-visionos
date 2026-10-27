@@ -273,8 +273,14 @@ typedef struct {
     int   last_modelindex, last_body, last_valid;
 
     // File buffer owned by this slot (disk-loaded models only; the weapon
-    // slot borrows the engine's resident copy and owns nothing).
+    // slot borrows the engine's resident copy and owns nothing), and its
+    // companion <name>T.mdl when the skins' pixels live there, with the body
+    // value and path it was loaded with: the engine's copy for the mirrors
+    // (lambda_body_studio). Swapped under mtx.
     void *owned;
+    void *owned_tex;
+    int   owned_body;
+    char  owned_path[1024];
 } model_slot_t;
 
 static model_slot_t g_weapon = { .active = -1, .mtx = PTHREAD_MUTEX_INITIALIZER,
@@ -1167,12 +1173,19 @@ static int slot_load_file(model_slot_t *slot, const char *path, int body, const 
     const studiohdr_t *hdr = (const studiohdr_t *)buf;
 
     int ok = bake_model(slot, (const uint8_t *)buf, hdr, -1, body, dump_path, tex);
-    free(tex);                  // its pixels are baked; nothing points into it
-    if (!ok) { free(buf); return 0; }
+    if (!ok) { free(tex); free(buf); return 0; }
 
+    // Under the lock: the GL worker copies the model for the engine's mirrors
+    // (lambda_body_studio) while the render thread may be loading the next.
+    slot_lock_mutex(slot);
     free(slot->owned);          // release any previous buffer
+    free(slot->owned_tex);
     slot->owned = buf;          // snapshots point into this; keep it alive
+    slot->owned_tex = tex;      // the skins' pixels, when they live apart
+    slot->owned_body = body;
+    snprintf(slot->owned_path, sizeof(slot->owned_path), "%s", path);
     slot->last_valid = 1;
+    pthread_mutex_unlock(&slot->mtx);
     return 1;
 }
 
@@ -1186,6 +1199,15 @@ void     lambda_scratch_unlock(void) { pthread_mutex_unlock(&g_scratch.mtx); }
 uint32_t lambda_scratch_copy_pose(lambda_weapon_pose_t *out) { return slot_copy_pose(&g_scratch, out); }
 
 uint32_t lambda_body_generation(void) { return g_body.generation; }
+
+uint32_t lambda_body_studio(const void **hdr, const void **tex, int *body, const char **path) {
+    slot_lock_mutex(&g_body);
+    *hdr = g_body.owned;
+    *tex = g_body.owned_tex;
+    *body = g_body.owned_body;
+    *path = g_body.owned_path;
+    return g_body.owned ? g_body.generation : 0;
+}
 
 uint32_t lambda_body_lock(lambda_weapon_mesh_t *out) { return slot_lock(&g_body, out); }
 

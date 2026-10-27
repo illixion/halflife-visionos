@@ -1422,6 +1422,9 @@ kernel void rtWaterTrace(uint3 gid [[thread_position_in_grid]],
         raytracing::ray ray(P + r * 0.05, r, 0.0, p.rtWater.z);
         raytracing::intersection_params params;
         params.assume_geometry_type(raytracing::geometry_type::triangle);
+        // studio models' back faces (RTWaterScene.studioCulling; the brush
+        // instances opt out)
+        params.set_triangle_cull_mode(raytracing::triangle_cull_mode::back);
         raytracing::intersection_query<raytracing::triangle_data, raytracing::instancing> q(ray, tlas, params);
         // alpha-tested triangles (the BLAS's non-opaque geometry)
         while (q.next()) {

@@ -76,6 +76,16 @@ final class RTWaterScene {
         let capacity: Int
     }
     static let maxInstances = 512
+    /// The studio models' instance keeps only their front faces, as the
+    /// engine draws them (it culls them always): a double-sided part, like a
+    /// lab coat whose inside is the same polygons wound the other way, would
+    /// otherwise show either side by a coin toss of precision, a speckle of
+    /// the darker inside. The engine's visible studio faces turn clockwise on
+    /// its screen (it culls GL_FRONT with counterclockwise fronts), so their
+    /// right-hand normal points away from the eye: counterclockwise fronts
+    /// for the ray tracer (Shaders.metal rtWaterTrace culls back faces). The
+    /// brush instances aren't culled: the scene doesn't promise their winding.
+    static let studioCulling: MTLAccelerationStructureInstanceOptions = .triangleFrontFacingWindingCounterClockwise
     static let slotCount = 3
     private var slots: [Slot] = []
     private let tlasScratch: MTLBuffer
@@ -374,12 +384,13 @@ final class RTWaterScene {
         let info = slots[free].info.contents().bindMemory(to: RTInstanceInfo.self, capacity: Self.maxInstances)
         var n = 0
         var used: [MTLAccelerationStructure] = []
-        func add(_ structure: MTLAccelerationStructure, _ m: [Float], _ i: RTInstanceInfo, _ user: UInt32) {
+        func add(_ structure: MTLAccelerationStructure, _ m: [Float], _ i: RTInstanceInfo, _ user: UInt32,
+                 options: MTLAccelerationStructureInstanceOptions) {
             var desc = MTLIndirectAccelerationStructureInstanceDescriptor()
             desc.transformationMatrix = MTLPackedFloat4x3(columns: (
                 MTLPackedFloat3Make(m[0], m[4], m[8]), MTLPackedFloat3Make(m[1], m[5], m[9]),
                 MTLPackedFloat3Make(m[2], m[6], m[10]), MTLPackedFloat3Make(m[3], m[7], m[11])))
-            desc.options = []
+            desc.options = options
             desc.mask = 0xFF
             desc.intersectionFunctionTableOffset = 0
             desc.userID = user
@@ -393,7 +404,8 @@ final class RTWaterScene {
             guard inst.model >= 0, inst.model < models.count, let b = blas[inst.model], inst.matrix.count == 12 else { continue }
             let model = models[inst.model]
             add(b, inst.matrix, RTInstanceInfo(firstTri: UInt32(model.firstTri), numOpaque: UInt32(model.numOpaque),
-                                               alphaGeometry: alphaGeometry[inst.model], flags: 0), UInt32(inst.model))
+                                               alphaGeometry: alphaGeometry[inst.model], flags: 0), UInt32(inst.model),
+                options: .disableTriangleCulling)
         }
         guard let cb = queue.makeCommandBuffer() else { return }
         if let ds = dynSlot {
@@ -405,7 +417,8 @@ final class RTWaterScene {
             enc.endEncoding()
             let alpha: UInt32 = count > opaque ? (opaque > 0 ? 1 : 0) : .max
             add(structure, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
-                RTInstanceInfo(firstTri: 0, numOpaque: UInt32(opaque), alphaGeometry: alpha, flags: 1), 0xFFFF)
+                RTInstanceInfo(firstTri: 0, numOpaque: UInt32(opaque), alphaGeometry: alpha, flags: 1), 0xFFFF,
+                options: Self.studioCulling)
         }
         guard n > 0 else { return }
         let desc = MTLInstanceAccelerationStructureDescriptor()

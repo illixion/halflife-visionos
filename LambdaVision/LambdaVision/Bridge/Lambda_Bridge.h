@@ -318,6 +318,14 @@ void lambda_gl_worker_set_rate_map(void *mtl_rate_map, int physical_width, int p
 // Whether ANGLE took the last rate map it was given.
 int lambda_gl_rate_map_ok(void);
 
+// The player's body in the engine's mirrors: the avatar's bones for the next
+// frame's eyes (count 3x4 row-major bone-to-room matrices, GoldSrc axes and
+// inches, in the body slot model's bone order; a hidden bone has a zero 3x3),
+// the room point its light is sampled at, and each eye's room origin and
+// right axis (eyes[0..5] the first eye, [6..11] the second). NULL or count 0:
+// no body in the mirrors.
+void lambda_gl_worker_set_avatar(const float *bones, int count, const float *origin, const float *eyes);
+
 // Level loads. lambda_engine_loading() is 1 from the frame that starts a load
 // until the client is back in the new level (as of the last frame the worker
 // finished): the platform shows its snapshot instead of engine frames.

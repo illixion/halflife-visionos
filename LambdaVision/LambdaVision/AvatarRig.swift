@@ -361,6 +361,13 @@ struct AvatarRig {
         return hidden
     }
 
+    /// The bones the engine's mirrors leave out of the body: the legs while
+    /// first person hides them (posed without feet, they stand nowhere in
+    /// particular). The head shows: a mirror sees it from outside.
+    func mirrorHiddenBones(legs: Bool) -> Set<Int> {
+        hiddenBones(legs: legs).subtracting(subtree(of: head))
+    }
+
     // MARK: - Posing
 
     /// Where the avatar is and how it is bent, for one frame.
@@ -487,6 +494,13 @@ struct AvatarRig {
     /// to shave it.
     static let armIterations = 32
 
+    /// A hanging hand's swing against the opposite foot: this share of how
+    /// far that foot is ahead of the point between the feet, capped (units,
+    /// about 15 cm). A walking stride's half separation of ~10 units gives
+    /// the hand ~6 either way.
+    static let armSwing: Float = 0.6
+    static let armSwingLimit: Float = 6
+
     /// Iterations per leg. The legs start near straight and bend mostly in
     /// one plane, where FABRIK converges fast.
     static let legIterations = 16
@@ -555,13 +569,43 @@ struct AvatarRig {
             simd_normalize(-AvatarRig.up + back * 0.5 + leftward * (0.3 * side))
         }
 
+        // The feet before the arms: a hanging arm swings against the leg on
+        // the other side. Compressing the legs moves nothing above the hips.
+        var compressed: [Leg] = []
+        var placed: (left: FootTarget, right: FootTarget)?
+        if drivesLegs {
+            compressed = [leftLeg, rightLeg].compactMap { $0 }
+            for leg in compressed {
+                joints[leg.shin].translation *= leg.compression
+                joints[leg.foot].translation *= leg.compression
+            }
+            model = solver.modelMatrices(of: joints)
+            let hips = PoseSolver.translation(of: root * model[pelvis])
+            placed = feet(hips, yaw.act(SIMD3<Float>(1, 0, 0)))
+        }
+        // How far a hanging hand swings forward (model +X, units): with the
+        // opposite foot, measured from between the feet, so it follows the
+        // planter's own steps — still while standing, as quick as the feet
+        // when running — and a crouch, which puts both feet ahead of the
+        // hips, doesn't push both hands forward.
+        func swing(side: Float) -> Float {
+            guard let placed else { return 0 }
+            let opposite = side > 0 ? placed.right.sole : placed.left.sole
+            let between = (placed.left.sole + placed.right.sole) * 0.5
+            let ahead = simd_dot(opposite - between, yaw.act(SIMD3<Float>(1, 0, 0)))
+            return min(max(ahead * AvatarRig.armSwing, -AvatarRig.armSwingLimit), AvatarRig.armSwingLimit)
+        }
+
         // An untracked hand hangs by the side instead of holding whatever
         // sequence 0 froze it in (the right arm raised, as it happens). The
         // target is in model space — a little forward and out from the
-        // shoulder, most of the arm's length down — with the palm inward.
+        // shoulder, most of the arm's length down — with the palm inward,
+        // swung along with the stride; a swung hand rises a little, as it
+        // does on the arc about the shoulder.
         func relaxed(_ arm: Arm, side: Float) -> (target: SIMD3<Float>, rotation: simd_quatf) {
             let shoulder = PoseSolver.translation(of: model[arm.chain.joints[0]])
-            let target = shoulder + SIMD3<Float>(3, 2 * side, -arm.reach * 0.88)
+            let s = swing(side: side)
+            let target = shoulder + SIMD3<Float>(3 + s, 2 * side, -arm.reach * 0.88 + abs(s) * 0.15)
             let rotation = AvatarRig.handRotation(forward: SIMD3<Float>(0.1, 0, -1),
                                                   back: SIMD3<Float>(0, side, 0))
             return (target, rotation)
@@ -611,17 +655,7 @@ struct AvatarRig {
         let right = solve(rightArm, targets.rightHand, targets.rightHandRotation, targets.rightElbow,
                           targets.rightFingers, side: -1)
 
-        var compressed: [Leg] = []
         if drivesLegs {
-            compressed = [leftLeg, rightLeg].compactMap { $0 }
-            for leg in compressed {
-                joints[leg.shin].translation *= leg.compression
-                joints[leg.foot].translation *= leg.compression
-            }
-            model = solver.modelMatrices(of: joints)
-            let hips = PoseSolver.translation(of: root * model[pelvis])
-            let forward = yaw.act(SIMD3<Float>(1, 0, 0))
-            let placed = feet(hips, forward)
             for (leg, target, side) in [(leftLeg, placed?.left, Float(1)), (rightLeg, placed?.right, Float(-1))] {
                 guard let leg else { continue }
                 solveLeg(leg, target, side: side, yaw: yaw, root: root, toModel: toModel,
