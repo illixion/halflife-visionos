@@ -754,7 +754,7 @@ instead of deleting them.
   turn feel and sensitivity, the flat viewmodel's placement, the menu
   cursor, and the auto switches both ways.
 - ~~No quick save / quick load~~ (device check pending) — hands: the weapon
-  wheel's SAVE and LOAD sectors (LOAD commits after 0.6 s held armed);
+  wheel's SAVE and LOAD sectors (each commits after 0.6 s held armed);
   keyboard: F5/F6 save, F9/F7 load; gamepad: View/Options tap saves, a 1 s
   hold loads.
 - ~~Weapon wheel is fixed at five sectors and has no icons~~ (device check

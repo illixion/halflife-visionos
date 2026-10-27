@@ -21,8 +21,9 @@
 //  going off cancels. The entries are captured when the wheel opens, so the
 //  layout can't shift under the hand. A sector stays armed until the hand
 //  is clearly inside a neighbour (`stickiness`), so a boundary doesn't
-//  flicker. Quick load only commits after it has been armed for
-//  `Entry.confirmSeconds`: a stray pick there would throw progress away.
+//  flicker. Quick save and quick load only commit after they have been armed
+//  for `Entry.confirmSeconds`: a stray pick there would overwrite the save
+//  or throw progress away.
 //
 //  Choosing one weapon of a slot: push the hand on past the wheel's rim
 //  over a slot holding more than one weapon, and the slot opens into an
@@ -92,6 +93,8 @@ nonisolated enum WeaponWheel {
 
     /// How long quick load must be armed before it commits.
     nonisolated(unsafe) static var quickLoadConfirmSeconds: Double = 0.6
+    /// The same for quick save: a stray pick overwrites the one slot.
+    nonisolated(unsafe) static var quickSaveConfirmSeconds: Double = 0.6
 
     /// The wheel's entries, clockwise from 12 o'clock. `selectionAllowed`
     /// mirrors the client's own rule for weapon selection (suit on, alive,
@@ -117,7 +120,7 @@ nonisolated enum WeaponWheel {
             if hasSuit {
                 out.append(Entry(action: .flashlight, label: "LIGHT", iconKey: HUDIconStore.flashlightKey))
             }
-            out.append(Entry(action: .quickSave, label: "SAVE"))
+            out.append(Entry(action: .quickSave, label: "SAVE", confirmSeconds: quickSaveConfirmSeconds))
             out.append(Entry(action: .quickLoad, label: "LOAD", confirmSeconds: quickLoadConfirmSeconds))
         }
         return out

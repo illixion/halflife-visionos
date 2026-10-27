@@ -29,7 +29,8 @@ do {
     check(e[4].dim, "a slot with no ammo is dim")
     check(e[5].action == .flashlight && e[6].action == .quickSave && e[7].action == .quickLoad,
           "utilities follow the weapons: light, save, load")
-    check(e[7].confirmSeconds > 0 && e[6].confirmSeconds == 0, "only quick load needs a confirm hold")
+    check(e[7].confirmSeconds > 0 && e[6].confirmSeconds > 0 && e[5].confirmSeconds == 0,
+          "quick save and load need a confirm hold, the flashlight doesn't")
     check(e[2].iconKey == "weapon_shotgun" && e[5].iconKey == HUDIconStore.flashlightKey, "icon keys")
 
     // Opposing Force: seven slots, out of order on input.
@@ -126,6 +127,15 @@ do {
     _ = step(0.03, origin, now: 4); _ = step(0.03, origin + loadDir * 0.07, now: 4.1)
     let load = step(0.10, origin + loadDir * 0.07, now: 4.1 + WeaponWheel.quickLoadConfirmSeconds + 0.01)
     check(load?.action == .quickLoad, "quick load held armed long enough commits")
+    // Quick save (sector 6) needs its hold too.
+    let saveDir = SIMD3<Float>(sinf(WeaponWheel.sectorCenterTurns(6, count: 8) * 2 * .pi),
+                               cosf(WeaponWheel.sectorCenterTurns(6, count: 8) * 2 * .pi), 0)
+    _ = step(0.03, origin, now: 4.5); _ = step(0.03, origin + saveDir * 0.07, now: 4.6)
+    check(g.selected == 6, "armed quick save")
+    check(step(0.10, origin + saveDir * 0.07, now: 4.7) == nil, "quick save released early does nothing")
+    _ = step(0.03, origin, now: 4.8); _ = step(0.03, origin + saveDir * 0.07, now: 4.9)
+    let save = step(0.10, origin + saveDir * 0.07, now: 4.9 + WeaponWheel.quickSaveConfirmSeconds + 0.01)
+    check(save?.action == .quickSave, "quick save held armed long enough commits")
     // Entries are a snapshot: a different list mid-gesture changes nothing.
     _ = step(0.03, origin, now: 5)
     _ = step(0.03, origin + up * 0.06, now: 5.1, list: [])

@@ -299,7 +299,7 @@ is played with hand tracking:
 | Switch weapon | Pinch all fingertips together, move toward a weapon's icon, release; pick a slot again to cycle it |
 | Pick one weapon of a slot | On the wheel, keep moving past the rim over a slot holding several weapons: it opens into an outer arc of them; slide along it and release. Come back inside the rim to fold it (Settings → *Wheel: reach past the rim to pick a weapon*) |
 | Flashlight | Weapon wheel → LIGHT |
-| Quick save / load | Weapon wheel → SAVE, or LOAD (hold it armed until its outer arc fills) |
+| Quick save / load | Weapon wheel → SAVE or LOAD (hold it armed until its outer arc fills) |
 | Use / buttons | Poke with the off-hand index finger; rest an open palm on chargers |
 | Train throttle | Poke the console, then pinch and push/pull; poke again to let go |
 
