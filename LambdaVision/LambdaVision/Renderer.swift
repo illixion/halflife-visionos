@@ -591,7 +591,7 @@ actor Renderer {
     nonisolated(unsafe) static var flatHUDFollowsView = true
     /// The holographic aim point (Settings > Input > Aim reticle).
     nonisolated(unsafe) static var aimReticle: HEVHUD.Reticle = .dot
-    /// Developer mode (Settings > Advanced): the palm debug panel
+    /// Developer mode (Settings > Developer): the palm debug panel
     /// (PalmDebugPanel) over the off hand while its palm faces the eyes.
     nonisolated(unsafe) static var debugPanelEnabled = false
     /// Hold the weapon's world (p_) model instead of its viewmodel

@@ -314,7 +314,7 @@ struct LambdaVisionApp: App {
 
     init() {
         AppLog.configureDebugTrace()
-        // DebugTrace's start rule plus Settings › Advanced › Debug server,
+        // DebugTrace's start rule plus Settings › Developer › Debug server,
         // on ports clear of the Wi-Fi manager's (DebugEndpoints).
         LambdaDebugServer.apply(AppSettingsStore.debugServer)
     }
@@ -336,6 +336,20 @@ struct LambdaVisionApp: App {
                 .onOpenURL { url in appModel.library.open(url) }
         }
         .onChange(of: scenePhase) { _, phase in LambdaDebugServer.scenePhaseChanged(phase) }
+
+        // Settings, opened from the launcher's gear button: a window of its
+        // own rather than a sheet on the launcher, sized for a list of pages
+        // (SettingsView), and one that can stay up beside the game.
+        Window("Settings", id: SettingsView.windowID) {
+            SettingsView()
+                .environment(appModel)
+                .handlesGameControllerEvents(matching: .gamepad)
+                #if !LAMBDA_NO_DEBUG_SERVER
+                .debugApprovalPrompts()
+                #endif
+        }
+        .defaultSize(width: 760, height: 860)
+        .defaultLaunchBehavior(.suppressed)
 
         // In-app log viewer. This app renders through CompositorServices and
         // has no tab bar, so the console is its own window.

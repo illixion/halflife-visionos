@@ -19,7 +19,7 @@
 #
 # Prints the saved path on success (so an agent can Read the image), or the
 # server's error and hint on stderr with a non-zero exit. The app must be a
-# development build (signed by build-and-sign, or Settings > Advanced >
+# development build (signed by build-and-sign, or Settings > Developer >
 # Debug server: On) with the immersive space open, on this network or tailnet.
 set -eu
 
@@ -128,7 +128,7 @@ case "$status" in
         why="$(/usr/bin/sed -n 's/^curl: ([0-9]*) //p' "$curl_err" | /usr/bin/head -1)"
         if [ "$failure" = refused ]; then
             echo "error: REFUSED: the device is reachable but nothing listens at $LV_URL (via $LV_SOURCE)" >&2
-            echo "hint: the debug server's listener stopped or moved. The app rebuilds it within ~5 s (log: '[DebugServer] listener ... stopped answering' then 'listening on port N'); retry, or check the app is still running and Settings > Advanced > Debug server isn't Off" >&2
+            echo "hint: the debug server's listener stopped or moved. The app rebuilds it within ~5 s (log: '[DebugServer] listener ... stopped answering' then 'listening on port N'); retry, or check the app is still running and Settings > Developer > Debug server isn't Off" >&2
         elif [ "$curl_exit" = 6 ]; then
             echo "error: UNREACHABLE: can't resolve the host in $LV_URL (via $LV_SOURCE): $why" >&2
             echo "hint: pass --host <ip>[:port], or check the tailnet / local network" >&2

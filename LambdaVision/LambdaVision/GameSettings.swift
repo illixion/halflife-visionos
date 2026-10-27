@@ -114,7 +114,7 @@ final class GameSettings {
     /// True once the engine (and its GL worker) is up and cvar/console
     /// commands are safe to dispatch (worker_post_and_wait deadlocks before
     /// the worker exists). Flipped by engineDidStart(); observed by SettingsView
-    /// so the Advanced console/menu/map actions stay disabled until the game
+    /// so the menu, map and console actions stay disabled until the game
     /// is running.
     private(set) var isEngineReady = false
 
@@ -404,7 +404,7 @@ final class GameSettings {
                  cvar("developer", developerMode ? 2 : 0) }
     }
 
-    /// Settings › Advanced › Debug server (LambdaDebugServer in
+    /// Settings › Developer › Debug server (LambdaDebugServer in
     /// DebugEndpoints): starts or stops the debug API at once.
     var debugServer: DebugServerMode = AppSettingsStore.debugServer {
         didSet { AppSettingsStore.debugServer = debugServer
@@ -686,9 +686,9 @@ final class GameSettings {
         isEngineReady = false
     }
 
-    /// Run an arbitrary console command (Advanced tab: the Xash menu portal,
-    /// the console field, map/restart). No-op until the engine is up so the
-    /// UI can't deadlock the worker post.
+    /// Run an arbitrary console command (Settings › Menu, Maps & Console:
+    /// the Xash menu portal, the console field, map/restart). No-op until
+    /// the engine is up so the UI can't deadlock the worker post.
     func command(_ raw: String) {
         let cmd = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isEngineReady, !cmd.isEmpty else { return }

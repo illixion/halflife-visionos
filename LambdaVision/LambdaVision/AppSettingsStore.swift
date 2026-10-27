@@ -464,7 +464,7 @@ enum AppSettingsStore {
     // MARK: Debug server
     private static let debugServerKey = "lambdavision.settings.debugServer"
 
-    /// Settings › Advanced › Debug server (DebugEndpoints): automatic (the
+    /// Settings › Developer › Debug server (DebugEndpoints): automatic (the
     /// DebugTrace default), always on, or off. Development builds only.
     static var debugServer: DebugServerMode {
         get {

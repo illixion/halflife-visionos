@@ -21,7 +21,7 @@
 //
 //  When it serves (LambdaDebugServer): local builds use DebugTrace's rule — a
 //  build signed by build-and-sign, or a launch with DEBUGTRACE_SERVER=1
-//  (`build-and-sign --mcp`) — unless Settings › Advanced › Debug server says
+//  (`build-and-sign --mcp`) — unless Settings › Developer › Debug server says
 //  On (also an Xcode run) or Off (not even a signed build; an explicit
 //  DEBUGTRACE_SERVER=1 launch still wins). The CI IPA build defines
 //  LAMBDA_NO_DEBUG_SERVER, which removes the app's endpoint table and listener.
@@ -73,7 +73,7 @@ import os
 import UIKit
 #endif
 
-/// Settings › Advanced › Debug server.
+/// Settings › Developer › Debug server.
 nonisolated enum DebugServerMode: String, CaseIterable, Identifiable, Sendable {
     case automatic, on, off
     var id: String { rawValue }

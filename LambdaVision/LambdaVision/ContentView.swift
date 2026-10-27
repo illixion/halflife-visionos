@@ -17,8 +17,8 @@ struct ContentView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
+    @Environment(\.openWindow) private var openWindow
 
-    @State private var showSettings = false
     @State private var showImporter = false
     @State private var showWiFi = false
     @State private var cheatsEnabled = false
@@ -118,15 +118,12 @@ struct ContentView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        showSettings = true
+                        openWindow(id: SettingsView.windowID)
                     } label: {
                         Image(systemName: "gearshape")
                     }
                     .help("Settings")
                 }
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environment(appModel)
             }
             // The server runs exactly as long as this sheet is up.
             .sheet(isPresented: $showWiFi) {
