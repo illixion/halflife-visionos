@@ -197,6 +197,10 @@ typedef struct
     // Per eye: one bit per plane row, set for water (lambda_glass_eye_t.kind).
     // Row r is word r / 32 = glassKinds[eye][r / 128][(r / 32) % 4].
     simd_uint4 glassKinds[2][2];
+    // Per eye, the same layout: set for faint panes (kind 2: see-through
+    // brushes that aren't windows, like a microwave door), which reflect
+    // kFaintPane as much.
+    simd_uint4 glassFaint[2][2];
     // Per eye, sharp water and glass: x = the plane row mirrored, y = that
     // plane's height (xash z; screen space only), z = 1 the screen-space
     // water mirror (Shaders.metal ssprScatter), 2 the engine's mirror of that

@@ -743,7 +743,7 @@ enum DebugEndpoints {
                         let p = pb.bindMemory(to: Float.self), a = ab.bindMemory(to: Float.self)
                         return (0..<n).sorted { a[$0] > a[$1] }.prefix(12).map { i -> JSONValue in
                             func r(_ v: Float, _ k: Float) -> JSONValue { .double(Double((v * k).rounded() / k)) }
-                            return .object(["row": .int(i), "kind": .string(kb[i] == 1 ? "water" : "glass"),
+                            return .object(["row": .int(i), "kind": .string(kb[i] == 1 ? "water" : kb[i] == 2 ? "faintGlass" : "glass"),
                                             "normal": .array([r(p[i * 4], 1000), r(p[i * 4 + 1], 1000), r(p[i * 4 + 2], 1000)]),
                                             "dist": r(p[i * 4 + 3], 10), "area": r(a[i], 10000)])
                         }

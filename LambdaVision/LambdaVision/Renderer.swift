@@ -484,7 +484,8 @@ actor Renderer {
     /// The ray-traced mirror's size, as a divisor of the colour map's.
     static let rtWaterDivisor = 2
     /// Settings → Diagnostics "Water mirror view" (DisplayParams.waterDebug):
-    /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target.
+    /// 0 off, 1 the mirror on water, 2 its confidence, 3 the whole target,
+    /// 4 the stencil marks and depth test glassShade reads.
     nonisolated(unsafe) static var waterMirrorView: Int = 0
     /// Sharp water: what a reflected ray shows where it runs into an object
     /// from below (a table's underside, never on screen) — the top right
@@ -3317,13 +3318,18 @@ actor Renderer {
                 view[eye * 4 + 3] = SIMD4(e.up.0, e.up.1, e.up.2, 0)
                 var copy = e
                 let n = Int(min(max(e.count, 0), LAMBDA_GLASS_MAX_PLANES))
-                // water rows as bits (glassKinds)
-                var words = [UInt32](repeating: 0, count: 8)
+                // water rows and faint panes as bits (glassKinds, glassFaint)
+                var words = [UInt32](repeating: 0, count: 8), faint = words
                 withUnsafeBytes(of: &copy.kind) { kinds in
-                    for row in 0..<n where kinds[row] == 1 { words[row >> 5] |= 1 << UInt32(row & 31) }
+                    for row in 0..<n {
+                        if kinds[row] == 1 { words[row >> 5] |= 1 << UInt32(row & 31) }
+                        if kinds[row] == 2 { faint[row >> 5] |= 1 << UInt32(row & 31) }
+                    }
                 }
                 let kindsAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassKinds)!
                 (raw.baseAddress! + kindsAt + eye * 32).copyMemory(from: words, byteCount: 32)
+                let faintAt = MemoryLayout<DisplayParams>.offset(of: \DisplayParams.glassFaint)!
+                (raw.baseAddress! + faintAt + eye * 32).copyMemory(from: faint, byteCount: 32)
                 withUnsafeBytes(of: &copy.planes) { src in
                     (planes + eye * Int(LAMBDA_GLASS_MAX_PLANES) * rowBytes)
                         .copyMemory(from: src.baseAddress!, byteCount: n * rowBytes)

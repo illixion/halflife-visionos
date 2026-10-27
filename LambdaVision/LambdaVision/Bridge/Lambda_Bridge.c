@@ -3696,7 +3696,16 @@ static engine_ms_fbo_t *engine_ms_fbo_for(void *color, void *depth) {
     f->color = color;
     f->depth = depth;
     f->samples = samples;
-    fprintf(stderr, "[engine] eye target %p: %d samples\n", color, samples);
+    {
+        GLint dtype = 0, stype = 0, dsize = 0, ssize = 0;
+        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &dtype);
+        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &stype);
+        if (dtype) glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &dsize);
+        if (stype) glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &ssize);
+        while (glGetError() != GL_NO_ERROR) {}
+        fprintf(stderr, "[engine] eye target %p: %d samples, depth 0x%x (%d bits), stencil 0x%x (%d bits)\n",
+                color, samples, dtype, dsize, stype, ssize);
+    }
     return f;
 }
 

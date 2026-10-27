@@ -418,15 +418,29 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
 {
     // Settings → Diagnostics "Water mirror view" 3: the sharp-water target
     // over the whole view (magenta = empty), to see what the mirror holds
-    if (p.waterDebug.x > 2.5) {
+    if (p.waterDebug.x > 2.5 && p.waterDebug.x < 3.5) {
         const half4 c = sharpWater.sample(s, uv, eye);
         return c.a > 0.004h ? float3(c.rgb) / float(c.a) : float3(0.3, 0.0, 0.3);
     }
     const uint code = engineStencil.read(engineTexel(uv, eye, p.engineImage, engineMap), eye).r;
-    if (code < 16 || code > 239)
-        return rgb;
+    // "Water mirror view" 4: the marks this reads: green glass (dim olive a
+    // faint pane), blue water, red where the depth puts something nearer
+    // than the marked plane (left as drawn); elsewhere the depth as grey
+    // (magenta tint: a code above the table's)
+    const bool marks = p.waterDebug.x > 3.5;
+    if (code < 16 || code > 239) {
+        if (!marks)
+            return rgb;
+        // unmarked: the engine depth as grey (near white, far black), so a
+        // missing mark tells a lost stencil from a lost depth-stencil target
+        const float ndc = engineDepth.read(engineTexel(uv, eye, p.engineImage, engineMap), eye) * 2.0 - 1.0;
+        const float zn = p.probeMix.y, zf = p.probeMix.z;
+        const float z = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
+        return float3(saturate(1.0 - log2(max(z, 1.0)) / 12.0)) * (code > 239 ? float3(1, 0.5, 1) : float3(1));
+    }
     const uint row = code - 16;
     const bool water = (p.glassKinds[eye][row >> 7][(row >> 5) & 3] >> (row & 31)) & 1;
+    const bool faint = (p.glassFaint[eye][row >> 7][(row >> 5) & 3] >> (row & 31)) & 1;
     const float4 plane = p.glassPlanes[eye][row];
     const float3 E = p.glassEye[eye][0].xyz;
     const float3 d = glassViewRay(uv, eye, p);
@@ -450,8 +464,10 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
         const float zEngine = 2.0 * zn * zf / ((zf + zn) - ndc * (zf - zn));
         const float zPlane = dist * dot(d, p.glassEye[eye][1].xyz);
         if (zEngine < zPlane - (2.0 + 0.02 * zPlane))
-            return rgb;
+            return marks ? float3(1, 0, 0) : rgb;
     }
+    if (marks)
+        return water ? float3(0, 0.4, 1) : (faint ? float3(0.6, 1, 0.2) * 0.5 : float3(0, 1, 0));
     if (nd > 0.0)
         n = -n;                              // the side facing the viewer
     // one engine pixel (foveated, wider toward the edge of the view)
@@ -523,7 +539,11 @@ static inline float3 glassShade(float3 rgb, float2 uv, ushort eye,
     if (water && p.waterDebug.x > 0.5)
         return p.waterDebug.x < 1.5 ? (sharpWeight > 0.0 ? sharp : float3(1, 0, 1)) : float3(sharpWeight);
     env = sharpWeight >= 0.98 ? sharp : mix(env, sharp, sharpWeight);
-    const float amount = min(F * k.x, k.z);
+    // a faint pane (a see-through brush that isn't a window, like the
+    // c1a0d microwave's door) reflects a share of a window's: at a window's
+    // strength it was distracting (= VR_FAINT_PANE, gl_local.h)
+    constexpr float kFaintPane = 0.3;
+    const float amount = min(F * k.x, k.z) * (faint ? kFaintPane : 1.0);
     if (water) {
         // Water blends toward its reflection by Fresnel, the reflection
         // tinted by the water's own hue so it stays watery. The headset

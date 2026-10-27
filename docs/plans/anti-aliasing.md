@@ -234,6 +234,26 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   pass ended (`ANGLE_SetRenderPassEndHook` in the msrtt2 patch). To
   symbolicate, run `atos -o <dSYM> -l 0x100000000` on 0x100000000 plus
   each offset.
+- **Blocker: MSAA loses the stencil (2026-10-27).** With four samples, no
+  glass or water reflection shows. The colour and depth reach the app's
+  textures, but the stencil codes that mark glass and water
+  (`R_VRGlassBegin`) don't.
+  - The marks view showed it: Settings › Developer › Water mirror view ›
+    "Glass and water marks", the engine's depth in grey wherever no mark
+    is. With MSAA it shows no marks anywhere, and the depth is the scene.
+  - Rate map on or off makes no difference.
+  - The framebuffer's stencil is attached (8 bits, a texture).
+  - ANGLE hands Metal a correct descriptor. Depth and stencil share one
+    memoryless 4x depth32Float_stencil8 texture, both store with
+    `MultisampleResolve`, with the stencil filter at sample 0, into the
+    same slice view.
+  - Not known yet: whether the stencil writes happen in the multisampled
+    pass at all, or whether Metal drops the stencil resolve here. A GPU
+    capture, or a small Metal reproduction of the same attachment setup,
+    would tell them apart.
+  - Also seen: with MSAA on, the right eye's depth shows a regular grid of
+    near-white blocks, with or without the rate map. Not yet explained.
+  - MSAA stays off by default until this is fixed.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

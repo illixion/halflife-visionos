@@ -562,7 +562,7 @@ typedef struct {
     float origin[3], forward[3], right[3], up[3];
     int   count;
     float planes[LAMBDA_GLASS_MAX_PLANES][4];   // normal xyz, distance
-    unsigned char kind[LAMBDA_GLASS_MAX_PLANES]; // 0 glass, 1 water (r_vrwater; plane faces up)
+    unsigned char kind[LAMBDA_GLASS_MAX_PLANES]; // 0 glass, 1 water (r_vrwater; plane faces up), 2 a faint pane
     float area[LAMBDA_GLASS_MAX_PLANES];         // the view's share each row covers (R_VRMirrorPick)
 } lambda_glass_eye_t;
 void lambda_glass_get_eye(int eye, lambda_glass_eye_t *out);

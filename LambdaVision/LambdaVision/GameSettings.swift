@@ -728,7 +728,7 @@ final class GameSettings {
 /// Settings → Diagnostics: what the sharp-water mirror holds
 /// (Renderer.waterMirrorView, Shaders.metal glassShade). Not stored.
 enum WaterMirrorView: Int, CaseIterable, Identifiable {
-    case off = 0, onWater = 1, confidence = 2, whole = 3
+    case off = 0, onWater = 1, confidence = 2, whole = 3, marks = 4
     var id: Int { rawValue }
     var label: String {
         switch self {
@@ -736,6 +736,7 @@ enum WaterMirrorView: Int, CaseIterable, Identifiable {
         case .onWater: "Mirror on water"
         case .confidence: "Mirror confidence"
         case .whole: "Whole mirror"
+        case .marks: "Glass and water marks"
         }
     }
 }

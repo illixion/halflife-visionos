@@ -3375,7 +3375,7 @@ index 4e1d5b8..cbfd30c 100644
  		return false;
  
 diff --git a/ref/gl/gl_context.c b/ref/gl/gl_context.c
-index 038abd4..6509d98 100644
+index 038abd4..a28937a 100644
 --- a/ref/gl/gl_context.c
 +++ b/ref/gl/gl_context.c
 @@ -351,6 +351,15 @@ static void GAME_EXPORT R_SetupSky( int *skyboxTextures )
@@ -3394,6 +3394,14 @@ index 038abd4..6509d98 100644
  }
  
  static qboolean R_SetDisplayTransform( ref_screen_rotation_t rotate, int offset_x, int offset_y, float scale_x, float scale_y )
+@@ -452,6 +461,7 @@ static void R_NewMap( void )
+ 	if( R_HasEnabledVBO( ))
+ 		R_GenerateVBO();
+ 	R_ResetRipples();
++	R_VRGlassNewMap();
+ 
+ 	if( gEngfuncs.drawFuncs->R_NewMap != NULL )
+ 		gEngfuncs.drawFuncs->R_NewMap();
 diff --git a/ref/gl/gl_draw.c b/ref/gl/gl_draw.c
 index 26974c1..2242266 100644
 --- a/ref/gl/gl_draw.c
@@ -3664,7 +3672,7 @@ index 216039f..256f42e 100644
  
  /*
 diff --git a/ref/gl/gl_local.h b/ref/gl/gl_local.h
-index e6e7712..ae3ef1f 100644
+index e6e7712..652eaef 100644
 --- a/ref/gl/gl_local.h
 +++ b/ref/gl/gl_local.h
 @@ -58,6 +58,9 @@ void VGL_ShimEndFrame( void );
@@ -3689,16 +3697,20 @@ index e6e7712..ae3ef1f 100644
  	int		skyboxTextures[SKYBOX_MAX_SIDES];	// skybox sides
  	int		skytexturenum;	// this not a gl_texturenum!
  	int		skyboxbasenum;	// start with 5800
-@@ -336,6 +344,8 @@ void GL_ApplyTextureParams( gl_texture_t *tex );
+@@ -336,6 +344,12 @@ void GL_ApplyTextureParams( gl_texture_t *tex );
  int GL_FindTexture( const char *name );
  void GL_FreeTexture( unsigned int texnum );
  void R_InitDlightTexture( void );
 +int R_VRNextDlightTexture( void );
 +void R_VRBeginEyeLightmaps( void );
++void R_VRGlassNewMap( void );
++// a faint pane's share of a window's reflection (gl_rsurf.c R_VRGlassSurface;
++// the composite's is kFaintPane, Shaders.metal glassShade)
++#define VR_FAINT_PANE 0.3f
  void R_TextureList_f( void );
  void R_InitImages( void );
  void R_ShutdownImages( void );
-@@ -726,6 +736,57 @@ extern convar_t	r_lighting_ambient;
+@@ -726,6 +740,57 @@ extern convar_t	r_lighting_ambient;
  extern convar_t	r_studio_lambert;
  extern convar_t	r_detailtextures;
  extern convar_t	r_novis;
@@ -3791,7 +3803,7 @@ index 05a130f..842e422 100644
  	gEngfuncs.Cvar_RegisterVariable( &r_detailtextures );
  	gEngfuncs.Cvar_RegisterVariable( &r_lockpvs );
 diff --git a/ref/gl/gl_rmain.c b/ref/gl/gl_rmain.c
-index 0568486..9f9803d 100644
+index 0568486..3e91f0b 100644
 --- a/ref/gl/gl_rmain.c
 +++ b/ref/gl/gl_rmain.c
 @@ -341,10 +341,26 @@ R_GetFarClip
@@ -4177,7 +4189,7 @@ index 0568486..9f9803d 100644
  
  	return;
  }
-@@ -1167,6 +1396,380 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
+@@ -1167,6 +1396,386 @@ void R_DrawCubemapView( const vec3_t origin, const vec3_t angles, int size )
  	RI.viewleaf = NULL;		// force markleafs next frame
  }
  
@@ -4254,8 +4266,9 @@ index 0568486..9f9803d 100644
 +R_VRMirrorPick
 +
 +The plane the rendered mirror (R_VRMirrorView) shows for the eye just drawn:
-+of this view's glass table rows of the kinds asked (bit 0 glass, bit 1
-+water), the one covering the most of the view (vr_glass_area: each marked
++of this view's glass table rows of the kinds asked (bit 0 glass, faint
++panes included, bit 1 water), the one covering the most of the view (a
++faint pane's area weighed by VR_FAINT_PANE) (vr_glass_area: each marked
 +surface's polygons clipped to the frustum, occlusion not counted) with the
 +eye in front of it. hint: the other eye's plane, kept while its row covers
 +at least half as much as the largest, so both eyes mirror the same surface.
@@ -4266,7 +4279,7 @@ index 0568486..9f9803d 100644
 +__attribute__((visibility("default"))) int R_VRMirrorPick( int kinds, const float *hint, float *plane, int *kind )
 +{
 +	const float minArea = 0.002f;
-+	float bestArea = minArea;
++	float bestArea = minArea, hintedArea = 0.0f;
 +	int i, best = -1, hinted = -1;
 +
 +	if( !vr_mirror_eye_valid )
@@ -4274,20 +4287,25 @@ index 0568486..9f9803d 100644
 +	for( i = 0; i < vr_glass_count; i++ )
 +	{
 +		const float *pl = vr_glass_planes[i];
++		// a faint pane counts for what it reflects, so a window beside it wins
++		const float area = vr_glass_area[i] * ( vr_glass_kind[i] == 2 ? VR_FAINT_PANE : 1.0f );
 +
-+		if( !FBitSet( kinds, vr_glass_kind[i] ? 2 : 1 ))
++		if( !FBitSet( kinds, vr_glass_kind[i] == 1 ? 2 : 1 ))
 +			continue;
 +		if( DotProduct( pl, vr_mirror_eye.vieworigin ) - pl[3] <= 1.0f )
 +			continue;
 +		if( hint && DotProduct( pl, hint ) > 0.9999f && fabs( pl[3] - hint[3] ) < 0.5f )
-+			hinted = i;
-+		if( vr_glass_area[i] > bestArea )
 +		{
-+			bestArea = vr_glass_area[i];
++			hinted = i;
++			hintedArea = area;
++		}
++		if( area > bestArea )
++		{
++			bestArea = area;
 +			best = i;
 +		}
 +	}
-+	if( hinted >= 0 && vr_glass_area[hinted] >= Q_max( 0.5f * bestArea, minArea ))
++	if( hinted >= 0 && hintedArea >= Q_max( 0.5f * bestArea, minArea ))
 +		best = hinted;
 +	if( best < 0 )
 +		return -1;
@@ -4559,7 +4577,7 @@ index 0568486..9f9803d 100644
  ===============
  CL_FxBlend
 diff --git a/ref/gl/gl_rsurf.c b/ref/gl/gl_rsurf.c
-index df6f012..8e448d1 100644
+index df6f012..064c654 100644
 --- a/ref/gl/gl_rsurf.c
 +++ b/ref/gl/gl_rsurf.c
 @@ -583,6 +583,108 @@ static texture_t *R_TextureAnimation( msurface_t *s )
@@ -4888,7 +4906,7 @@ index df6f012..8e448d1 100644
  
  			if( Mod_HaveLightmappedWater( ))
  				R_RenderLightmapForSurface( s );
-@@ -1830,6 +2015,211 @@ static void R_SetRenderMode( cl_entity_t *e )
+@@ -1830,6 +2015,261 @@ static void R_SetRenderMode( cl_entity_t *e )
  	}
  }
  
@@ -4919,24 +4937,74 @@ index df6f012..8e448d1 100644
 +*/
 +__attribute__((visibility("default"))) int   vr_glass_count = 0;
 +__attribute__((visibility("default"))) float vr_glass_planes[VR_GLASS_MAX_PLANES][4];
-+__attribute__((visibility("default"))) byte  vr_glass_kind[VR_GLASS_MAX_PLANES]; // 0 glass, 1 water
++__attribute__((visibility("default"))) byte  vr_glass_kind[VR_GLASS_MAX_PLANES]; // 0 glass, 1 water, 2 a faint pane (R_VRGlassSurface)
 +// each row's share of the view (0-1), for R_VRMirrorPick
 +__attribute__((visibility("default"))) float vr_glass_area[VR_GLASS_MAX_PLANES];
 +
-+static qboolean R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
++// Brush models that are windows: func_breakable (and func_pushable, its
++// kind) of glass, material 0, which is also what no "material" key means.
++// From the map's entities, at each new map.
++#define VR_GLASS_MODELS 4096
++static byte vr_glass_window[VR_GLASS_MODELS / 8];
++
++void R_VRGlassNewMap( void )
++{
++	char token[256], key[64], classname[64], material[16];
++	char *data;
++	int model;
++
++	memset( vr_glass_window, 0, sizeof( vr_glass_window ));
++	if( !WORLDMODEL || !( data = WORLDMODEL->entities ))
++		return;
++	while(( data = COM_ParseFile( data, token, sizeof( token ))) != NULL && token[0] == '{' )
++	{
++		classname[0] = material[0] = 0;
++		model = -1;
++		while(( data = COM_ParseFile( data, key, sizeof( key ))) != NULL && key[0] != '}' )
++		{
++			if(( data = COM_ParseFile( data, token, sizeof( token ))) == NULL )
++				break;
++			if( !Q_strcmp( key, "classname" ))
++				Q_strncpy( classname, token, sizeof( classname ));
++			else if( !Q_strcmp( key, "material" ))
++				Q_strncpy( material, token, sizeof( material ));
++			else if( !Q_strcmp( key, "model" ) && token[0] == '*' )
++				model = Q_atoi( token + 1 );
++		}
++		if( model > 0 && model < VR_GLASS_MODELS
++			&& ( !Q_strcmp( classname, "func_breakable" ) || !Q_strcmp( classname, "func_pushable" ))
++			&& ( !material[0] || Q_atoi( material ) == 0 ))
++			SetBits( vr_glass_window[model >> 3], BIT( model & 7 ));
++		if( !data )
++			break;
++	}
++}
++
++// What a surface about to be drawn is to the glass pass: 0 not glass, 1 a
++// window, 2 a faint pane, which reflects VR_FAINT_PANE as much. A texture
++// named glass, or a window brush (R_VRGlassNewMap), is a window; any other
++// see-through brush (kRenderTransTexture: c1a0d's microwave door, a
++// func_wall of generic108) is a faint pane.
++static int R_VRGlassSurface( const cl_entity_t *e, const msurface_t *fa )
 +{
 +	const texture_t *t = fa->texinfo ? fa->texinfo->texture : NULL;
++	int model;
 +
 +	if( e->curstate.rendermode == kRenderTransAdd || FBitSet( fa->flags, SURF_DRAWSKY|SURF_DRAWTURB ))
-+		return false;
++		return 0;
 +	// an animated texture is never a pane: waterfalls (c1a2's overflowing
 +	// sink, +0laser1fall), beams, force fields. As glass it hid the water
 +	// behind it under the probe's reflection.
 +	if( t && t->name[0] == '+' )
-+		return false;
-+	if( e->curstate.rendermode == kRenderTransTexture )
-+		return true;
-+	return t && Q_stristr( t->name, "glass" ) != NULL;
++		return 0;
++	if( t && Q_stristr( t->name, "glass" ) != NULL )
++		return 1;
++	if( e->curstate.rendermode != kRenderTransTexture )
++		return 0;
++	model = e->model && e->model->name[0] == '*' ? Q_atoi( e->model->name + 1 ) : 0;
++	if( model > 0 && model < VR_GLASS_MODELS && FBitSet( vr_glass_window[model >> 3], BIT( model & 7 )))
++		return 1;
++	return 2;
 +}
 +
 +static int R_VRGlassCode( const msurface_t *fa, int kind )
@@ -5100,7 +5168,7 @@ index df6f012..8e448d1 100644
  static int R_SortBrushModelSurfaces( cl_entity_t *e, model_t *clmodel, vec3_t mins )
  {
  	qboolean quake_compatible = FBitSet( gp_host->features, ENGINE_QUAKE_COMPATIBLE ) ? true : false;
-@@ -1946,7 +2336,8 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1946,7 +2386,8 @@ void R_DrawBrushModel( cl_entity_t *e )
  	e->visframe = tr.realframecount; // visible
  
  	// calculate dynamic lighting for bmodel
@@ -5110,7 +5178,7 @@ index df6f012..8e448d1 100644
  
  	// setup the rendermode
  	R_SetRenderMode( e );
-@@ -1959,6 +2350,12 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1959,6 +2400,12 @@ void R_DrawBrushModel( cl_entity_t *e )
  	if( e->curstate.rendermode == kRenderTransColor || e->curstate.rendermode == kRenderTransTexture )
  		allow_vbo = false;
  
@@ -5123,7 +5191,7 @@ index df6f012..8e448d1 100644
  	if( !allow_vbo )
  		GL_SetupFogColorForSurfaces ();
  
-@@ -1972,8 +2369,16 @@ void R_DrawBrushModel( cl_entity_t *e )
+@@ -1972,8 +2419,18 @@ void R_DrawBrushModel( cl_entity_t *e )
  	// draw sorted translucent surfaces
  	for( int i = 0; i < num_sorted; i++ )
  	{
@@ -5131,10 +5199,12 @@ index df6f012..8e448d1 100644
 -			R_RenderBrushPoly( gpGlobals->draw_surfaces[i].surf, gpGlobals->draw_surfaces[i].cull );
 +		msurface_t *surf = gpGlobals->draw_surfaces[i].surf;
 +		qboolean glass;
++		int pane;
 +
 +		if( r_vrprobe_pass && R_VRGlassSurface( e, surf ))
 +			continue;
-+		glass = vr_glass && R_VRGlassSurface( e, surf ) && R_VRGlassBegin( surf, 0 );
++		pane = vr_glass ? R_VRGlassSurface( e, surf ) : 0;
++		glass = pane && R_VRGlassBegin( surf, pane == 2 ? 2 : 0 );
 +		if( !allow_vbo || !R_AddSurfToVBO( surf, true ))
 +			R_RenderBrushPoly( surf, gpGlobals->draw_surfaces[i].cull );
 +		if( glass )
@@ -5142,7 +5212,7 @@ index df6f012..8e448d1 100644
  	}
  
  	R_DrawVBO( R_HasLightmap(), true );
-@@ -2905,7 +3310,7 @@ static void R_FlushDlights( vboarray_t *vbo, int min_index, int max_index, int d
+@@ -2905,7 +3362,7 @@ static void R_FlushDlights( vboarray_t *vbo, int min_index, int max_index, int d
  
  	}
  	//GL_SelectTexture( mtst.tmu_lm );
@@ -5151,7 +5221,7 @@ index df6f012..8e448d1 100644
  #ifdef DISCARD_DLIGHTS
  	pglTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, BLOCK_SIZE, BLOCK_SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0 );
  #endif
-@@ -3855,6 +4260,10 @@ void R_MarkLeaves( void )
+@@ -3855,6 +4312,10 @@ void R_MarkLeaves( void )
  	if( !FBitSet( RI.rvp.flags, RF_DRAW_WORLD ))
  		return;
  
@@ -5162,7 +5232,7 @@ index df6f012..8e448d1 100644
  	if( FBitSet( r_novis.flags, FCVAR_CHANGED ) || tr.fResetVis )
  	{
  		// force recalc viewleaf
-@@ -3982,6 +4391,7 @@ void GL_RebuildLightmaps( void )
+@@ -3982,6 +4443,7 @@ void GL_RebuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();
@@ -5170,7 +5240,7 @@ index df6f012..8e448d1 100644
  
  	for( i = 0; i < gp_cl->nummodels; i++ )
  	{
-@@ -4045,6 +4455,7 @@ void GL_BuildLightmaps( void )
+@@ -4045,6 +4507,7 @@ void GL_BuildLightmaps( void )
  	CL_RunLightStyles((lightstyle_t *)ENGINE_GET_PARM( PARM_GET_LIGHTSTYLES_PTR ));
  
  	LM_InitBlock();
