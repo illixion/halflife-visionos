@@ -730,6 +730,30 @@ enum DebugEndpoints {
         }
     }
 
+    private static func mirrorReply() -> JSONValue {
+        .object(["eyes": .array((0..<2).map { eye -> JSONValue in
+            var e = lambda_glass_eye_t()
+            lambda_glass_get_eye(Int32(eye), &e)
+            var row: Int32 = -1
+            let drawn = lambda_gl_mirror_eye(Int32(eye), &row) != 0
+            let n = Int(e.count)
+            let rows: [JSONValue] = withUnsafeBytes(of: &e.planes) { pb in
+                withUnsafeBytes(of: &e.kind) { kb in
+                    withUnsafeBytes(of: &e.area) { ab in
+                        let p = pb.bindMemory(to: Float.self), a = ab.bindMemory(to: Float.self)
+                        return (0..<n).sorted { a[$0] > a[$1] }.prefix(12).map { i -> JSONValue in
+                            func r(_ v: Float, _ k: Float) -> JSONValue { .double(Double((v * k).rounded() / k)) }
+                            return .object(["row": .int(i), "kind": .string(kb[i] == 1 ? "water" : "glass"),
+                                            "normal": .array([r(p[i * 4], 1000), r(p[i * 4 + 1], 1000), r(p[i * 4 + 2], 1000)]),
+                                            "dist": r(p[i * 4 + 3], 10), "area": r(a[i], 10000)])
+                        }
+                    }
+                }
+            }
+            return .object(["rows": .int(n), "mirrorRow": .int(drawn ? Int(row) : -1), "largest": .array(rows)])
+        })])
+    }
+
     private static func foveationReply() -> JSONValue {
         let r = EngineFoveation.report
         func size(_ s: MTLSize) -> JSONValue { .array([.int(s.width), .int(s.height)]) }
@@ -882,6 +906,10 @@ enum DebugEndpoints {
             .query("foveation", "The engine image's layout (EngineFoveation): foveated or uniform, the size the engine renders at and the texels its targets hold, each eye's rate map against the compositor's, how often the maps were rebuilt and whether ANGLE took the last map.",
                    releaseSafe: true) { _ in
                 foveationReply()
+            },
+            .query("mirror", "The rendered mirror's choice per eye: the glass and water rows of the eye's glass table (kind, plane normal and distance, share of the view), largest first, and the row R_VRMirrorPick took for the mirror view (-1 none drawn).",
+                   releaseSafe: true) { _ in
+                mirrorReply()
             },
             .query("perf", "Frame timing over the last 512 frames (p50/p95/p99/max per column): the app's [FT] CPU-observed stages and the GPU execution columns (GPUPassTimer).",
                    releaseSafe: true) { _ in
