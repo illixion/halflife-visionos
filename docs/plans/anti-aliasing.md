@@ -234,26 +234,40 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   pass ended (`ANGLE_SetRenderPassEndHook` in the msrtt2 patch). To
   symbolicate, run `atos -o <dSYM> -l 0x100000000` on 0x100000000 plus
   each offset.
-- **Blocker: MSAA loses the stencil (2026-10-27).** With four samples, no
-  glass or water reflection shows. The colour and depth reach the app's
-  textures, but the stencil codes that mark glass and water
-  (`R_VRGlassBegin`) don't.
-  - The marks view showed it: Settings › Developer › Water mirror view ›
-    "Glass and water marks", the engine's depth in grey wherever no mark
-    is. With MSAA it shows no marks anywhere, and the depth is the scene.
-  - Rate map on or off makes no difference.
-  - The framebuffer's stencil is attached (8 bits, a texture).
-  - ANGLE hands Metal a correct descriptor. Depth and stencil share one
-    memoryless 4x depth32Float_stencil8 texture, both store with
-    `MultisampleResolve`, with the stencil filter at sample 0, into the
-    same slice view.
-  - Not known yet: whether the stencil writes happen in the multisampled
-    pass at all, or whether Metal drops the stencil resolve here. A GPU
-    capture, or a small Metal reproduction of the same attachment setup,
-    would tell them apart.
-  - Also seen: with MSAA on, the right eye's depth shows a regular grid of
-    near-white blocks, with or without the rate map. Not yet explained.
-  - MSAA stays off by default until this is fixed.
+- **Fixed: MSAA lost the stencil (2026-10-27).** With four samples, no
+  glass or water reflection showed: the colour and depth reached the app's
+  textures, the stencil codes that mark glass and water (`R_VRGlassBegin`)
+  didn't, and the right eye's depth showed a regular grid of near-white
+  blocks. Neither was MSAA's doing. The single-sample path attaches the
+  app's depth slice view as a *renderbuffer*, which ANGLE renders into
+  directly; the multisampled path attaches it as a *texture*, and
+  `TextureMtl` makes its level-0 image with `mtl::Texture::createMipView`
+  (cube faces: `createSliceMipView`): a Metal view of the app's view. On Apple GPUs a depth-stencil view of a view
+  whose root is an array texture addresses its stencil plane wrong (depth
+  and colour are fine): slice 1's stencil writes land in slice 0, slice
+  0's overrun slice 1's depth (the blocks). A Metal-only reproduction
+  shows it at one sample too (M2 Max, macOS 26), and ANGLE's own readback
+  through the same nested view saw the marks, which is why the loss looked
+  like it was on the app's side. The msrtt2 patch now makes
+  both share the handle for level 0 of a one-level texture instead of
+  viewing it. Diagnostics that ruled the rest out: the marks view, a
+  per-draw stencil log in ANGLE, resolve readbacks before and after the
+  pass, and the standalone test (`stencilres4.swift` in the session's
+  scratchpad: the nested-view case alone fails).
+  - MSAA stays off by default until the clean timing A/B is done.
+- **Open: the tram ride turns MSAA off (2026-10-27).** On c0a0 the
+  safety net tripped within 20 s of the load: three 2-pass frames in 180,
+  each ending at `mtl::BufferPool::allocateNewBuffer` under
+  `VertexArrayMtl::updateClientAttribs` from `R_StudioDrawPoints`. The
+  studio renderer streams client-side vertex arrays, ANGLE's streaming
+  pool is capped at 10 × 16 buffers, and when the oldest is still in
+  flight it flushes the command buffer (ending the eye's pass) and stalls
+  until the GPU frees it. The break room never fills the pool; a tram full
+  of scientists does. Fix candidates: a bigger pool (`maxBuffers`, or an
+  initial size so one buffer serves many draws) in the msrtt2 patch, or
+  studio meshes through VBOs in the engine. Until then the net's "one
+  sample from now on" is sticky for the process, so the tram leaves the
+  rest of the session at one sample.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

@@ -101,3 +101,41 @@ index b019051d74..81a3ecc4b7 100644
      mSerial                   = cmdBuffer().cmdQueue().getNextRenderPassEncoderSerial();
      mRenderPassDesc           = desc;
      mRecording                = true;
+diff --git a/src/libANGLE/renderer/metal/mtl_resources.mm b/src/libANGLE/renderer/metal/mtl_resources.mm
+index d9187406a8..93d29b47d6 100644
+--- a/src/libANGLE/renderer/metal/mtl_resources.mm
++++ b/src/libANGLE/renderer/metal/mtl_resources.mm
+@@ -722,6 +722,13 @@ TextureRef Texture::createSliceMipView(uint32_t slice, const MipmapNativeLevel &
+ {
+     ANGLE_MTL_OBJC_SCOPE
+     {
++        // A one-level 2D texture is its own level 0, slice 0: share the handle
++        // rather than view it (see createMipView for why).
++        if (textureType() == MTLTextureType2D && mipmapLevels() == 1 && slice == 0 &&
++            level.get() == 0)
++        {
++            return TextureRef(new Texture(mUsageRef, get(), mColorWritableMask));
++        }
+         switch (textureType())
+         {
+             case MTLTextureTypeCube:
+@@ -740,6 +747,19 @@ TextureRef Texture::createMipView(const MipmapNativeLevel &level)
+ {
+     ANGLE_MTL_OBJC_SCOPE
+     {
++        // Level 0 of a one-level texture is the whole texture: share the
++        // handle rather than make a view of it. On Apple GPUs (an M2 Max under
++        // macOS 26, an M5 Apple Vision Pro under visionOS 27) a depth-stencil
++        // view of a view whose root is an array texture addresses its stencil
++        // plane wrong: slice 1's stencil writes land in slice 0, and slice 0's
++        // overrun slice 1's depth; the depth plane and colour formats are
++        // addressed right. A client's slice view wrapped as an EGLImage and
++        // attached as a texture (EXT_multisampled_render_to_texture) gets its
++        // level-0 image from here, and so lost its stencil.
++        if (mipmapLevels() == 1 && level.get() == 0)
++        {
++            return TextureRef(new Texture(mUsageRef, get(), mColorWritableMask));
++        }
+         NSUInteger slices = cubeFacesOrArrayLength();
+         return TextureRef(new Texture(this, pixelFormat(), textureType(),
+                                       NSMakeRange(level.get(), 1), NSMakeRange(0, slices)));
