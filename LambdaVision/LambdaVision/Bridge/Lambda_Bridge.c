@@ -4421,6 +4421,9 @@ void lambda_gl_worker_set_mirror_targets(void *color0, void *depth0, void *color
     g_mirror_kinds = kinds;
 }
 
+extern float vr_mirror_debug[18];
+void lambda_gl_mirror_debug(float out[18]) { memcpy(out, vr_mirror_debug, sizeof(float) * 18); }
+
 int lambda_gl_mirror_eye(int eye, int *row) {
     if (eye < 0 || eye > 1) return 0;
     if (row) *row = atomic_load(&g_mirror_row[eye]);

@@ -590,6 +590,10 @@ void lambda_gl_worker_set_mirror_targets(void *mtl_color0, void *mtl_depth0,
                                          int width, int height, int kinds);
 // Whether the last frame drew this eye's mirror, and in which row of that
 // eye's glass table (lambda_glass_get_eye).
+// The last mirror view (eye 1's, as drawn last): the eye's origin and
+// angles, the mirrored camera's origin and angles, the oblique scale, the
+// plane in the camera's eye space, and the eye's distance to the plane.
+void lambda_gl_mirror_debug(float out[18]);
 int  lambda_gl_mirror_eye(int eye, int *row);
 // The rendered mirror's samples per texel (1 = none; more than the GL
 // offers are clamped): 4 unless changed (EXT_multisampled_render_to_texture).

@@ -751,7 +751,14 @@ enum DebugEndpoints {
                 }
             }
             return .object(["rows": .int(n), "mirrorRow": .int(drawn ? Int(row) : -1), "largest": .array(rows)])
-        })])
+        }), "lastView": {
+            var v = [Float](repeating: 0, count: 18)
+            lambda_gl_mirror_debug(&v)
+            func a(_ r: Range<Int>) -> JSONValue { .array(v[r].map { .double(Double($0)) }) }
+            return .object(["eyeOrigin": a(0..<3), "eyeAngles": a(3..<6), "cameraOrigin": a(6..<9),
+                            "cameraAngles": a(9..<12), "oblique": .double(Double(v[12])),
+                            "planeInCamera": a(13..<17), "side": .double(Double(v[17]))])
+        }()])
     }
 
     private static func foveationReply() -> JSONValue {
