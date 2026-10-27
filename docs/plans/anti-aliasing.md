@@ -269,8 +269,17 @@ the c1a2 window is eye 1399.8 −610.06 −499.45, so origin z −527.45, facing
   also exports `ANGLE_GetBufferPoolStats` (stalls, peak buffers), printed
   with each split the net counts. Verified on device: c0a0 from the load
   through the arrival at c0a0b (155 s) held 4 samples with no split after
-  the loading frames, where it used to trip within 20 s. The net's "one
-  sample from now on" is still sticky for the process.
+  the loading frames, where it used to trip within 20 s.
+- **Done: the split net recovers (2026-10-27).** A trip used to drop the
+  process to one sample for good. It now pauses multisampling (releasing
+  the implicit multisampled images) for 1800 eye-0 frames, doubling for
+  each trip within ten minutes of the last (capped at 8 min), and resumes
+  once the pause is over and the level has been settled for 180 frames.
+  Hard failures (no EGLImage, framebuffer refused, a GL error on the first
+  pass) stay permanent. Verified on device with a temporary hand trigger:
+  trip, pause, "resumed", 4-sample targets rebuilt; a second trip paused
+  for 3600 frames. Still open: the A/B timing, and the frame-count pause
+  is 30 s at 60 fps, 15 s at 120.
 
 ### Phase 2 — Render the engine foveated (the thermal win)
 

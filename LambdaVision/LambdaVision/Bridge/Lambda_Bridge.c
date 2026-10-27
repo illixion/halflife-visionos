@@ -3529,6 +3529,17 @@ static int g_split_log_n = 0;                   // events since launch
 static pthread_mutex_t g_split_log_mtx = PTHREAD_MUTEX_INITIALIZER;
 static unsigned g_pass_frame = 0;               // eye-0 frames since launch
 static unsigned g_ms_split_frames[3];           // when multisampling last split, newest first
+// The split net pauses multisampling instead of ending it: the scene that
+// split (a crowd, a burst of model loads) usually passes. It resumes once
+// the level is settled and the pause is over; each trip within ten minutes
+// of the last doubles the pause (15 s, 30 s, ... capped at 8 min), so a
+// scene that keeps splitting costs a few bad frames per cycle, not a stall.
+static unsigned g_ms_paused_until = 0;          // eye-0 frame multisampling may resume; 0 = running
+static unsigned g_ms_trip_frame = 0;            // when the net last tripped
+static int g_ms_trips = 0;                      // trips in a row, for the backoff
+#define MS_PAUSE_BASE_FRAMES 1800
+#define MS_PAUSE_MAX_FRAMES  57600
+#define MS_TRIP_FORGET_FRAMES 72000
 static unsigned g_unsettled_frame = 0;          // the last frame loading or out of a level
 extern int SCR_VRLoading(void);
 extern int CL_IsInGame(void);
@@ -3556,6 +3567,18 @@ static void pass_stats_begin(void) {
     g_split_bt_n = 0;
     atomic_store(&g_pass_armed, 1);
 }
+// Pauses multisampling; returns the pause in eye-0 frames.
+static unsigned ms_net_trip(void) {
+    if (g_ms_trip_frame && g_pass_frame - g_ms_trip_frame > MS_TRIP_FORGET_FRAMES) g_ms_trips = 0;
+    unsigned pause = MS_PAUSE_BASE_FRAMES << (g_ms_trips < 5 ? g_ms_trips : 5);
+    if (pause > MS_PAUSE_MAX_FRAMES) pause = MS_PAUSE_MAX_FRAMES;
+    g_ms_trips++;
+    g_ms_trip_frame = g_pass_frame;
+    g_ms_paused_until = g_pass_frame + pause;
+    memset(g_ms_split_frames, 0, sizeof(g_ms_split_frames));
+    return pause;
+}
+
 static void pass_stats_end(int eye) {
     unsigned long long p, u;
     atomic_store(&g_pass_armed, 0);
@@ -3587,7 +3610,7 @@ static void pass_stats_end(int eye) {
     // eye at launch, a few 2-pass frames a second after a map load). A model
     // loaded mid-level is a lone bad frame; three within two seconds or so
     // beat like the light-style flicker did, and aliasing beats that, so
-    // they end multisampling.
+    // they pause multisampling (see g_ms_paused_until).
     if (unresolves && g_pass_frame - g_unsettled_frame > 180 && g_frame_ms && g_frame_rate_map_ok && g_engine_msrtt2) {
         g_ms_split_frames[2] = g_ms_split_frames[1];
         g_ms_split_frames[1] = g_ms_split_frames[0];
@@ -3595,9 +3618,15 @@ static void pass_stats_end(int eye) {
         int recurs = g_ms_split_frames[2] && g_pass_frame - g_ms_split_frames[2] <= 180;
         unsigned long long stalls, peak;
         ANGLE_GetBufferPoolStats(&stalls, &peak);
-        fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map; buffer pool stalls %llu, peak %llu%s\n",
-                eye, passes, unresolves, stalls, peak, recurs ? ", the third in 180 frames: one sample from now on" : "");
-        if (recurs) g_engine_msrtt2 = 0;
+        if (recurs) {
+            unsigned pause = ms_net_trip();
+            fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map; buffer pool stalls %llu, peak %llu: "
+                    "the third in 180 frames, one sample for %u frames (trip %d)\n",
+                    eye, passes, unresolves, stalls, peak, pause, g_ms_trips);
+        } else {
+            fprintf(stderr, "[engine] eye %d split into %d render passes (%d unresolves) under the rate map; buffer pool stalls %llu, peak %llu\n",
+                    eye, passes, unresolves, stalls, peak);
+        }
     }
 }
 
@@ -3654,6 +3683,15 @@ static engine_ms_fbo_t *engine_ms_fbo_for(void *color, void *depth) {
                 g_engine_msrtt2 ? "yes" : "no", (int)most);
     }
     if (!g_engine_msrtt2) return NULL;
+    if (g_ms_paused_until) {
+        if (g_pass_frame < g_ms_paused_until || g_pass_frame - g_unsettled_frame <= 180) {
+            // drop the implicit multisampled images while paused: they are the memory
+            for (int i = 0; i < 2; i++) if (g_engine_ms[i].fbo) engine_ms_release(&g_engine_ms[i]);
+            return NULL;
+        }
+        g_ms_paused_until = 0;
+        fprintf(stderr, "[engine] multisampling resumed after the pause (trip %d)\n", g_ms_trips);
+    }
     int samples = want < g_engine_msrtt2 ? want : g_engine_msrtt2;
 
     for (int i = 0; i < 2; i++) {
