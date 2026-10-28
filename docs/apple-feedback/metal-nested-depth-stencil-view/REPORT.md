@@ -23,7 +23,7 @@ When a `depth32Float_stencil8` 2D-array texture is viewed twice, root R, then a 
 
 One level of view (V1 alone) is correct. `depth32Float` and `rgba8Unorm` nested the same way are correct. The failure is the same at 1 sample (plain render pass, no resolve) and at 4 samples with `multisampleResolve`.
 
-Real-world impact: ANGLE's Metal backend (used by an app on visionOS) imports a client MTLTexture as an EGLImage, attaches it as a GL texture (`EXT_multisampled_render_to_texture`), and builds its level-0 image as a view of the imported texture. The app handed it per-eye slice views of a depth-stencil array, so the nested view is exactly this case. Stencil marks written by the engine vanished and the other eye's depth turned into a grid of near-white blocks. The same symptoms were seen on an Apple Vision Pro (M5, visionOS 27, as reported by the developer; no build number recorded) in the real app. The attached program reproduces it headless on a Mac.
+Real-world impact: a Metal-backed graphics library imports a client `MTLTexture` as an EGLImage, attaches it as a GL texture (`EXT_multisampled_render_to_texture`), and builds its level-0 image as a view of the imported texture. The application hands it per-eye slice views of a depth-stencil array, so the nested view is exactly this case. Stencil marks written by the rendering engine vanish and the other eye's depth turns into a grid of near-white blocks. The same symptoms were seen on Apple Vision Pro (M5, visionOS 27; exact build number not recorded). The attached program reproduces the issue headless on a Mac.
 
 ## Steps to Reproduce
 
@@ -96,7 +96,7 @@ Metal validation: running the same binary with `METAL_DEVICE_WRAPPER_TYPE=1` alo
 
 ## Workaround
 
-Create each per-slice view directly from the root texture, never from another view (or use `depthAttachment.slice` / `resolveSlice` on the pass descriptor). If a library wraps the texture you hand it in another view, hand it the handle itself instead of a view, or patch the library so it shares the handle for level 0 of a one-level texture. ANGLE was patched that way.
+Create each per-slice view directly from the root texture, never from another view (or use `depthAttachment.slice` / `resolveSlice` on the pass descriptor). If a library wraps the texture you hand it in another view, pass the root texture handle instead or preserve that handle for level 0 of a one-level texture.
 
 ## Attachments
 

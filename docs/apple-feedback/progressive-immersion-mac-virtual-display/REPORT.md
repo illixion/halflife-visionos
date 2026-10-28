@@ -26,9 +26,9 @@ restart also restored it during investigation, but is not required when using
 the disconnect-and-reopen workaround.
 
 The behavior was reproduced in a minimal Metal 3 Compositor Services probe and
-in LambdaVision's existing Metal 4 renderer. LambdaVision's original renderer
-resized normally after Mac Virtual Display was disconnected and the immersive
-space reopened. This points to an interaction with the system compositor rather
+in a second Compositor Services app using a Metal 4 command queue. After Mac
+Virtual Display was disconnected and its immersive space reopened, that app's
+original renderer resized normally. This points to an interaction with the system compositor rather
 than a renderer-specific failure.
 
 ## Steps to Reproduce
@@ -47,10 +47,10 @@ than a renderer-specific failure.
 7. Close and reopen the immersive space, then rotate the Crown. Progressive
    immersion works again.
 
-The issue also affected LambdaVision, which uses a Metal 4 command queue and
-otherwise follows the drawable render-context API. After disconnecting Mac
-Virtual Display and reopening LambdaVision's immersive space, the original game
-renderer resized its portal normally.
+The same failure occurred in an app using a Metal 4 command queue and the
+drawable render-context API. After disconnecting Mac Virtual Display and
+reopening its immersive space, the app's original renderer resized the portal
+normally.
 
 ## Expected Results
 
@@ -72,11 +72,9 @@ and reopening the immersive space restores the expected behavior.
 - Mac Virtual Display: connected during failure; disconnecting and reopening
   the immersive space restores the feature.
 - Mac host used for the investigation: macOS 27.0.1 (26A434).
-- Reproduced in a standalone Metal 3 Compositor Services probe and in
-  LambdaVision's original Metal 4 renderer. The standalone probe showed the
-  failure again after Mac Virtual Display was reconnected.
-- The Oneiros renderer has the same historical symptoms, but Oneiros itself was
-  not retested in this investigation.
+- Reproduced in a standalone Metal 3 Compositor Services probe and in an app
+  using a Metal 4 command queue. The probe showed the failure again after Mac
+  Virtual Display was reconnected.
 
 ## Workaround
 
@@ -85,12 +83,9 @@ space. A renderer change or headset restart is not needed for this recovery.
 
 ## Attachments
 
-The standalone probe source is available locally at
-`build/ProgressiveImmersionProbe.zip` in the LambdaVision repository. It contains
-the scratch copy of Apple's Compositor Services sample, a blue scene rendered
-through the progressive mask, and logging for immersion amounts, device-anchor
-availability, stencil values, and a color readback. The archive omits signing
-credentials. The existing game sources and investigation notes are in the
-LambdaVision repository.
+The source-only probe archive contains a copy of Apple's Compositor Services
+sample, a blue scene rendered through the progressive mask, and logging for
+immersion amounts, device-anchor availability, stencil values, and a color
+readback. It omits signing credentials.
 
 This is a draft for review; it has not been submitted through Feedback Assistant.
