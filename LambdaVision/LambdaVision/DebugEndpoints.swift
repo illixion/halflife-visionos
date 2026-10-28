@@ -1034,7 +1034,17 @@ enum DebugEndpoints {
                 }
                 return try stateReply()
             },
-            .command("window", "Open or close one of the app's windows, and for Settings choose the page it shows (`page`: presets, graphics, reflections, immersion, hands, keyboardMouse, audio, gameMenu, troubleshooting, developer). For looking at them with _screenshot.",
+            .command("launch", "Press the launcher's Play button, as a player would: opens the game (if closed) and then runs `command` once the engine is up. For testing the launcher's chapter and save cards, which send `map <id>` and `load <name>`. Returns at once; poll GET /state.",
+                     parameters: [.string("command", "a console line to run after the game is up, e.g. map c1a2 or load quick")]) { args in
+                let app = try model()
+                if let command = args.string("command") {
+                    app.launcher.start(then: command)
+                } else {
+                    app.launcher.start()
+                }
+                return ["started": JSONValue.bool(true), "saves": .array(app.saves.slots.map { .string("\($0.name) \($0.map ?? "?")") })]
+            },
+            .command("window", "Open or close one of the app's windows, and for Settings choose the page it shows (`page`: presets, graphics, reflections, immersion, hands, keyboardMouse, audio, troubleshooting, developer). For looking at them with _screenshot.",
                      parameters: [.string("id", "the window", required: true,
                                           choices: ["main", "settings", "console", "performance"]),
                                   .boolean("open", "true = open, false = close", required: true),

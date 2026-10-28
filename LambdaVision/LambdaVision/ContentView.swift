@@ -32,34 +32,24 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-            VStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 28) {
                 if let message = appModel.engineFailureMessage {
                     engineFailureBanner(message)
                 }
 
-                // Half-Life lambda mark (placeholder logo; swap a real HL
-                // asset later). Replaced the RealityKit demo globe, which
-                // rendered a volumetric sphere on top of the window content.
-                ZStack {
-                    Circle()
-                        .fill(Color.orange.gradient)
-                    Text("λ")
-                        .font(.system(size: 76, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 132, height: 132)
-                .padding(.bottom, 20)
-
-                Text("Lambda VisionPro").font(.largeTitle)
-
                 let library = appModel.library
                 if library.scan == nil {
                     ProgressView("Looking for games…")
+                        .frame(maxWidth: .infinity)
                 } else if library.games.isEmpty {
                     GameOnboarding(onImport: { showImporter = true }, onWiFi: { showWiFi = true })
-                } else {
+                } else if let game = library.selectedGame {
+                    LauncherBanner(game: game)
+                    QuickActions()
+                    ChapterPicker(game: game)
+                    SavedGames(game: game)
+                    ConsoleCard()
                     GameLibraryList()
-                    ToggleImmersiveSpaceButton()
                 }
 
                 if library.isImporting || !library.importLog.isEmpty {
@@ -95,9 +85,8 @@ struct ContentView: View {
                     .font(.system(.caption, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.top, 8)
             }
-            .padding()
+            .padding(28)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -145,11 +134,41 @@ struct ContentView: View {
                                         dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() },
                                         openWindow: { [openWindow] in openWindow(id: $0) },
                                         dismissWindow: { [dismissWindow] in dismissWindow(id: $0) })
+                appModel.launcher.bind(appModel: appModel,
+                                       openImmersive: { [openImmersiveSpace, appModel] in
+                                           await openImmersiveSpace(id: appModel.immersiveSpaceID) == .opened
+                                       },
+                                       dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() })
                 InputCatcher.shared.start(appModel: appModel)
                 await appModel.prepare()
                 appModel.library.watchForAssetUploads()
             }
-            .onChange(of: appModel.library.selectionVersion) { Task { await appModel.warmUp() } }
+            .onChange(of: appModel.library.selectionVersion) {
+                appModel.refreshSaves()
+                Task { await appModel.warmUp() }
+            }
+            .onChange(of: appModel.immersiveSpaceState) { appModel.refreshSaves() }
+            // A settings preset opened from AirDrop or Files.
+            .alert("Preset added", isPresented: Binding(
+                get: { appModel.presets.openedPreset != nil },
+                set: { if !$0 { appModel.presets.openedPreset = nil } })
+            ) {
+                Button("Show it") {
+                    appModel.presets.openedPreset = nil
+                    appModel.settingsPageRequest = .presets
+                    openWindow(id: SettingsView.windowID)
+                }
+                Button("Later", role: .cancel) { appModel.presets.openedPreset = nil }
+            } message: {
+                Text("“\(appModel.presets.openedPreset?.name ?? "")” is in your presets. Choose which parts to apply in Settings.")
+            }
+            // Saved games: the engine writes them while you play.
+            .task {
+                while !Task.isCancelled {
+                    appModel.refreshSaves()
+                    try? await Task.sleep(for: .seconds(4))
+                }
+            }
             .onChange(of: appModel.library.scanVersion) { Task { await appModel.warmUp() } }
             // Zips (AirDrop'd or in Files) and unpacked folders.
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.zip, .folder],
@@ -174,41 +193,12 @@ struct ContentView: View {
     // ignores noclip/god/impulse 101/etc. unless `sv_cheats 1` is set, so the
     // toggle drives that first and the cheat buttons are disabled until it's on
     // (and until the engine is up — sending a worker cmd pre-init deadlocks).
-    // Full-game chapter starts (map id → title), taken from valve/titles.txt as
-    // shipped in this build. `map <id>` does a clean load, so this doesn't need
-    // sv_cheats — just a live engine.
-    private static let chapters: [(id: String, name: String)] = [
-        ("c0a0", "Black Mesa Inbound"),
-        ("c1a0", "Anomalous Materials"),
-        ("c1a1", "Unforeseen Consequences"),
-        ("c1a2", "Office Complex"),
-        ("c1a3", "\"We've Got Hostiles\""),
-        ("c1a4", "Blast Pit"),
-        ("c2a1", "Power Up"),
-        ("c2a2", "On A Rail"),
-        ("c2a3", "Apprehension"),
-        ("c2a4", "Residue Processing"),
-        ("c2a5", "Surface Tension"),
-        ("c3a1", "\"Forget About Freeman!\""),
-        ("c3a2", "Lambda Core"),
-        ("c4a1", "Xen"),
-        ("c4a2", "Gonarch's Lair"),
-        ("c4a3", "Nihilanth"),
-        ("c5a1", "Endgame"),
-    ]
-
+    // The chapter picker (ChapterPicker) replaced the old "Warp to chapter" menu.
     @ViewBuilder
     private var cheatsSection: some View {
         let settings = appModel.gameSettings
         DisclosureGroup("Cheats") {
             VStack(alignment: .leading, spacing: 10) {
-                Menu("Warp to chapter") {
-                    ForEach(Self.chapters, id: \.id) { c in
-                        Button("\(c.id) — \(c.name)") { settings.command("map \(c.id)") }
-                    }
-                }
-                .disabled(!settings.isEngineReady)
-
                 Toggle("Enable cheats (sv_cheats 1)", isOn: $cheatsEnabled)
                     .disabled(!settings.isEngineReady)
                     .onChange(of: cheatsEnabled) { _, on in

@@ -41,3 +41,7 @@ scripts/build-signing.conf
 VisionPort/games-src/
 # Scratch dir of scripts/prebuilts.sh
 LambdaVision/Vendor/.prebuilts-fetch.*/
+
+# Chapter screenshots of the player's own game, for local builds only
+# (Launcher/ChapterArt looks them up in Previews/); not ours to ship.
+LambdaVision/LambdaVision/Previews/chapter-*

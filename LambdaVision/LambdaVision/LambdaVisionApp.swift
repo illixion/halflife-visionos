@@ -353,6 +353,7 @@ struct LambdaVisionApp: App {
                     }
                 }
         }
+        .defaultSize(width: 1240, height: 900)
         .onChange(of: scenePhase) { _, phase in LambdaDebugServer.scenePhaseChanged(phase) }
 
         // Settings, opened from the launcher's gear button: a window of its

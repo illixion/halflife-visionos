@@ -47,7 +47,7 @@ struct SettingsView: View {
         case presets
         case graphics, reflections, immersion
         case hands, keyboardMouse, audio
-        case gameMenu, troubleshooting, developer
+        case troubleshooting, developer
     }
 
     var body: some View {
@@ -89,8 +89,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    row(.gameMenu, "Menu, Maps & Console", systemImage: "list.bullet.rectangle",
-                        value: settings.isEngineReady ? "" : "Game not running")
                     row(.troubleshooting, "Troubleshooting", systemImage: "wrench.and.screwdriver")
                     row(.developer, "Developer", systemImage: "hammer")
                 }
@@ -144,7 +142,6 @@ struct SettingsView: View {
         case .hands: HandSettingsPage()
         case .keyboardMouse: KeyboardMouseSettingsPage()
         case .audio: AudioSettingsPage()
-        case .gameMenu: GameMenuSettingsPage()
         case .troubleshooting: TroubleshootingSettingsPage()
         case .developer: DeveloperSettingsPage()
         }

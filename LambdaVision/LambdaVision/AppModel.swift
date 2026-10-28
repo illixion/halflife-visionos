@@ -35,6 +35,15 @@ class AppModel {
     /// window clears it once it has moved there.
     var settingsPageRequest: SettingsView.Page?
 
+    /// Starts and leaves the game, and sends it commands (the launcher's
+    /// buttons and the debug API); bound by the main window.
+    let launcher = GameLauncher()
+
+    /// The selected game's saved games, for the launcher's list.
+    let saves = SaveStore()
+
+    func refreshSaves() { saves.refresh(gamedir: library.selectedGame?.gamedir) }
+
     /// Saved and shipped settings presets (Settings › Presets).
     let presets = PresetStore()
 
