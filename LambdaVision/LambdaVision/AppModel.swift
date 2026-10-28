@@ -39,6 +39,9 @@ class AppModel {
     /// buttons and the debug API); bound by the main window.
     let launcher = GameLauncher()
 
+    /// Renders the chapter pictures from the marked spots (Developer mode).
+    let chapterPictures = ChapterPictureRunner()
+
     /// The selected game's saved games, for the launcher's list.
     let saves = SaveStore()
 

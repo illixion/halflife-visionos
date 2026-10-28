@@ -66,6 +66,8 @@ nonisolated enum WeaponWheel {
         case flashlight
         case quickSave
         case quickLoad
+        /// Developer mode: records the camera as this chapter's picture spot.
+        case markShot
     }
 
     struct Entry: Equatable, Sendable {
@@ -101,7 +103,7 @@ nonisolated enum WeaponWheel {
     /// weapons HUD shown); `utilities` adds the flashlight and quick
     /// save/load.
     static func entries(slots: [Slot], selectionAllowed: Bool, hasSuit: Bool,
-                        utilities: Bool) -> [Entry] {
+                        utilities: Bool, markShot: Bool = false) -> [Entry] {
         var out: [Entry] = []
         if selectionAllowed {
             for s in slots.sorted(by: { $0.slot < $1.slot }) where !s.name.isEmpty {
@@ -122,6 +124,7 @@ nonisolated enum WeaponWheel {
             }
             out.append(Entry(action: .quickSave, label: "SAVE", confirmSeconds: quickSaveConfirmSeconds))
             out.append(Entry(action: .quickLoad, label: "LOAD", confirmSeconds: quickLoadConfirmSeconds))
+            if markShot { out.append(Entry(action: .markShot, label: "SHOT")) }
         }
         return out
     }
@@ -135,7 +138,22 @@ nonisolated enum WeaponWheel {
         case .flashlight: "impulse 100"
         case .quickSave: "savequick"
         case .quickLoad: "loadquick"
+        case .markShot: ""
         }
+    }
+
+    /// Does a pick: the console line, or for a spot to mark, the store (and a
+    /// blip so you know it took, since the wheel is gone by then).
+    static func perform(_ action: Action) {
+        if action == .markShot {
+            Task { @MainActor in
+                if ChapterShotStore.shared.markHere() != nil {
+                    _ = "play buttons/blip2".withCString { lambda_gl_worker_cmd($0) }
+                }
+            }
+            return
+        }
+        _ = command(for: action).withCString { lambda_gl_worker_cmd($0) }
     }
 
     /// "weapon_9mmAR" → "9MMAR": the classname without its prefix, in the

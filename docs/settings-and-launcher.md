@@ -72,3 +72,36 @@ ready.
 - **Saved games** (`SaveStore`): the engine's save folder
   (`Application Support/xash3d/<gamedir>/save`), each with the picture the
   engine saved beside it and the map found in the file header.
+
+## Chapter pictures made by the engine
+
+The chapter cards show a picture the engine rendered on this device from a spot
+you chose; without one they draw their own card.
+
+- **Mark a spot:** turn on Developer mode, open the weapon wheel in the game and
+  pick **SHOT** (after SAVE and LOAD). A blip confirms it. It records the map, the
+  camera position and the view angles (`lambda_debug_view`; roll is dropped).
+  Marking the same map again replaces its spot. `POST /markshot` does the same, `POST /setshot`
+  sets one by numbers and `POST /removeshot` drops one.
+- **Where the list lives:** `ChapterShotStore` reads the bundled
+  `Launcher/ChapterShots.json` and puts the player's own
+  `Application Support/LambdaVision/ChapterShots.json` on top. `GET /chaptershots`
+  returns the list in the shape of the repo file: paste it into
+  `Launcher/ChapterShots.json` to ship the spots. They are numbers only.
+- **Make the pictures:** the launcher's *Chapter pictures* card (Developer mode) or
+  `POST /makepictures` (optionally `map=`) runs `ChapterPictureRunner`. For each spot it
+  loads the map, hides the HUD, crosshair and console lines, teleports the player
+  (`sv_cheats`, `sv_enttools_enable`, noclip, `ent_fire 1 set origin`), nudges the position
+  and yaw until the camera the engine reports matches the spot, waits for the engine console
+  to finish sliding away and for any fade, then takes the engine's left-eye colour map
+  (`FrameCapture`, source engine; this is the app's own capture, no approval), cuts a
+  16:10 picture from its middle and writes
+  `Application Support/LambdaVision/Chapter Pictures/<gamedir>-<map>.jpg`. It restores the
+  cvars it changed and returns to the launcher.
+- **Camera:** `Renderer.scriptedPitch` makes the renderer ignore the head for the run
+  (this pitch, no head yaw or tilt, no head offset, no eye separation, no body), so the
+  player moving their head doesn't matter.
+- **Not shipped:** the pictures are made from the player's own game and stay on the device.
+
+The plan this belongs to (windowed play, the engine core split from CompositorServices) is
+in `docs/plans/windowed-mode-and-chapter-shots.md`.

@@ -415,3 +415,41 @@ struct ConsoleCard: View {
         text = ""
     }
 }
+
+// MARK: - Chapter pictures
+
+/// Developer mode: the spots marked in the game, and the button that has the
+/// engine render a picture from each of them.
+struct ChapterPicturesCard: View {
+    @Environment(AppModel.self) private var appModel
+    let game: GameEntry
+    var body: some View {
+        let runner = appModel.chapterPictures
+        let store = ChapterShotStore.shared
+        let spots = store.shots.filter { $0.game.lowercased() == game.gamedir.lowercased() }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Chapter pictures").font(.title3.weight(.semibold))
+            Text("In the game, open the weapon wheel and pick SHOT to mark where a chapter's picture should be taken. \(spots.count) marked for \(game.info.title).")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Button(runner.isRunning ? "Stop" : "Make pictures") {
+                    if runner.isRunning { runner.cancel() }
+                    else { runner.start(appModel: appModel, game: game, shots: store.shots) }
+                }
+                .disabled(spots.isEmpty || (!runner.isRunning && appModel.isPreparing))
+                switch runner.state {
+                case .idle: EmptyView()
+                case .running(let done, let total, let map):
+                    ProgressView(value: Double(done), total: Double(max(total, 1)))
+                        .frame(maxWidth: 220)
+                    Text("\(map) (\(done + 1)/\(total))").font(.caption.monospaced())
+                case .finished(let made, let failed):
+                    Text(failed.isEmpty ? "Made \(made)" : "Made \(made); not made: \(failed.joined(separator: ", "))")
+                        .font(.caption)
+                case .failed(let message):
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+}

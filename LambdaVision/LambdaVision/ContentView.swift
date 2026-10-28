@@ -49,6 +49,7 @@ struct ContentView: View {
                     ChapterPicker(game: game)
                     SavedGames(game: game)
                     ConsoleCard()
+                    if appModel.gameSettings.developerMode { ChapterPicturesCard(game: game) }
                     GameLibraryList()
                 }
 

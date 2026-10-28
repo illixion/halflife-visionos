@@ -108,7 +108,7 @@ nonisolated final class GamepadInput {
         let rs = SIMD2(pad.rightThumbstick.xAxis.value, pad.rightThumbstick.yAxis.value)
         if let picked = wheel.update(held: pad.leftShoulder.isPressed && !typing, stick: rs, now: now,
                                      makeEntries: { Renderer.weaponWheelEntries() }) {
-            _ = WeaponWheel.command(for: picked.action).withCString { lambda_gl_worker_cmd($0) }
+            WeaponWheel.perform(picked.action)
             AppLog.input.debug("[Wheel] pad picked \(picked.label, privacy: .public)")
         }
 

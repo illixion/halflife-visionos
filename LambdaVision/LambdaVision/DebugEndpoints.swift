@@ -1044,6 +1044,72 @@ enum DebugEndpoints {
                 }
                 return ["started": JSONValue.bool(true), "saves": .array(app.saves.slots.map { .string("\($0.name) \($0.map ?? "?")") })]
             },
+            .query("chaptershots", "The chapter picture spots (map, camera origin, angles) as the file `Launcher/ChapterShots.json` holds them, the pictures made so far and the picture run's state.",
+                   releaseSafe: true) { _ in
+                let store = ChapterShotStore.shared
+                let file = try? JSONSerialization.jsonObject(with: store.exportJSON())
+                func json(_ any: Any?) -> JSONValue {
+                    switch any {
+                    case let n as NSNumber where CFGetTypeID(n) == CFBooleanGetTypeID(): return .bool(n.boolValue)
+                    case let n as NSNumber: return .double(n.doubleValue)
+                    case let s as String: return .string(s)
+                    case let a as [Any]: return .array(a.map { json($0) })
+                    case let d as [String: Any]: return .object(d.mapValues { json($0) })
+                    default: return .null
+                    }
+                }
+                let app = try model()
+                let state: String
+                switch app.chapterPictures.state {
+                case .idle: state = "idle"
+                case .running(let d, let t, let m): state = "running \(d)/\(t) \(m)"
+                case .finished(let made, let failed): state = "finished: made \(made), not made \(failed.joined(separator: ","))"
+                case .failed(let why): state = "failed: \(why)"
+                }
+                let made = store.shots.filter { ChapterPictures.existing(gamedir: $0.game, map: $0.map) != nil }.map(\.id)
+                let reply: [String: JSONValue] = ["file": json(file), "pictures": .array(made.map { .string($0) }), "run": .string(state)]
+                return reply
+            },
+            .command("markshot", "Mark the engine's current camera as the picture spot for the map you are in (what the weapon wheel's SHOT does).") { _ in
+                guard let shot = ChapterShotStore.shared.markHere() else {
+                    throw DebugError.failedPrecondition(ChapterShotStore.shared.lastMessage ?? "not in a map",
+                                                        hint: "POST /launch with a map, wait for GET /state to show it loaded")
+                }
+                let reply: [String: JSONValue] = ["marked": .string(shot.id), "origin": .array(shot.origin.map { .double(Double($0)) }),
+                                                  "angles": .array(shot.angles.map { .double(Double($0)) })]
+                return reply
+            },
+            .command("setshot", "Set a chapter's picture spot by hand: game, map, origin \"x y z\" and angles \"pitch yaw\".",
+                     parameters: [.string("game", "the gamedir", required: true), .string("map", "the map", required: true),
+                                  .string("origin", "x y z, engine units", required: true),
+                                  .string("angles", "pitch yaw (degrees, pitch down is positive)", required: true)]) { args in
+                let nums: (String) -> [Float] = { $0.split(separator: " ").compactMap { Float($0) } }
+                let o = nums(try args.requireString("origin")), a = nums(try args.requireString("angles"))
+                guard o.count == 3, a.count == 2 else {
+                    throw DebugError.invalidArgument("origin needs 3 numbers and angles 2", hint: "origin=\"100 -200 64\" angles=\"10 90\"")
+                }
+                ChapterShotStore.shared.set(ChapterShot(game: try args.requireString("game").lowercased(),
+                                                        map: try args.requireString("map").lowercased(),
+                                                        origin: o, angles: [a[0], a[1], 0]))
+                let reply: [String: JSONValue] = ["shots": .int(ChapterShotStore.shared.shots.count)]
+                return reply
+            },
+            .command("removeshot", "Remove a chapter's picture spot (the local file's entry; a spot the app ships comes back on reload).",
+                     parameters: [.string("game", "the gamedir", required: true), .string("map", "the map", required: true)]) { args in
+                ChapterShotStore.shared.remove("\(try args.requireString("game").lowercased())/\(try args.requireString("map").lowercased())")
+                let reply: [String: JSONValue] = ["shots": .int(ChapterShotStore.shared.shots.count)]
+                return reply
+            },
+            .command("makepictures", "Have the engine render a picture from each marked spot of the selected game (opens the game if closed, loads each map, then returns to the launcher). Returns at once; poll GET /chaptershots.",
+                     parameters: [.string("map", "only this map")]) { args in
+                let app = try model()
+                guard let game = app.library.selectedGame else { throw DebugError.failedPrecondition("no game selected", hint: "import a game first") }
+                var shots = ChapterShotStore.shared.shots
+                if let only = args.string("map") { shots = shots.filter { $0.map.lowercased() == only.lowercased() } }
+                app.chapterPictures.start(appModel: app, game: game, shots: shots)
+                let reply: [String: JSONValue] = ["started": .bool(app.chapterPictures.isRunning)]
+                return reply
+            },
             .command("window", "Open or close one of the app's windows, and for Settings choose the page it shows (`page`: presets, graphics, reflections, immersion, hands, keyboardMouse, audio, troubleshooting, developer). For looking at them with _screenshot.",
                      parameters: [.string("id", "the window", required: true,
                                           choices: ["main", "settings", "console", "performance"]),

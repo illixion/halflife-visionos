@@ -729,7 +729,8 @@ actor Renderer {
         var hud = lambda_hud_state_t()
         lambda_hud_state(&hud)
         return WeaponWheel.entries(slots: slots, selectionAllowed: n > 0 && allowed != 0,
-                                   hasSuit: hud.has_suit != 0, utilities: weaponWheelUtilities)
+                                   hasSuit: hud.has_suit != 0, utilities: weaponWheelUtilities,
+                                   markShot: debugPanelEnabled)
     }
 
     nonisolated static func requestSnapTurn(_ direction: Float) {
@@ -957,6 +958,10 @@ actor Renderer {
     // box to a render-target pixel, which the engine's menu treats as the
     // mouse (Lambda_Bridge lambda_menu_*). These inputs are refreshed each
     // frame from the render thread; the map runs on the spatial-event thread.
+    /// While set, the engine's camera ignores the head: this pitch, no yaw
+    /// from the head, no tilt, no head offset, no eye separation, and the
+    /// body isn't posed. ChapterPictureRunner makes the chapter pictures with it.
+    nonisolated(unsafe) static var scriptedPitch: Float? = nil
     nonisolated(unsafe) static var latestHeadTransform: simd_float4x4? = nil
     nonisolated(unsafe) static var renderTargetW: Int = 0
     nonisolated(unsafe) static var renderTargetH: Int = 0
@@ -2864,7 +2869,7 @@ actor Renderer {
                 up: wheelHead.map { SIMD3($0.columns.1.x, $0.columns.1.y, $0.columns.1.z) } ?? SIMD3(0, 1, 0),
                 now: presentTime, tuning: wheelTuning,
                 makeEntries: { Renderer.weaponWheelEntries() }) {
-                _ = WeaponWheel.command(for: picked.action).withCString { lambda_gl_worker_cmd($0) }
+                WeaponWheel.perform(picked.action)
                 AppLog.input.debug("[Wheel] picked \(picked.label, privacy: .public)")
             }
             let weaponMenuOpen = weaponWheel.isOpen
@@ -3130,9 +3135,16 @@ actor Renderer {
         // The first-person body, posed before the eyes so the engine's
         // mirrors show it as the weapon pass draws it. Its grip and the
         // game's ground under it are as of the last tick.
-        frameBody = avatarBodyDraw(deviceAnchor: frameDeviceAnchor, time: presentTime,
-                                   gripFingers: avatarGripFingers())
+        frameBody = Renderer.scriptedPitch != nil ? nil
+            : avatarBodyDraw(deviceAnchor: frameDeviceAnchor, time: presentTime,
+                             gripFingers: avatarGripFingers())
         avatarMirrorPublish(deviceAnchor: frameDeviceAnchor, views: primary.views)
+
+        let scripted = Renderer.scriptedPitch
+        if let pitch = scripted {
+            headAngles = SIMD3<Float>(min(max(pitch, -89), 89), 0, 0)
+            headOffset = .zero
+        }
 
         for eye in 0..<2 where !engineHeld {
             // GPU-side fence for this eye: the bridge signals angleFenceEvent
@@ -3147,7 +3159,7 @@ actor Renderer {
             // so reading the actual x value auto-derives the sign instead
             // of assuming view[0] = left eye.
             let eyeApple_x = primary.views[eye].transform.columns.3.x
-            let off: Float = eyeApple_x * appleToXash
+            let off: Float = scripted != nil ? 0 : eyeApple_x * appleToXash
             let eyePtr = Unmanaged.passUnretained(colorMapLayerViews[eye]).toOpaque()
             lambda_gl_worker_set_depth_texture(Unmanaged.passUnretained(engineDepthLayerViews[eye]).toOpaque())
             // Foveated: the eye's own one-layer map (EngineFoveation keeps it

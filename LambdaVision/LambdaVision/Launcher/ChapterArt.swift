@@ -2,9 +2,10 @@
 //  ChapterArt.swift
 //  LambdaVision
 //
-//  The picture on a chapter card (and the launcher's banner). A file named
-//  `chapter-<gamedir>-<map>` in Previews wins (a screenshot, see
-//  docs/settings-previews.md); without one the card draws its own art: the
+//  The picture on a chapter card (and the launcher's banner). The one the
+//  engine made on this device (ChapterPictureRunner) wins, then a file named
+//  `chapter-<gamedir>-<map>` in Previews (see docs/settings-previews.md);
+//  without either the card draws its own art: the
 //  game's colour, the chapter's number and the lambda, so a fresh install
 //  already looks like a game and nothing of Valve's is shipped.
 //
@@ -22,13 +23,23 @@ struct ChapterArt: View {
         // picture of any shape) is clipped to the card instead of making it.
         Color.clear
             .overlay {
-                if let found = PreviewAssets.find("chapter-\(gamedir.lowercased())-\(chapter.map)") {
+                // The picture the engine made on this device, then one named in Previews.
+                if let made = madePicture {
+                    PreviewMediaFile(found: .image(made))
+                        .id(ChapterPictures.shared.version)
+                } else if let found = PreviewAssets.find("chapter-\(gamedir.lowercased())-\(chapter.map)") {
                     PreviewMediaFile(found: found)
                 } else {
                     generated
                 }
             }
             .clipped()
+    }
+
+    /// Reads `version` so the card redraws when a picture is written.
+    private var madePicture: URL? {
+        _ = ChapterPictures.shared.version
+        return ChapterPictures.existing(gamedir: gamedir, map: chapter.map)
     }
 
     private var accent: Color { Self.accent(for: gamedir) }
