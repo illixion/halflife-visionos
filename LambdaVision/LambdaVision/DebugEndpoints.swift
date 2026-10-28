@@ -57,7 +57,9 @@ enum LambdaDebugServer {
 enum DebugEndpoints {
     static func register(appModel: AppModel,
                          openImmersive: @escaping @MainActor () async -> Bool,
-                         dismissImmersive: @escaping @MainActor () async -> Void) {}
+                         dismissImmersive: @escaping @MainActor () async -> Void,
+                         openWindow: @escaping @MainActor (String) -> Void,
+                         dismissWindow: @escaping @MainActor (String) -> Void) {}
 }
 #else
 import DebugTrace
@@ -356,16 +358,22 @@ enum DebugEndpoints {
     private static weak var appModel: AppModel?
     private static var openImmersive: (@MainActor () async -> Bool)?
     private static var dismissImmersive: (@MainActor () async -> Void)?
+    private static var openWindow: (@MainActor (String) -> Void)?
+    private static var dismissWindow: (@MainActor (String) -> Void)?
     private static var registered = false
 
     /// Registers the table on `DebugSurface.shared`. Called from the main
     /// window (it owns the immersive-space actions); safe to call again.
     static func register(appModel: AppModel,
                          openImmersive: @escaping @MainActor () async -> Bool,
-                         dismissImmersive: @escaping @MainActor () async -> Void) {
+                         dismissImmersive: @escaping @MainActor () async -> Void,
+                         openWindow: @escaping @MainActor (String) -> Void,
+                         dismissWindow: @escaping @MainActor (String) -> Void) {
         self.appModel = appModel
         self.openImmersive = openImmersive
         self.dismissImmersive = dismissImmersive
+        self.openWindow = openWindow
+        self.dismissWindow = dismissWindow
         guard !registered else { return }
         registered = true
         DebugSurface.shared.register(endpoints())
@@ -1025,6 +1033,30 @@ enum DebugEndpoints {
                     _ = await waitFor(5) { app.immersiveSpaceState == .closed }
                 }
                 return try stateReply()
+            },
+            .command("window", "Open or close one of the app's windows, and for Settings choose the page it shows (`page`: presets, graphics, reflections, immersion, hands, keyboardMouse, audio, gameMenu, troubleshooting, developer). For looking at them with _screenshot.",
+                     parameters: [.string("id", "the window", required: true,
+                                          choices: ["main", "settings", "console", "performance"]),
+                                  .boolean("open", "true = open, false = close", required: true),
+                                  .string("page", "Settings only: the page to show")]) { args in
+                let app = try model()
+                let id = try args.requireString("id")
+                let open = try args.requireBool("open")
+                if open {
+                    if let page = args.string("page") {
+                        guard let known = SettingsView.Page(rawValue: page) else {
+                            throw DebugError.invalidArgument("'page' '\(page)' isn't a Settings page",
+                                                             hint: "one of \(SettingsView.Page.allCases.map(\.rawValue).joined(separator: ", "))")
+                        }
+                        app.settingsPageRequest = known
+                    }
+                    guard let openWindow else { throw DebugError.unavailable("the main window isn't up", hint: "open the app's main window") }
+                    openWindow(id)
+                } else {
+                    guard let dismissWindow else { throw DebugError.unavailable("the main window isn't up", hint: "open the app's main window") }
+                    dismissWindow(id)
+                }
+                return ["window": JSONValue.string(id), "open": .bool(open)]
             },
         ]
     }

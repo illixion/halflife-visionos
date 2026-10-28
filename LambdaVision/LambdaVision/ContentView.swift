@@ -18,6 +18,7 @@ struct ContentView: View {
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
 
     @State private var showImporter = false
     @State private var showWiFi = false
@@ -141,7 +142,9 @@ struct ContentView: View {
                                         openImmersive: { [openImmersiveSpace, appModel] in
                                             await openImmersiveSpace(id: appModel.immersiveSpaceID) == .opened
                                         },
-                                        dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() })
+                                        dismissImmersive: { [dismissImmersiveSpace] in await dismissImmersiveSpace() },
+                                        openWindow: { [openWindow] in openWindow(id: $0) },
+                                        dismissWindow: { [dismissWindow] in dismissWindow(id: $0) })
                 InputCatcher.shared.start(appModel: appModel)
                 await appModel.prepare()
                 appModel.library.watchForAssetUploads()

@@ -30,6 +30,14 @@ class AppModel {
     /// Renderer-static knobs before the immersive space opens.
     let gameSettings = GameSettings()
 
+    /// A Settings page to show the next time the window looks (the debug
+    /// API's `window` command, and later links from the launcher); the
+    /// window clears it once it has moved there.
+    var settingsPageRequest: SettingsView.Page?
+
+    /// Saved and shipped settings presets (Settings › Presets).
+    let presets = PresetStore()
+
     /// Set by Renderer.ensureEngineInitialized() when the Xash engine can't
     /// start — most commonly the Half-Life assets aren't on this device yet
     /// (push-assets.sh copies them to Documents/GameData separately from the

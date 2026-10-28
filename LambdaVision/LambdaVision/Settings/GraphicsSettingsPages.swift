@@ -3,7 +3,9 @@
 //  LambdaVision
 //
 //  Settings › Graphics (resolution, edge smoothing, colour, depth) and
-//  Settings › Reflections & Water (the modern-lighting prototypes).
+//  Settings › Reflections & Water (the modern-lighting prototypes). What
+//  each control does is said in the preview column (SettingHelp), so the
+//  footers here are one line at most.
 //
 //  Foveated rendering, render scale and MSAA size or format the render
 //  targets, so they take effect when the immersive space reopens;
@@ -18,68 +20,50 @@ struct GraphicsSettingsPage: View {
 
     var body: some View {
         @Bindable var settings = appModel.gameSettings
-        SettingsPage("Graphics") {
-            Section {
+        SettingsPage("Graphics", preview: "foveatedEngine") {
+            Section("Resolution") {
                 Toggle("Foveated rendering", isOn: $settings.foveatedEngine)
+                    .previews("foveatedEngine", value: settings.foveatedEngine)
                 SettingsSlider("Render scale", $settings.renderScale, 0.5...1.0, 0.05) {
                     String(format: "%.0f%%", $0 * 100)
                 }
                 .disabled(settings.foveatedEngine)
-            } header: {
-                Text("Resolution")
-            } footer: {
-                Text("Render scale resizes the render targets, so it applies when the immersive space restarts — you'll be offered a reload on closing.")
+                .previews("renderScale", value: settings.renderScale)
             }
 
             // Anti-aliasing: every way of smoothing edges belongs in this
-            // section, with its explanation in the footer.
-            Section {
-                // No MetalFX toggle here on purpose: the optional
-                // FXAA-pass → MetalFX-spatial chain added two
-                // full-logical-resolution passes per eye and measured
-                // ~13-14 ms GPU/frame (~50 FPS), and its upscale to the
-                // full drawable fought the compositor's own foveated
-                // upsampling. GameSettings.metalFXEnabled forces it off
-                // at startup; the scaler code stays compiled in case a
-                // cheaper configuration brings it back. Edge smoothing is
-                // the FXAA choice below, folded into the composite pass.
+            // section. No MetalFX toggle here on purpose: the optional
+            // FXAA-pass → MetalFX-spatial chain added two
+            // full-logical-resolution passes per eye and measured
+            // ~13-14 ms GPU/frame (~50 FPS), and its upscale to the
+            // full drawable fought the compositor's own foveated
+            // upsampling. GameSettings.metalFXEnabled forces it off
+            // at startup; the scaler code stays compiled in case a
+            // cheaper configuration brings it back. Edge smoothing is
+            // the FXAA choice below, folded into the composite pass.
+            Section("Edge smoothing") {
                 Picker("Edge smoothing", selection: $settings.edgeSmoothing) {
                     ForEach(EdgeSmoothing.allCases) { Text($0.label).tag($0) }
                 }
-            } header: {
-                Text("Edge smoothing")
-            } footer: {
-                Text("4× MSAA smooths the edges of the geometry itself, thin wires, rails and grates included, at a small GPU cost; it applies when the immersive space restarts. FXAA runs inside the pass that already draws the game to the display, softens the stair-steps that remain and applies immediately; turn it off if distant HUD or console text looks soft.")
+                .previews("edgeSmoothing", value: settings.edgeSmoothing)
             }
 
-            Section {
-                ProgressiveImmersionToggle()
-            } header: {
-                Text("Immersion")
-            } footer: {
-                Text("Opens the game as a portal you widen or narrow with the Digital Crown, with your room showing around it, instead of filling your whole view. It applies when the immersive space restarts. If the portal stays one size or shows black, see Troubleshooting.")
-            }
-
-            Section {
+            Section("Colour") {
                 Toggle("Linear colour", isOn: $settings.linearColor)
+                    .previews("linearColor", value: settings.linearColor)
                 SettingsSlider("Gamma", $settings.gamma, 1.8...3.6, 0.1) {
                     String(format: "%.1f", $0)
                 }
+                .previews("gamma", value: settings.gamma)
                 SettingsSlider("Brightness", $settings.brightness, 0.0...1.0, 0.05) {
                     String(format: "%.2f", $0)
                 }
-            } header: {
-                Text("Colour")
-            } footer: {
-                Text("Linear colour shows the game's shading as it was drawn for a CRT, with true darks; off is the older, lifted look. Gamma may want retuning after switching it.")
+                .previews("brightness", value: settings.brightness)
             }
 
-            Section {
+            Section("Depth") {
                 Toggle("Per-pixel reprojection depth", isOn: $settings.reprojectionDepth)
-            } header: {
-                Text("Depth")
-            } footer: {
-                Text("Per-pixel reprojection depth tells the headset how far away each pixel is, so near walls and the gun hold still when you move your head between frames; off treats the whole image as distant, as before.")
+                    .previews("reprojectionDepth", value: settings.reprojectionDepth)
             }
         }
     }
@@ -90,32 +74,37 @@ struct ReflectionSettingsPage: View {
 
     var body: some View {
         @Bindable var settings = appModel.gameSettings
-        SettingsPage("Reflections & Water") {
+        SettingsPage("Reflections & Water", preview: "glassReflections") {
             Section {
                 Toggle("Glass reflections (prototype)", isOn: $settings.glassReflections)
+                    .previews("glassReflections", value: settings.glassReflections)
                 Toggle("Water reflections (prototype)", isOn: $settings.waterReflections)
+                    .previews("waterReflections", value: settings.waterReflections)
                 Toggle("Sharp water reflections", isOn: $settings.sharpWaterReflections)
                     .disabled(!settings.waterReflections)
+                    .previews("sharpWaterReflections", value: settings.sharpWaterReflections)
                 Toggle("Sharp glass reflections", isOn: $settings.sharpGlassReflections)
                     .disabled(!settings.glassReflections)
+                    .previews("sharpGlassReflections", value: settings.sharpGlassReflections)
                 Picker("Sharp reflection method", selection: $settings.waterMirrorMethod) {
                     ForEach(WaterMirrorMethod.allCases) { Text($0.label).tag($0) }
                 }
                 .disabled(!(settings.waterReflections && settings.sharpWaterReflections)
                           && !(settings.glassReflections && settings.sharpGlassReflections))
+                .previews("waterMirrorMethod", value: settings.waterMirrorMethod)
             } footer: {
-                Text("Glass reflections add a reflection to windows and glass, strongest at glancing angles, like real glass; water reflections do the same for water, with gentle ripples (Water ripples; 0 is a still mirror), and Sharp water reflections mirror what you see in flat water instead of only the room's general shape. Sharp glass reflections do the same for windows when the method is Rendered or Ray traced: Rendered draws the view again from your mirror image for the window or water filling most of your view, Ray traced follows every reflected ray (fast on chips with ray-tracing hardware). Otherwise glass reflects a snapshot of the room around you, which bends what is close to the pane. Both are prototypes of modern lighting.")
+                Text("Both are prototypes of modern lighting.")
             }
 
             Section {
                 SettingsSlider("Water ripples", $settings.waterRipples, 0.0...3.0, 0.25) {
                     String(format: "%.2g×", $0)
                 }
+                .previews("waterRipples", value: settings.waterRipples)
                 SettingsSlider("Reflection strength", $settings.reflectionStrength, 0.5...4.0, 0.25) {
                     String(format: "%.2g×", $0)
                 }
-            } footer: {
-                Text("Reflection strength scales both: 1× is close to physical and faint in this art.")
+                .previews("reflectionStrength", value: settings.reflectionStrength)
             }
         }
     }

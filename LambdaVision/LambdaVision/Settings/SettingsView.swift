@@ -3,20 +3,22 @@
 //  LambdaVision
 //
 //  Player-facing settings, in a window of their own opened from the
-//  launcher's gear button (LambdaVisionApp, id "settings"). A short first
-//  page of rows, each opening a page of its own, the way Hypnos's Settings
-//  is laid out: one scrolling sheet had grown to six sections and footers
-//  longer than the controls above them.
+//  launcher's gear button (LambdaVisionApp, id "settings"). A sidebar of
+//  pages on the left, the page's controls in the middle and, on most pages,
+//  a preview column on the right (PreviewPane) that shows what the setting
+//  you are on looks like. The first page is Presets: whole sets of settings
+//  to save, load and share.
 //
 //  Controls bind straight to the @Observable GameSettings; each property's
 //  didSet persists to AppSettingsStore and pushes the change to the running
 //  game, so there's no separate save step here. The pages are in this
 //  folder; SettingsPage.swift has the page shape and the slider row.
 //
-//  Foveated rendering and render scale only take effect when the immersive
-//  space restarts. The window snapshots both when it opens and, while the
-//  game is running, offers the reload: on Done, as the sheet did, and as a
-//  row at the top of this page, since a window can stay up while playing.
+//  Foveated rendering, render scale, MSAA and progressive immersion only
+//  take effect when the immersive space restarts. The window snapshots them
+//  when it opens and, while the game is running, offers the reload: on
+//  Done, and as a row at the top of the sidebar, since a window can stay up
+//  while playing.
 //
 
 import SwiftUI
@@ -38,17 +40,21 @@ struct SettingsView: View {
     @State private var snapProgressive = false
     @State private var showReloadPrompt = false
 
-    enum Page: Hashable {
-        case graphics, reflections, body, audio
-        case hands, keyboardMouse
+    @State private var selection: Page? = .presets
+    @State private var focus = PreviewFocus()
+
+    enum Page: String, Hashable, CaseIterable {
+        case presets
+        case graphics, reflections, immersion
+        case hands, keyboardMouse, audio
         case gameMenu, troubleshooting, developer
     }
 
     var body: some View {
         let settings = appModel.gameSettings
 
-        NavigationStack {
-            Form {
+        NavigationSplitView {
+            List(selection: $selection) {
                 if reloadPending {
                     Section {
                         Button {
@@ -57,45 +63,54 @@ struct SettingsView: View {
                             Label("Reload game to apply", systemImage: "arrow.clockwise")
                         }
                     } footer: {
-                        Text("Foveated rendering and render scale only take effect when the immersive space restarts.")
+                        Text("Foveated rendering, render scale, MSAA and the portal only take effect when the immersive space restarts.")
                     }
                 }
 
                 Section {
+                    row(.presets, "Presets", systemImage: "slider.horizontal.3",
+                        value: appModel.presets.active(for: settings)?.name ?? "Custom")
+                }
+
+                Section("Look") {
                     row(.graphics, "Graphics", systemImage: "sparkles.tv",
                         value: settings.foveatedEngine ? "Foveated" : SettingsSlider.percent(settings.renderScale))
                     row(.reflections, "Reflections & Water", systemImage: "drop")
-                    row(.body, "Body & Weapon", systemImage: "figure.stand")
-                    row(.audio, "Audio", systemImage: "speaker.wave.2")
+                    row(.immersion, "Immersion", systemImage: "figure.stand",
+                        value: settings.progressiveImmersion ? "Portal" : "Full view")
                 }
 
-                Section("Input") {
+                Section("Play") {
                     row(.hands, "Hands", systemImage: "hand.raised",
                         value: "\(settings.dominantHand.label) hand")
                     row(.keyboardMouse, "Keyboard, Mouse & Gamepad", systemImage: "gamecontroller",
                         value: settings.inputMode.label)
+                    row(.audio, "Audio", systemImage: "speaker.wave.2")
                 }
 
                 Section {
                     row(.gameMenu, "Menu, Maps & Console", systemImage: "list.bullet.rectangle",
                         value: settings.isEngineReady ? "" : "Game not running")
-                }
-
-                Section {
                     row(.troubleshooting, "Troubleshooting", systemImage: "wrench.and.screwdriver")
                     row(.developer, "Developer", systemImage: "hammer")
                 }
             }
-            .formStyle(.grouped)
             .navigationTitle("Settings")
-            .navigationDestination(for: Page.self, destination: page)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { done() }
-                }
+            .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 380)
+        } detail: {
+            page(selection ?? .presets)
+        }
+        .environment(focus)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { done() }
             }
         }
-        .onAppear { takeSnapshot() }
+        .onAppear {
+            takeSnapshot()
+            followPageRequest()
+        }
+        .onChange(of: appModel.settingsPageRequest) { followPageRequest() }
         .alert("Reload game to apply changes?", isPresented: $showReloadPrompt) {
             Button("Reload") {
                 Task {
@@ -105,7 +120,7 @@ struct SettingsView: View {
             }
             Button("Later", role: .cancel) { dismissWindow(id: Self.windowID) }
         } message: {
-            Text("Foveated rendering and render scale only take effect when the immersive space restarts.")
+            Text("Foveated rendering, render scale, MSAA and the portal only take effect when the immersive space restarts.")
         }
     }
 
@@ -122,12 +137,13 @@ struct SettingsView: View {
     @ViewBuilder
     private func page(_ page: Page) -> some View {
         switch page {
+        case .presets: PresetsPage()
         case .graphics: GraphicsSettingsPage()
         case .reflections: ReflectionSettingsPage()
-        case .body: BodySettingsPage()
-        case .audio: AudioSettingsPage()
+        case .immersion: ImmersionSettingsPage()
         case .hands: HandSettingsPage()
         case .keyboardMouse: KeyboardMouseSettingsPage()
+        case .audio: AudioSettingsPage()
         case .gameMenu: GameMenuSettingsPage()
         case .troubleshooting: TroubleshootingSettingsPage()
         case .developer: DeveloperSettingsPage()
@@ -143,6 +159,12 @@ struct SettingsView: View {
         let changed = s.renderScale != snapScale || s.foveatedEngine != snapFoveated
             || s.engineMSAA != snapMSAA || s.progressiveImmersion != snapProgressive
         return changed && appModel.immersiveSpaceState == .open
+    }
+
+    private func followPageRequest() {
+        guard let page = appModel.settingsPageRequest else { return }
+        selection = page
+        appModel.settingsPageRequest = nil
     }
 
     private func takeSnapshot() {

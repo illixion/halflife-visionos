@@ -344,7 +344,14 @@ struct LambdaVisionApp: App {
                 // freeze after a stick release (a known GCController quirk).
                 .handlesGameControllerEvents(matching: .gamepad)
                 // "Open in LambdaVision" (AirDrop, Files, Share): a game zip.
-                .onOpenURL { url in appModel.library.open(url) }
+                // or a settings preset (`.lambdapreset`), which is kept and offered.
+                .onOpenURL { url in
+                    if url.pathExtension.lowercased() == SettingsPreset.fileExtension {
+                        appModel.presets.importFromOpenedURL(url)
+                    } else {
+                        appModel.library.open(url)
+                    }
+                }
         }
         .onChange(of: scenePhase) { _, phase in LambdaDebugServer.scenePhaseChanged(phase) }
 
@@ -359,7 +366,7 @@ struct LambdaVisionApp: App {
                 .debugApprovalPrompts()
                 #endif
         }
-        .defaultSize(width: 760, height: 860)
+        .defaultSize(width: 1380, height: 860)
         .defaultLaunchBehavior(.suppressed)
 
         // In-app log viewer. This app renders through CompositorServices and
