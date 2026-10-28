@@ -1,9 +1,12 @@
 # Progressive immersion: Mac Virtual Display conflict
 
-Settings › Graphics › Immersion › "Progressive immersion (experimental)"
-opens the game in a second immersive space (`AppModel.progressiveSpaceID`,
+Settings › Graphics › Immersion › "Progressive immersion" (on by default; a
+second copy of the switch sits in Settings › Troubleshooting) opens the game in
+a second immersive space (`AppModel.progressiveSpaceID`,
 `.immersionStyle(... in: .progressive)`) whose layer is configured for the
-compositor's drawable render context. Off by default while compatibility testing continues. Oneiros parked the same feature for the same symptoms
+compositor's drawable render context. **It works. Mac Virtual Display being
+connected is what broke it** (symptoms below, 2026-10-27, were that, not the
+renderer). Oneiros parked the same feature for the same symptoms
 (`~/Projects/Oneiros/KNOWN_ISSUES.md`, 2026-08-27).
 
 ## Verified workaround (2026-10-28)
@@ -15,8 +18,8 @@ also resized normally after opening with Mac Virtual Display disconnected; no
 renderer code changes were needed. Reconnecting Mac Virtual Display reproduced
 the failure in the separate Metal 3 probe.
 
-Treat this as a system interaction, not evidence that either game's renderer
-needs replacing. Full immersion remains the fallback while Mac Virtual Display
+The Troubleshooting page says so next to the switch. Treat this as a system interaction, not evidence that either game's renderer
+needs replacing. Turning the switch off (full immersion) remains the fallback while Mac Virtual Display
 is connected. A headset restart initially restored the probe too, but is not
 necessary for the verified disconnect-and-reopen workaround. Oneiros has the
 same historical symptoms; its implementation was inspected, but Oneiros itself
@@ -102,7 +105,7 @@ and disconnecting followed by reopening the immersive space restored it. The
 working probe's stencil contains both 0 and 1 and changes with the Crown. Finally,
 the owner confirmed normal Crown resizing in the original LambdaVision renderer
 with Mac Virtual Display disconnected. No renderer changes are required for this
-workaround. Keep the toggle experimental until broader device/OS testing.
+workaround. Progressive was made the default on 2026-10-28.
 
 The source-only probe is saved locally as `build/ProgressiveImmersionProbe.zip`
 (no signing configuration); its working directory is

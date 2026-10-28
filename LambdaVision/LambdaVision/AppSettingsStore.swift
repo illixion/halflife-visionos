@@ -79,9 +79,11 @@ enum AppSettingsStore {
         set { defaults.set(newValue, forKey: engineMSAAKey) }
     }
     /// Open the game in a progressive immersive space (Digital Crown portal
-    /// with passthrough around it) instead of a full one.
+    /// with passthrough around it) instead of a full one. On by default;
+    /// Mac Virtual Display being connected breaks it (Settings ›
+    /// Troubleshooting, docs/progressive-immersion.md).
     static var progressiveImmersion: Bool {
-        get { bool(progressiveImmersionKey, false) }
+        get { bool(progressiveImmersionKey, true) }
         set { defaults.set(newValue, forKey: progressiveImmersionKey) }
     }
     /// Decode the engine's gamma-encoded image to linear light for the

@@ -41,7 +41,7 @@ struct SettingsView: View {
     enum Page: Hashable {
         case graphics, reflections, body, audio
         case hands, keyboardMouse
-        case gameMenu, developer
+        case gameMenu, troubleshooting, developer
     }
 
     var body: some View {
@@ -82,6 +82,7 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    row(.troubleshooting, "Troubleshooting", systemImage: "wrench.and.screwdriver")
                     row(.developer, "Developer", systemImage: "hammer")
                 }
             }
@@ -128,6 +129,7 @@ struct SettingsView: View {
         case .hands: HandSettingsPage()
         case .keyboardMouse: KeyboardMouseSettingsPage()
         case .gameMenu: GameMenuSettingsPage()
+        case .troubleshooting: TroubleshootingSettingsPage()
         case .developer: DeveloperSettingsPage()
         }
     }

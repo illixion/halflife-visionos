@@ -53,11 +53,11 @@ struct GraphicsSettingsPage: View {
             }
 
             Section {
-                Toggle("Progressive immersion (experimental)", isOn: $settings.progressiveImmersion)
+                ProgressiveImmersionToggle()
             } header: {
                 Text("Immersion")
             } footer: {
-                Text("Opens the game as a portal you widen or narrow with the Digital Crown, with your room showing around it, instead of filling your whole view. It applies when the immersive space restarts. Experimental: turn it off if the portal shows black or the picture is missing.")
+                Text("Opens the game as a portal you widen or narrow with the Digital Crown, with your room showing around it, instead of filling your whole view. It applies when the immersive space restarts. If the portal stays one size or shows black, see Troubleshooting.")
             }
 
             Section {
